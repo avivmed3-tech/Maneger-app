@@ -1,0 +1,1818 @@
+<!DOCTYPE html>
+<html lang="he" dir="rtl">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"/>
+<meta name="theme-color" content="#0a0e1a" id="tcm"/>
+<meta name="apple-mobile-web-app-capable" content="yes"/>
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent"/>
+<meta name="apple-mobile-web-app-title" content="ניהול קו ייצור"/>
+<meta name="mobile-web-app-capable" content="yes"/>
+<link rel="manifest" href="manifest.json"/>
+<link rel="apple-touch-icon" href="icon-192.png"/>
+<title>⚙️ ניהול קו ייצור</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.2/babel.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/xlsx-js-style@1.2.0/dist/xlsx.bundle.js"></script>
+<style>
+*{box-sizing:border-box;margin:0;padding:0;-webkit-tap-highlight-color:transparent}
+:root{
+  --c-bg:#0a0e1a;--c-card:#131829;--c-deep:#0d1120;
+  --c-border:#1e2a42;--c-border2:#283650;--c-text:#e2e8f0;--c-muted:#8b95a8;--c-dim:#5a6478;
+  --c-input-bg:#0a0e1a;--c-input-border:#283650;--c-row-hover:#151d32;
+  --c-table-border:#151d32;--c-tag-blue-bg:#152240;--c-tag-blue:#7eb8ff;
+  --c-accent:#3b82f6;--c-accent2:#06b6d4;--c-green:#10b981;--c-amber:#f59e0b;--c-red:#ef4444;
+  --safe-top:env(safe-area-inset-top,0px);
+  --safe-bottom:env(safe-area-inset-bottom,0px);
+}
+body.light-mode{
+  --c-bg:#f0f2f5;--c-card:#ffffff;--c-deep:#f7f8fa;
+  --c-border:#dde1e8;--c-border2:#c8cdd6;--c-text:#1a1f2e;--c-muted:#5a6478;--c-dim:#8b95a8;
+  --c-input-bg:#ffffff;--c-input-border:#c8cdd6;--c-row-hover:#f7f8fa;
+  --c-table-border:#ebeef2;--c-tag-blue-bg:#dbeafe;--c-tag-blue:#2563eb;
+}
+body{background:var(--c-bg);font-family:'Segoe UI',Tahoma,Arial,sans-serif;color:var(--c-text);direction:rtl;transition:background .25s,color .25s;min-height:100vh;min-height:100dvh;overflow-x:hidden}
+input,select,textarea{background:var(--c-input-bg);border:1px solid var(--c-input-border);border-radius:8px;padding:9px 12px;color:var(--c-text);font-size:14px;font-family:inherit;width:100%;outline:none;transition:background .25s,color .25s,border-color .2s;-webkit-appearance:none;appearance:none}
+input:focus,select:focus,textarea:focus{border-color:var(--c-accent)}
+select{background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='11' height='7' viewBox='0 0 11 7'%3E%3Cpath fill='%238b95a8' d='M5.5 7L0 0h11z'/%3E%3C/svg%3E");background-repeat:no-repeat;background-position:right 10px center;padding-right:30px !important;padding-left:8px}
+select option{background:var(--c-card)}
+textarea{resize:vertical;min-height:60px}
+::-webkit-scrollbar{width:4px;height:4px}
+::-webkit-scrollbar-track{background:transparent}
+::-webkit-scrollbar-thumb{background:var(--c-border2);border-radius:4px}
+table{width:100%;border-collapse:collapse;font-size:13px}
+th{padding:8px 10px;text-align:right;color:var(--c-dim);font-weight:600;font-size:11px;text-transform:uppercase;letter-spacing:.03em;border-bottom:1px solid var(--c-border);white-space:nowrap}
+td{padding:8px 10px;border-bottom:1px solid var(--c-table-border);vertical-align:middle}
+tr:last-child td{border-bottom:none}
+button{font-family:inherit;cursor:pointer}
+.dz{border:2px dashed var(--c-border2);border-radius:10px;padding:28px;text-align:center;cursor:pointer;transition:all .2s}
+.dz:hover,.dz.drag{border-color:#60a5fa;background:#1e3a5f22}
+.mob-tabs{display:none}
+.desk-nav{display:flex;flex:1}
+@media(max-width:700px){
+  .mob-tabs{display:flex;overflow-x:auto;-webkit-overflow-scrolling:touch;scrollbar-width:none}
+  .mob-tabs::-webkit-scrollbar{display:none}
+  .desk-nav{display:none}
+  .hide-mobile{display:none!important}
+  .chart-grid{grid-template-columns:1fr!important}
+  .dash-filter-sticky{top:96px!important}
+}
+@media(min-width:701px){
+  .show-mobile-only{display:none!important}
+  .dash-filter-sticky{top:52px!important}
+}
+.nav-wrapper{padding-top:var(--safe-top)}
+.main-content{padding-bottom:calc(16px + var(--safe-bottom))}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.5}}
+@keyframes fadeIn{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:none}}
+.fade-in{animation:fadeIn .3s ease-out}
+</style>
+</head>
+<body>
+<div id="root"></div>
+<script type="text/babel">
+const {useState,useEffect,useCallback,useRef,useMemo}=React;
+
+// ── Config ─────────────────────────────────────────────────────────────────
+const GS_URL=""; // <-- הכנס כאן את ה-URL של Google Apps Script החדש
+const APP_VERSION="1.0.0";
+const APP_DATE="2026-03-18";
+const FALLBACK_USERS=[
+  {id:"admin",username:"admin",password:"admin123",role:"admin",name:"מנהל מערכת",projectAccess:"all",stageAccess:"all",canEdit:true,canView:true,active:true,hourlyRate:0},
+  {id:"w1",username:"yossi",password:"1234",role:"worker",name:"יוסי כהן",projectAccess:"all",stageAccess:["s1","s2","s3"],canEdit:false,canView:true,active:true,hourlyRate:55},
+  {id:"w2",username:"dana",password:"1234",role:"worker",name:"דנה לוי",projectAccess:"all",stageAccess:["s2","s3","s4"],canEdit:false,canView:true,active:true,hourlyRate:60},
+  {id:"w3",username:"moshe",password:"1234",role:"worker",name:"משה אברהם",projectAccess:"all",stageAccess:["s4","s5","s6"],canEdit:false,canView:true,active:true,hourlyRate:50},
+  {id:"w4",username:"ronit",password:"1234",role:"worker",name:"רונית שרון",projectAccess:["p1"],stageAccess:["s1","s5","s6"],canEdit:false,canView:true,active:true,hourlyRate:65},
+  {id:"w5",username:"avi",password:"1234",role:"worker",name:"אבי מזרחי",projectAccess:["p2","p3"],stageAccess:["s2","s3"],canEdit:false,canView:true,active:true,hourlyRate:52}
+];
+const DEF_PROJ=[{id:"p1",name:"פרויקט אלפא"},{id:"p2",name:"פרויקט בטא"},{id:"p3",name:"פרויקט גמא"}];
+const DEF_STAGES=[
+  {id:"s1",name:"קליטה וקלט",order:1,color:"#3b82f6"},
+  {id:"s2",name:"הרכבה",order:2,color:"#8b5cf6"},
+  {id:"s3",name:"בדיקת חשמל",order:3,color:"#06b6d4"},
+  {id:"s4",name:"בדיקת מכנית",order:4,color:"#f59e0b"},
+  {id:"s5",name:"QC סופי",order:5,color:"#10b981"},
+  {id:"s6",name:"אריזה ומשלוח",order:6,color:"#ec4899"}
+];
+const SC={open:"#f59e0b",partial:"#3b82f6",complete:"#10b981",blocked:"#ef4444"};
+const SL={open:"פתוחה",partial:"חלקית",complete:"הושלמה",blocked:"תקועה"};
+const COLORS=["#3b82f6","#10b981","#8b5cf6","#f59e0b","#ef4444","#06b6d4","#f97316","#ec4899","#84cc16","#a78bfa"];
+const LS_PREFIX="pml_";
+
+// ── Utilities ──────────────────────────────────────────────────────────────
+const uid=()=>Math.random().toString(36).slice(2,9);
+const fmt=d=>d?new Date(d).toLocaleDateString("he-IL"):"—";
+const fmtMoney=n=>(n!=null&&n!==""&&!isNaN(n))?"₪"+Number(n).toLocaleString("he-IL",{maximumFractionDigits:0}):"—";
+const fmtTime=mins=>{if(!mins&&mins!==0)return"—";const h=Math.floor(mins/60),m=Math.round(mins%60);return h>0?`${h}:${String(m).padStart(2,"0")} שע'`:`${m} דק'`};
+const todays=()=>new Date().toISOString().slice(0,10);
+const nowISO=()=>new Date().toISOString();
+const daysBetween=(a,b)=>{if(!a||!b)return null;return Math.round((new Date(b)-new Date(a))/86400000)};
+const mkKey=d=>d?d.slice(0,7):null;
+
+// ── Storage ────────────────────────────────────────────────────────────────
+const LS={
+  get:k=>{try{const v=localStorage.getItem(LS_PREFIX+k);return v?JSON.parse(v):null}catch{return null}},
+  set:(k,v)=>{try{localStorage.setItem(LS_PREFIX+k,JSON.stringify(v))}catch{}}
+};
+function getUsers(){try{const u=localStorage.getItem(LS_PREFIX+"users");return u?JSON.parse(u):FALLBACK_USERS}catch{return FALLBACK_USERS}}
+function saveUsers(u){LS.set("users",u);if(GS_URL)fetch(GS_URL,{method:"POST",body:JSON.stringify({action:"saveUsers",users:u})}).catch(()=>{})}
+function getAuditLog(){return LS.get("audit")||[]}
+function addAuditEntry(entry){try{const log=getAuditLog();log.unshift({...entry,id:uid(),timestamp:nowISO(),reverted:false});LS.set("audit",log.slice(0,1000))}catch{}}
+
+// ── Auth Context ───────────────────────────────────────────────────────────
+const AuthCtx=React.createContext(null);
+const useAuth=()=>React.useContext(AuthCtx);
+
+// ── Shared UI ──────────────────────────────────────────────────────────────
+const Btn=({children,color="#374151",onClick,style={},disabled,small})=>(
+  <button onClick={onClick} disabled={disabled} style={{background:disabled?"#374151":color,color:"#fff",border:"none",borderRadius:8,padding:small?"6px 12px":"9px 16px",fontWeight:600,fontSize:small?12:14,opacity:disabled?.5:1,transition:"opacity .15s, filter .15s",whiteSpace:"nowrap",...style}}
+    onMouseEnter={e=>{if(!disabled)e.currentTarget.style.filter="brightness(1.15)"}}
+    onMouseLeave={e=>{e.currentTarget.style.filter="none"}}
+  >{children}</button>
+);
+const IBtn=({children,onClick,title,style={}})=>(
+  <button onClick={onClick} title={title} style={{background:"none",border:"none",fontSize:16,padding:"3px 5px",opacity:.7,lineHeight:1,...style}}
+    onMouseEnter={e=>e.currentTarget.style.opacity="1"}
+    onMouseLeave={e=>e.currentTarget.style.opacity=".7"}
+  >{children}</button>
+);
+const Field=({label,value,onChange,type="text",style={},placeholder,disabled})=>(
+  <div style={{display:"flex",flexDirection:"column",gap:4,minWidth:120,...style}}>
+    <label style={{fontSize:11,color:"var(--c-dim)",fontWeight:600}}>{label}</label>
+    <input type={type} value={value} onChange={e=>onChange(e.target.value)} placeholder={placeholder} disabled={disabled}/>
+  </div>
+);
+const Card=({children,style={}})=>(
+  <div style={{background:"var(--c-card)",borderRadius:12,padding:20,border:"1px solid var(--c-border)",...style}}>{children}</div>
+);
+const Badge=({status,large})=>{const c=SC[status]||"#8b95a8";return(
+  <span style={{background:c+"22",color:c,padding:large?"5px 14px":"3px 10px",borderRadius:20,fontSize:large?14:12,fontWeight:700,border:`1px solid ${c}55`,whiteSpace:"nowrap"}}>{SL[status]||status}</span>
+)};
+const Modal=({children,onClose,wide})=>(
+  <div onClick={onClose} style={{position:"fixed",inset:0,background:"#000000cc",zIndex:100,display:"flex",alignItems:"center",justifyContent:"center",padding:16,overflowY:"auto"}}>
+    <div onClick={e=>e.stopPropagation()} style={{background:"var(--c-card)",borderRadius:14,padding:24,maxWidth:wide?960:740,width:"100%",maxHeight:"92vh",overflowY:"auto",border:"1px solid var(--c-border)",margin:"auto"}}>{children}</div>
+  </div>
+);
+const PBar=({pct,h=6,color})=>{const bg=color||(pct>=100?"#10b981":pct>50?"#3b82f6":"#f59e0b");return(
+  <div style={{height:h,background:"var(--c-border)",borderRadius:h/2,overflow:"hidden"}}>
+    <div style={{width:`${Math.min(100,Math.max(0,pct))}%`,height:"100%",background:bg,borderRadius:h/2,transition:"width .4s"}}/>
+  </div>
+)};
+const KpiBox=({i,v,label,c,sub})=>(
+  <div style={{background:"var(--c-card)",borderRadius:12,padding:"14px 12px",border:`1px solid ${c}33`}}>
+    <div style={{fontSize:20,marginBottom:4}}>{i}</div>
+    <div style={{fontSize:20,fontWeight:700,color:c,wordBreak:"break-word"}}>{v}</div>
+    <div style={{fontSize:11,color:"var(--c-muted)",marginTop:2}}>{label}</div>
+    {sub&&<div style={{fontSize:10,color:"var(--c-dim)",marginTop:2}}>{sub}</div>}
+  </div>
+);
+const Tile=({icon,label,value,sub,color="#60a5fa",warn})=>(
+  <div style={{background:"var(--c-deep)",borderRadius:10,padding:"11px 12px",border:`1px solid ${warn?"#ef444444":color+"33"}`}}>
+    <div style={{fontSize:16,marginBottom:2}}>{icon}</div>
+    <div style={{fontSize:18,fontWeight:700,color:warn?"#ef4444":color}}>{value}</div>
+    <div style={{fontSize:11,color:"var(--c-muted)",marginTop:2,lineHeight:1.3}}>{label}</div>
+    {sub&&<div style={{fontSize:10,color:"var(--c-dim)",marginTop:2}}>{sub}</div>}
+  </div>
+);
+const SegBtn=({options,value,onChange})=>(
+  <div style={{display:"flex",flexWrap:"wrap"}}>
+    {options.map(([v,l],i)=>(
+      <button key={v} onClick={()=>onChange(v)} style={{background:value===v?"var(--c-accent)":"var(--c-card)",border:"1px solid var(--c-border2)",borderRight:i<options.length-1?"none":"1px solid var(--c-border2)",color:value===v?"#fff":"var(--c-muted)",padding:"6px 12px",fontSize:12,fontWeight:600,borderRadius:i===0?"7px 0 0 7px":i===options.length-1?"0 7px 7px 0":"0",transition:"background .15s",fontFamily:"inherit"}}>{l}</button>
+    ))}
+  </div>
+);
+
+// ── Simple Bar Chart (SVG) ─────────────────────────────────────────────────
+function BarChart({data,color,formatVal,height=130}){
+  const [hov,setHov]=useState(null);
+  if(!data||!data.length)return<div style={{height,display:"flex",alignItems:"center",justifyContent:"center",color:"var(--c-dim)",fontSize:13}}>אין נתונים</div>;
+  const padL=36,padR=12,padT=20,padB=44,W=480,H=height+padT+padB;
+  const maxV=Math.max(...data.map(d=>d.value),1);
+  const mag=Math.pow(10,Math.floor(Math.log10(maxV)));
+  const niceMax=Math.ceil(maxV/mag)*mag;
+  const grids=[0,.25,.5,.75,1].map(f=>Math.round(niceMax*f));
+  const slotW=(W-padL-padR)/data.length;
+  const bw=Math.min(40,slotW*.55);
+  const bx=i=>padL+i*slotW+slotW/2-bw/2;
+  const bh=v=>Math.max((v/niceMax)*height,2);
+  const by=v=>padT+height-bh(v);
+  const fmtA=v=>v>=1e6?(v/1e6).toFixed(1)+"M":v>=1e3?(v/1e3).toFixed(0)+"K":""+v;
+  const MN=["","ינו","פבר","מרץ","אפר","מאי","יונ","יול","אוג","ספט","אוק","נוב","דצמ"];
+  const fmtL=l=>{if(/^\d{4}-\d{2}$/.test(l)){const[y,m]=l.split("-");return MN[+m]+"'"+y.slice(2)}return l};
+  return(
+    <svg viewBox={`0 0 ${W} ${H}`} style={{width:"100%",height:"auto",display:"block"}}>
+      {grids.map((v,i)=>{const y=padT+height-(v/niceMax)*height;return(<g key={i}><line x1={padL} y1={y} x2={W-padR} y2={y} stroke={i===0?"var(--c-border)":"var(--c-border)"} strokeWidth={i===0?1.5:1} strokeDasharray={i===0?"":"3 3"} opacity={i===0?1:.3}/><text x={padL-6} y={y+4} textAnchor="end" fill="var(--c-dim)" fontSize={10} fontFamily="sans-serif">{fmtA(v)}</text></g>)})}
+      {data.map((d,i)=>{const x=bx(i),h=bh(d.value),y=by(d.value),isH=hov===i;return(
+        <g key={i} onMouseEnter={()=>setHov(i)} onMouseLeave={()=>setHov(null)} style={{cursor:"pointer"}}>
+          {isH&&<rect x={x-3} y={y-3} width={bw+6} height={h+3} rx={5} fill={color} opacity={0.12}/>}
+          <rect x={x} y={y} width={bw} height={h} rx={4} fill={isH?color:color+"bb"}/>
+          {isH&&(()=>{const tw=80,tx=Math.min(Math.max(bx(i)+bw/2-tw/2,padL),W-padR-tw);return(<g><rect x={tx} y={y-34} width={tw} height={26} rx={5} fill="var(--c-deep)" stroke={color} strokeWidth={1}/><text x={tx+tw/2} y={y-17} textAnchor="middle" fill={color} fontSize={11} fontWeight="700" fontFamily="sans-serif">{formatVal(d.value)}</text></g>)})()}
+        </g>
+      )})}
+      <line x1={padL} y1={padT+height} x2={W-padR} y2={padT+height} stroke="var(--c-border)" strokeWidth={1.5}/>
+      {data.map((d,i)=><text key={i} x={bx(i)+bw/2} y={padT+height+20} textAnchor="middle" fill="var(--c-muted)" fontSize={11} fontWeight="600" fontFamily="sans-serif">{fmtL(d.label)}</text>)}
+    </svg>
+  );
+}
+
+// ── Donut Chart ────────────────────────────────────────────────────────────
+function DonutChart({data,size=180}){
+  const [hov,setHov]=useState(null);
+  const total=data.reduce((s,d)=>s+d.value,0);
+  if(!total||!data.length)return<div style={{height:size,display:"flex",alignItems:"center",justifyContent:"center",color:"var(--c-dim)",flexDirection:"column",gap:8}}><span style={{fontSize:28}}>📊</span><span style={{fontSize:13}}>אין נתונים</span></div>;
+  const R=size/2-10,r=R*.58,cx=size/2,cy=size/2;
+  let angle=-Math.PI/2;
+  const slices=data.map((d,i)=>{
+    const pct=d.value/total,start=angle;angle+=pct*2*Math.PI;const end=angle,large=pct>.5?1:0;
+    const x1=cx+R*Math.cos(start),y1=cy+R*Math.sin(start),x2=cx+R*Math.cos(end),y2=cy+R*Math.sin(end);
+    const xi=cx+r*Math.cos(start),yi=cy+r*Math.sin(start),xo=cx+r*Math.cos(end),yo=cy+r*Math.sin(end);
+    const path=pct>=.9999?`M${cx},${cy-R} A${R},${R} 0 1,1 ${cx-.001},${cy-R} Z`:`M${xi},${yi} L${x1},${y1} A${R},${R} 0 ${large},1 ${x2},${y2} L${xo},${yo} A${r},${r} 0 ${large},0 ${xi},${yi} Z`;
+    return{...d,path,color:d.color||COLORS[i%COLORS.length],pct};
+  });
+  const hS=hov!=null?slices[hov]:null;
+  return(
+    <div style={{display:"flex",gap:16,alignItems:"center",justifyContent:"center",flexWrap:"wrap"}}>
+      <svg width={size} height={size} style={{flexShrink:0}}>
+        {slices.map((s,i)=>(<path key={i} d={s.path} fill={s.color} opacity={hov===null||hov===i?1:.4} stroke="var(--c-bg)" strokeWidth={2} style={{cursor:"pointer",transition:"opacity .2s"}} onMouseEnter={()=>setHov(i)} onMouseLeave={()=>setHov(null)}/>))}
+        <circle cx={cx} cy={cy} r={r-2} fill="var(--c-card)"/>
+        {hS?(<><text x={cx} y={cy-8} textAnchor="middle" fill={hS.color} fontSize={13} fontWeight="700" fontFamily="sans-serif">{hS.label.length>12?hS.label.slice(0,11)+"…":hS.label}</text><text x={cx} y={cy+10} textAnchor="middle" fill="var(--c-text)" fontSize={11} fontFamily="sans-serif">{hS.value.toLocaleString()}</text><text x={cx} y={cy+26} textAnchor="middle" fill="var(--c-muted)" fontSize={10} fontFamily="sans-serif">{Math.round(hS.pct*100)}%</text></>):(<><text x={cx} y={cy-2} textAnchor="middle" fill="var(--c-muted)" fontSize={10} fontFamily="sans-serif">סה"כ</text><text x={cx} y={cy+14} textAnchor="middle" fill="var(--c-text)" fontSize={13} fontWeight="700" fontFamily="sans-serif">{total.toLocaleString()}</text></>)}
+      </svg>
+      <div style={{display:"flex",flexDirection:"column",gap:5,minWidth:100}}>
+        {slices.map((s,i)=>(<div key={i} style={{display:"flex",alignItems:"center",gap:7,cursor:"pointer",opacity:hov===null||hov===i?1:.4,transition:"opacity .2s"}} onMouseEnter={()=>setHov(i)} onMouseLeave={()=>setHov(null)}><div style={{width:9,height:9,borderRadius:2,background:s.color,flexShrink:0}}/><span style={{fontSize:11,color:"var(--c-muted)",flex:1}}>{s.label}</span><span style={{fontSize:11,fontWeight:700,color:s.color}}>{Math.round(s.pct*100)}%</span></div>))}
+      </div>
+    </div>
+  );
+}
+
+// ── Login Screen ───────────────────────────────────────────────────────────
+function LoginScreen({onLogin,lightMode,toggleLight}){
+  const [username,setUsername]=useState("");
+  const [password,setPassword]=useState("");
+  const [err,setErr]=useState("");
+  const [showPass,setShowPass]=useState(false);
+  const [loading,setLoading]=useState(false);
+  const attempt=async()=>{
+    setLoading(true);setErr("");
+    await new Promise(r=>setTimeout(r,200));
+    const users=getUsers();
+    const u=users.find(u=>u.username===username&&u.password===password&&u.active!==false);
+    if(!u){setErr("שם משתמש או סיסמה שגויים");setLoading(false);return}
+    addAuditEntry({userId:u.id,username:u.username,name:u.name,action:"התחברות",target:"",details:""});
+    onLogin(u);
+  };
+  const lm=lightMode;
+  return(
+    <div style={{minHeight:"100vh",minHeight:"100dvh",background:lm?"#f0f2f5":"#0a0e1a",display:"flex",alignItems:"center",justifyContent:"center",padding:16,transition:"background .3s"}}>
+      <div style={{position:"fixed",top:16,left:16,zIndex:10}}>
+        <button onClick={toggleLight} style={{background:lm?"#e2e8f0":"#131829",border:`1px solid ${lm?"#e2e8f0":"#1e2a42"}`,borderRadius:8,padding:"7px 14px",fontSize:15,color:lm?"#1a1f2e":"#8b95a8"}}>{lm?"🌙":"☀️"}</button>
+      </div>
+      <div style={{background:lm?"#ffffff":"#131829",borderRadius:20,padding:"clamp(24px,6vw,44px) clamp(20px,6vw,40px)",maxWidth:420,width:"100%",border:`1px solid ${lm?"#dde1e8":"#1e2a42"}`,boxShadow:lm?"0 8px 40px #0001":"0 20px 60px #000a"}}>
+        <div style={{textAlign:"center",marginBottom:32}}><div style={{fontSize:52,marginBottom:10}}>⚙️</div><div style={{fontSize:24,fontWeight:800,color:lm?"#1a1f2e":"#e2e8f0",letterSpacing:-.5}}>ניהול קו ייצור</div><div style={{fontSize:13,color:lm?"#5a6478":"#8b95a8",marginTop:6}}>כניסה למערכת</div></div>
+        <div style={{display:"flex",flexDirection:"column",gap:16}}>
+          <div><label style={{fontSize:12,color:"var(--c-muted)",fontWeight:600,display:"block",marginBottom:5}}>שם משתמש</label><input value={username} onChange={e=>setUsername(e.target.value)} onKeyDown={e=>e.key==="Enter"&&attempt()} placeholder="הכנס שם משתמש"/></div>
+          <div><label style={{fontSize:12,color:"var(--c-muted)",fontWeight:600,display:"block",marginBottom:5}}>סיסמה</label>
+            <div style={{position:"relative"}}><input type={showPass?"text":"password"} value={password} onChange={e=>setPassword(e.target.value)} onKeyDown={e=>e.key==="Enter"&&attempt()} placeholder="הכנס סיסמה" style={{paddingLeft:44}}/><button onClick={()=>setShowPass(p=>!p)} style={{position:"absolute",left:12,top:"50%",transform:"translateY(-50%)",background:"none",border:"none",fontSize:18,color:"var(--c-muted)",lineHeight:1}}>{showPass?"🙈":"👁️"}</button></div>
+          </div>
+          {err&&<div style={{background:lm?"#fee2e2":"#450a0a",color:lm?"#dc2626":"#fca5a5",borderRadius:8,padding:"10px 14px",fontSize:13,border:lm?"1px solid #fecaca":"1px solid #7f1d1d"}}>❌ {err}</div>}
+          <button onClick={attempt} disabled={loading} style={{background:loading?"#2563eb99":"var(--c-accent)",color:"#fff",border:"none",borderRadius:10,padding:"13px",fontWeight:700,fontSize:16,marginTop:4,fontFamily:"inherit"}}>{loading?"⏳ מתחבר...":"כניסה למערכת"}</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ══════════════════════════════════════════════════════════════════════════
+// ═══ DASHBOARD ═══════════════════════════════════════════════════════════
+// ══════════════════════════════════════════════════════════════════════════
+function Dashboard({orders,projects,stages,users,workLogs}){
+  const allSerials=orders.flatMap(o=>(o.serials||[]));
+  const totalSerials=allSerials.length;
+  const completedSerials=allSerials.filter(s=>{
+    const oStages=(orders.find(o=>o.serials?.some(sr=>sr.id===s.id))?.stageIds)||[];
+    const logs=workLogs.filter(w=>w.serialId===s.id&&w.completed);
+    return oStages.length>0&&oStages.every(sid=>logs.some(l=>l.stageId===sid));
+  }).length;
+  const totalRev=orders.reduce((s,o)=>s+((o.serials||[]).length)*Number(o.unitPrice||0)*(completedSerials>0?1:0),0);
+  const actualRev=orders.reduce((sum,o)=>{
+    const price=Number(o.unitPrice||0);
+    const completed=(o.serials||[]).filter(s=>{
+      const oStages=o.stageIds||[];
+      const logs=workLogs.filter(w=>w.serialId===s.id&&w.completed);
+      return oStages.length>0&&oStages.every(sid=>logs.some(l=>l.stageId===sid));
+    }).length;
+    return sum+completed*price;
+  },0);
+  const totalWorkMins=workLogs.filter(w=>w.completed&&w.durationMin).reduce((s,w)=>s+w.durationMin,0);
+  const totalWorkCost=workLogs.filter(w=>w.completed&&w.durationMin).reduce((s,w)=>{
+    const user=users.find(u=>u.id===w.userId);
+    const rate=Number(user?.hourlyRate||0)/60;
+    return s+w.durationMin*rate;
+  },0);
+  const openDefects=orders.flatMap(o=>(o.defects||[]).filter(d=>d.status!=="closed")).length;
+  const openOrders=orders.filter(o=>{
+    const sers=o.serials||[];
+    if(sers.length===0)return true;
+    return sers.some(s=>{
+      const oStages=o.stageIds||[];
+      const logs=workLogs.filter(w=>w.serialId===s.id&&w.completed);
+      return !oStages.every(sid=>logs.some(l=>l.stageId===sid));
+    });
+  }).length;
+
+  // Revenue by month
+  const revByMonth={};
+  workLogs.filter(w=>w.completed&&w.endTime).forEach(w=>{
+    const k=mkKey(w.endTime);if(!k)return;
+    const o=orders.find(o=>(o.serials||[]).some(s=>s.id===w.serialId));
+    if(!o)return;
+    // Only count revenue when ALL stages of that serial are done
+    const ser=o.serials?.find(s=>s.id===w.serialId);
+    if(!ser)return;
+    const allDone=(o.stageIds||[]).every(sid=>workLogs.some(l=>l.serialId===w.serialId&&l.stageId===sid&&l.completed));
+    if(!allDone)return;
+    // Avoid double counting per serial
+    const alreadyCounted=revByMonth[k]?._serials?.has(w.serialId);
+    if(alreadyCounted)return;
+    if(!revByMonth[k])revByMonth[k]={rev:0,_serials:new Set()};
+    revByMonth[k].rev+=Number(o.unitPrice||0);
+    revByMonth[k]._serials.add(w.serialId);
+  });
+  const revKeys=Object.keys(revByMonth).sort().slice(-8);
+  const revData=revKeys.map(k=>({label:k,value:revByMonth[k].rev}));
+
+  // Workers productivity
+  const workerStats=users.filter(u=>u.role!=="admin"&&u.active!==false).map(u=>{
+    const logs=workLogs.filter(w=>w.userId===u.id&&w.completed&&w.durationMin);
+    const totalMin=logs.reduce((s,w)=>s+w.durationMin,0);
+    const units=logs.length;
+    const rate=Number(u.hourlyRate||0);
+    const cost=totalMin*(rate/60);
+    const revenue=logs.reduce((s,w)=>{
+      const o=orders.find(o=>(o.serials||[]).some(sr=>sr.id===w.serialId));
+      return s+Number(o?.unitPrice||0);
+    },0);
+    return{...u,totalMin,units,cost,revenue,profit:revenue-cost,unitsPerHour:totalMin>0?(units/(totalMin/60)):0};
+  }).sort((a,b)=>b.unitsPerHour-a.unitsPerHour);
+
+  // Stage completion donut
+  const stageDonut=stages.map(st=>{
+    const completed=workLogs.filter(w=>w.stageId===st.id&&w.completed).length;
+    return{label:st.name,value:completed,color:st.color};
+  }).filter(d=>d.value>0);
+
+  return(
+    <div className="fade-in">
+      <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(130px,1fr))",gap:9,marginBottom:14}}>
+        <KpiBox i="📋" v={openOrders} label='פק"ע פתוחות' c="#f59e0b"/>
+        <KpiBox i="🔢" v={totalSerials.toLocaleString()} label='סה"כ יחידות' c="#60a5fa"/>
+        <KpiBox i="✅" v={completedSerials.toLocaleString()} label="יחידות שהושלמו" c="#10b981"/>
+        <KpiBox i="💰" v={fmtMoney(actualRev)} label="הכנסה ממומשת" c="#a78bfa"/>
+        <KpiBox i="⏱️" v={fmtTime(totalWorkMins)} label="שעות עבודה" c="#06b6d4"/>
+        <KpiBox i="💵" v={fmtMoney(totalWorkCost)} label="עלות עבודה" c="#f97316"/>
+        <KpiBox i="🔧" v={openDefects} label="תקלות פתוחות" c="#ef4444"/>
+      </div>
+
+      {/* Worker Productivity */}
+      <Card style={{marginBottom:14}}>
+        <div style={{fontWeight:700,fontSize:15,marginBottom:12}}>👥 הספק עובדים</div>
+        {workerStats.length===0?<div style={{color:"var(--c-dim)",textAlign:"center",padding:20}}>אין נתונים</div>:(
+          <div style={{overflowX:"auto"}}><table><thead><tr><th>עובד</th><th>יחידות</th><th>שעות עבודה</th><th>יח'/שעה</th><th>עלות</th><th>הכנסה</th><th>רווח</th></tr></thead><tbody>
+            {workerStats.map(w=>{const profitColor=w.profit>=0?"#10b981":"#ef4444";return(
+              <tr key={w.id}>
+                <td style={{fontWeight:600}}>{w.name}</td>
+                <td style={{color:"#60a5fa"}}>{w.units}</td>
+                <td>{fmtTime(w.totalMin)}</td>
+                <td style={{fontWeight:700,color:"#06b6d4"}}>{w.unitsPerHour.toFixed(1)}</td>
+                <td style={{color:"#f97316"}}>{fmtMoney(w.cost)}</td>
+                <td style={{color:"#a78bfa"}}>{fmtMoney(w.revenue)}</td>
+                <td style={{fontWeight:700,color:profitColor}}>{fmtMoney(w.profit)}</td>
+              </tr>
+            )})}
+          </tbody></table></div>
+        )}
+      </Card>
+
+      <div style={{display:"grid",gridTemplateColumns:"minmax(0,1.6fr) minmax(0,1fr)",gap:12,marginBottom:12}} className="chart-grid">
+        <Card>
+          <div style={{fontWeight:700,fontSize:14,marginBottom:12}}>💰 הכנסות לפי חודש</div>
+          <BarChart data={revData} color="#a78bfa" formatVal={v=>fmtMoney(v)} height={130}/>
+        </Card>
+        <Card>
+          <div style={{fontWeight:700,fontSize:14,marginBottom:10}}>📊 ביצועים לפי שלב</div>
+          <DonutChart data={stageDonut} size={170}/>
+        </Card>
+      </div>
+
+      {/* Stage progress per project */}
+      <Card style={{marginBottom:12}}>
+        <div style={{fontWeight:700,fontSize:15,marginBottom:14}}>🏗️ התקדמות לפי פרויקט</div>
+        {projects.map((p,idx)=>{
+          const po=orders.filter(o=>o.projectId===p.id);
+          const totalSer=po.reduce((s,o)=>s+(o.serials||[]).length,0);
+          const completeSer=po.reduce((s,o)=>(o.serials||[]).filter(sr=>{
+            const oStages=o.stageIds||[];
+            const logs=workLogs.filter(w=>w.serialId===sr.id&&w.completed);
+            return oStages.length>0&&oStages.every(sid=>logs.some(l=>l.stageId===sid));
+          }).length+s,0);
+          const pct=totalSer?Math.round(completeSer/totalSer*100):0;
+          const c=COLORS[idx%COLORS.length];
+          if(totalSer===0)return null;
+          return(
+            <div key={p.id} style={{background:"var(--c-deep)",borderRadius:10,padding:"12px 14px",marginBottom:8}}>
+              <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8}}>
+                <div style={{display:"flex",alignItems:"center",gap:7}}><div style={{width:9,height:9,borderRadius:2,background:c}}/><span style={{fontWeight:600,fontSize:13}}>{p.name}</span></div>
+                <span style={{fontSize:14,fontWeight:800,color:c}}>{pct}%</span>
+              </div>
+              <PBar pct={pct} h={7} color={c}/>
+              <div style={{display:"flex",justifyContent:"space-between",fontSize:11,color:"var(--c-dim)",marginTop:4}}>
+                <span>{completeSer}/{totalSer} יחידות</span>
+                <span>{po.length} פק"ע</span>
+              </div>
+            </div>
+          );
+        })}
+      </Card>
+    </div>
+  );
+}
+
+// ══════════════════════════════════════════════════════════════════════════
+// ═══ ORDERS (Work Orders / פקעות) ════════════════════════════════════════
+// ══════════════════════════════════════════════════════════════════════════
+function OrderForm({initial,projects,stages,onSave,onClose}){
+  const [f,setF]=useState({
+    woNumber:initial?.woNumber||"",description:initial?.description||"",pn:initial?.pn||"",
+    qty:initial?.qty||"",unitPrice:initial?.unitPrice||"",projectId:initial?.projectId||"",
+    receivedDate:initial?.receivedDate||todays(),targetDate:initial?.targetDate||"",
+    stageIds:initial?.stageIds||stages.map(s=>s.id)
+  });
+  const s=(k,v)=>setF(p=>({...p,[k]:v}));
+  const toggleStage=sid=>setF(p=>({...p,stageIds:p.stageIds.includes(sid)?p.stageIds.filter(i=>i!==sid):[...p.stageIds,sid]}));
+  return(
+    <div>
+      <h3 style={{margin:"0 0 16px",fontSize:18}}>{initial?'עריכת פק"ע':'פק"ע חדשה'}</h3>
+      <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(180px,1fr))",gap:12}}>
+        <Field label='מספר פק"ע *' value={f.woNumber} onChange={v=>s("woNumber",v)}/>
+        <Field label="P/N (מק״ט)" value={f.pn} onChange={v=>s("pn",v)}/>
+        <Field label="תיאור" value={f.description} onChange={v=>s("description",v)}/>
+        <Field label="כמות יחידות *" type="number" value={f.qty} onChange={v=>s("qty",v)}/>
+        <Field label="מחיר ליחידה (₪)" type="number" value={f.unitPrice} onChange={v=>s("unitPrice",v)}/>
+        <div style={{display:"flex",flexDirection:"column",gap:4}}><label style={{fontSize:11,color:"var(--c-dim)",fontWeight:600}}>פרויקט</label><select value={f.projectId} onChange={e=>s("projectId",e.target.value)}><option value="">-- בחר פרויקט --</option>{projects.map(p=><option key={p.id} value={p.id}>{p.name}</option>)}</select></div>
+        <Field label="תאריך קבלה" type="date" value={f.receivedDate} onChange={v=>s("receivedDate",v)}/>
+        <Field label="יעד אספקה" type="date" value={f.targetDate} onChange={v=>s("targetDate",v)}/>
+      </div>
+      <div style={{marginTop:14}}>
+        <label style={{fontSize:12,color:"var(--c-dim)",fontWeight:600,display:"block",marginBottom:6}}>שלבי עבודה לפק"ע זו:</label>
+        <div style={{display:"flex",flexWrap:"wrap",gap:6}}>
+          {stages.map(st=>(
+            <label key={st.id} style={{display:"flex",alignItems:"center",gap:5,fontSize:12,cursor:"pointer",background:f.stageIds.includes(st.id)?st.color+"22":"var(--c-deep)",border:`1px solid ${f.stageIds.includes(st.id)?st.color+"66":"var(--c-border)"}`,borderRadius:8,padding:"6px 10px",color:f.stageIds.includes(st.id)?st.color:"var(--c-muted)"}}>
+              <input type="checkbox" checked={f.stageIds.includes(st.id)} onChange={()=>toggleStage(st.id)} style={{width:"auto"}}/>
+              {st.name}
+            </label>
+          ))}
+        </div>
+      </div>
+      <div style={{display:"flex",gap:10,justifyContent:"flex-end",marginTop:16}}>
+        <Btn onClick={onClose}>ביטול</Btn>
+        <Btn color="#10b981" onClick={()=>{if(!f.woNumber||!f.qty)return alert('יש למלא מספר פק"ע וכמות');onSave(f)}}>שמור</Btn>
+      </div>
+    </div>
+  );
+}
+
+function SerialsManager({order,stages,onUpdate,workLogs}){
+  const {canEdit}=useAuth();
+  const [addCount,setAddCount]=useState(1);
+  const [prefix,setPrefix]=useState(order.pn||order.woNumber);
+  const [startNum,setStartNum]=useState((order.serials||[]).length+1);
+  const serials=order.serials||[];
+
+  const addSerials=()=>{
+    const newSerials=[];
+    for(let i=0;i<addCount;i++){
+      newSerials.push({id:uid(),sn:`${prefix}-${String(startNum+i).padStart(4,"0")}`,createdAt:nowISO()});
+    }
+    onUpdate({...order,serials:[...serials,...newSerials]});
+    setStartNum(startNum+addCount);
+  };
+
+  const removeSn=id=>{
+    if(!confirm("למחוק יחידה זו?"))return;
+    onUpdate({...order,serials:serials.filter(s=>s.id!==id)});
+  };
+
+  const getStageStatus=(serialId,stageId)=>{
+    const log=workLogs.find(w=>w.serialId===serialId&&w.stageId===stageId&&w.completed);
+    if(log)return{done:true,user:log.userName,time:log.endTime,duration:log.durationMin};
+    const active=workLogs.find(w=>w.serialId===serialId&&w.stageId===stageId&&!w.completed);
+    if(active)return{active:true,user:active.userName,startTime:active.startTime};
+    return{pending:true};
+  };
+
+  const oStages=(order.stageIds||[]).map(sid=>stages.find(s=>s.id===sid)).filter(Boolean).sort((a,b)=>a.order-b.order);
+
+  return(
+    <div>
+      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:12}}>
+        <h3 style={{margin:0,fontSize:15}}>🔢 מספרים סידוריים ({serials.length})</h3>
+      </div>
+      {canEdit&&(
+        <div style={{background:"var(--c-deep)",borderRadius:8,padding:12,marginBottom:12,display:"flex",gap:10,flexWrap:"wrap",alignItems:"flex-end"}}>
+          <Field label="קידומת" value={prefix} onChange={setPrefix} style={{minWidth:100}}/>
+          <Field label="מספר התחלתי" type="number" value={startNum} onChange={v=>setStartNum(Number(v))} style={{minWidth:80}}/>
+          <Field label="כמות להוספה" type="number" value={addCount} onChange={v=>setAddCount(Math.max(1,Number(v)))} style={{minWidth:80}}/>
+          <Btn color="var(--c-accent)" onClick={addSerials}>+ הוסף {addCount} יחידות</Btn>
+        </div>
+      )}
+      {serials.length===0?<div style={{color:"var(--c-dim)",textAlign:"center",padding:20}}>לא הוזנו מספרים סידוריים</div>:(
+        <div style={{overflowX:"auto"}}>
+          <table>
+            <thead><tr><th>S/N</th>{oStages.map(st=><th key={st.id} style={{color:st.color}}>{st.name}</th>)}<th>סטטוס</th>{canEdit&&<th></th>}</tr></thead>
+            <tbody>
+              {serials.map(s=>{
+                const allDone=oStages.every(st=>getStageStatus(s.id,st.id).done);
+                const anyActive=oStages.some(st=>getStageStatus(s.id,st.id).active);
+                return(
+                  <tr key={s.id}>
+                    <td style={{fontWeight:700,fontSize:12,color:"#7eb8ff"}}>{s.sn}</td>
+                    {oStages.map(st=>{
+                      const status=getStageStatus(s.id,st.id);
+                      if(status.done)return<td key={st.id} style={{textAlign:"center"}}><span title={`${status.user} — ${fmtTime(status.duration)}`} style={{color:"#10b981",fontSize:16}}>✅</span></td>;
+                      if(status.active)return<td key={st.id} style={{textAlign:"center"}}><span style={{animation:"pulse 1.5s infinite",color:"#f59e0b",fontSize:13}}>🔄 {status.user}</span></td>;
+                      return<td key={st.id} style={{textAlign:"center",color:"var(--c-dim)"}}>—</td>;
+                    })}
+                    <td style={{textAlign:"center"}}>{allDone?<span style={{color:"#10b981",fontWeight:700,fontSize:12}}>✅ הושלם</span>:anyActive?<span style={{color:"#f59e0b",fontSize:12}}>🔄 בתהליך</span>:<span style={{color:"var(--c-dim)",fontSize:12}}>ממתין</span>}</td>
+                    {canEdit&&<td><IBtn onClick={()=>removeSn(s.id)}>🗑️</IBtn></td>}
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function DefectsSection({order,onUpdate}){
+  const {canEdit}=useAuth();
+  const [showDef,setShowDef]=useState(false);
+  const [deff,setDeff]=useState({title:"",serialId:"",type:"quality",severity:"medium",description:"",responsible:"",discoveredDate:todays(),status:"open"});
+  const sevColor={low:"#10b981",medium:"#f59e0b",high:"#ef4444",critical:"#dc2626"};
+  const sevLabel={low:"🟢 נמוכה",medium:"🟡 בינונית",high:"🟠 גבוהה",critical:"🔴 קריטית"};
+  const typeLabel={quality:"איכות",process:"תהליך",material:"חומר גלם",equipment:"ציוד",human:"גורם אנושי",other:"אחר"};
+  const addDef=()=>{if(!deff.title)return;onUpdate({...order,defects:[...(order.defects||[]),{id:uid(),...deff}]});setDeff({title:"",serialId:"",type:"quality",severity:"medium",description:"",responsible:"",discoveredDate:todays(),status:"open"});setShowDef(false)};
+  const closeDef=id=>onUpdate({...order,defects:(order.defects||[]).map(d=>d.id===id?{...d,status:"closed",closedDate:todays()}:d)});
+  const remDef=id=>onUpdate({...order,defects:(order.defects||[]).filter(d=>d.id!==id)});
+  return(
+    <Card style={{border:"1px solid #f9731633"}}>
+      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:10}}>
+        <h3 style={{margin:0,fontSize:15,color:"#fb923c"}}>🔧 תקלות ({(order.defects||[]).filter(d=>d.status!=="closed").length} פתוחות)</h3>
+        {canEdit&&<Btn color="#f97316" onClick={()=>setShowDef(p=>!p)} small>+ הוסף</Btn>}
+      </div>
+      {showDef&&(
+        <div style={{background:"var(--c-deep)",borderRadius:8,padding:12,marginBottom:10,border:"1px solid #f9731633"}}>
+          <div style={{display:"flex",gap:10,flexWrap:"wrap",alignItems:"flex-end"}}>
+            <Field label="כותרת תקלה *" value={deff.title} onChange={v=>setDeff(p=>({...p,title:v}))} style={{minWidth:160}}/>
+            <div style={{display:"flex",flexDirection:"column",gap:4,minWidth:120}}>
+              <label style={{fontSize:11,color:"var(--c-dim)",fontWeight:600}}>S/N</label>
+              <select value={deff.serialId} onChange={e=>setDeff(p=>({...p,serialId:e.target.value}))}>
+                <option value="">-- כללי --</option>
+                {(order.serials||[]).map(s=><option key={s.id} value={s.id}>{s.sn}</option>)}
+              </select>
+            </div>
+            <div style={{display:"flex",flexDirection:"column",gap:4,minWidth:100}}>
+              <label style={{fontSize:11,color:"var(--c-dim)",fontWeight:600}}>סוג</label>
+              <select value={deff.type} onChange={e=>setDeff(p=>({...p,type:e.target.value}))}>{Object.entries(typeLabel).map(([k,l])=><option key={k} value={k}>{l}</option>)}</select>
+            </div>
+            <div style={{display:"flex",flexDirection:"column",gap:4,minWidth:100}}>
+              <label style={{fontSize:11,color:"var(--c-dim)",fontWeight:600}}>חומרה</label>
+              <select value={deff.severity} onChange={e=>setDeff(p=>({...p,severity:e.target.value}))}><option value="low">נמוכה</option><option value="medium">בינונית</option><option value="high">גבוהה</option><option value="critical">קריטית</option></select>
+            </div>
+            <Field label="אחראי" value={deff.responsible} onChange={v=>setDeff(p=>({...p,responsible:v}))}/>
+            <Field label="תיאור" value={deff.description} onChange={v=>setDeff(p=>({...p,description:v}))} style={{minWidth:200}}/>
+            <Btn color="#f97316" onClick={addDef}>שמור</Btn>
+            <Btn onClick={()=>setShowDef(false)}>ביטול</Btn>
+          </div>
+        </div>
+      )}
+      {(order.defects||[]).length===0?<div style={{color:"var(--c-dim)",textAlign:"center",padding:16}}>אין תקלות</div>:(
+        <div style={{display:"flex",flexDirection:"column",gap:6}}>
+          {(order.defects||[]).map(d=>{const sc=sevColor[d.severity];const serial=(order.serials||[]).find(s=>s.id===d.serialId);return(
+            <div key={d.id} style={{background:"var(--c-deep)",borderRadius:8,padding:"10px 14px",border:`1px solid ${d.status==="closed"?"#10b98133":sc+"44"}`,opacity:d.status==="closed"?.6:1}}>
+              <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",gap:8}}>
+                <div style={{flex:1}}>
+                  <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:4,flexWrap:"wrap"}}>
+                    <span style={{fontWeight:700,fontSize:13}}>{d.title}</span>
+                    <span style={{fontSize:11,background:sc+"22",color:sc,padding:"2px 8px",borderRadius:12,border:`1px solid ${sc}44`}}>{sevLabel[d.severity]}</span>
+                    <span style={{fontSize:11,background:"var(--c-card)",color:"#7eb8ff",padding:"2px 8px",borderRadius:12}}>{typeLabel[d.type]||d.type}</span>
+                    {serial&&<span style={{fontSize:11,background:"#152240",color:"#7eb8ff",padding:"2px 8px",borderRadius:12}}>S/N: {serial.sn}</span>}
+                    {d.status==="closed"&&<span style={{fontSize:11,background:"#052e16",color:"#6ee7b7",padding:"2px 8px",borderRadius:12}}>✅ נסגרה</span>}
+                  </div>
+                  {d.description&&<div style={{fontSize:12,color:"var(--c-muted)",marginBottom:3}}>{d.description}</div>}
+                  <div style={{fontSize:11,color:"var(--c-dim)",display:"flex",gap:10,flexWrap:"wrap"}}>
+                    {d.discoveredDate&&<span>גולתה: {fmt(d.discoveredDate)}</span>}
+                    {d.responsible&&<span style={{color:"#a78bfa"}}>אחראי: {d.responsible}</span>}
+                  </div>
+                </div>
+                {canEdit&&<div style={{display:"flex",gap:4}}>{d.status!=="closed"&&<IBtn onClick={()=>closeDef(d.id)} title="סגור">✅</IBtn>}<IBtn onClick={()=>remDef(d.id)}>🗑️</IBtn></div>}
+              </div>
+            </div>
+          )})}
+        </div>
+      )}
+    </Card>
+  );
+}
+
+function OrderDetail({order,projects,stages,onClose,onUpdate,workLogs,onWorkLog}){
+  const {canEdit,currentUser}=useAuth();
+  const proj=projects.find(p=>p.id===order.projectId);
+  const serials=order.serials||[];
+  const oStages=(order.stageIds||[]).map(sid=>stages.find(s=>s.id===sid)).filter(Boolean).sort((a,b)=>a.order-b.order);
+  const totalCompleted=serials.filter(s=>oStages.every(st=>workLogs.some(w=>w.serialId===s.id&&w.stageId===st.id&&w.completed))).length;
+  const pct=serials.length?Math.round(totalCompleted/serials.length*100):0;
+  return(
+    <div className="fade-in">
+      <Btn onClick={onClose} style={{marginBottom:12}}>← חזרה</Btn>
+      <Card style={{marginBottom:14}}>
+        <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:12,flexWrap:"wrap",gap:8}}>
+          <div>
+            <h2 style={{margin:"0 0 3px",color:"#60a5fa"}}>{order.woNumber}</h2>
+            {order.pn&&<div style={{color:"#a78bfa",fontSize:13}}>P/N: {order.pn}</div>}
+            {order.description&&<div style={{color:"var(--c-muted)"}}>{order.description}</div>}
+            {proj&&<div style={{marginTop:3,fontSize:13,color:"#7eb8ff"}}>📂 {proj.name}</div>}
+          </div>
+          <div style={{display:"flex",gap:8,alignItems:"center",flexWrap:"wrap"}}>
+            <span style={{fontSize:14,fontWeight:700,color:"#10b981"}}>{totalCompleted}/{serials.length} הושלמו</span>
+          </div>
+        </div>
+        <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(110px,1fr))",gap:8,marginTop:10}}>
+          {[["כמות",serials.length],["הושלמו",totalCompleted],["מחיר ליחידה",fmtMoney(order.unitPrice)],["הכנסה ממומשת",fmtMoney(totalCompleted*Number(order.unitPrice||0))],["תאריך קבלה",fmt(order.receivedDate)],["יעד אספקה",fmt(order.targetDate)]].map(([l,v])=>(
+            <div key={l} style={{background:"var(--c-deep)",borderRadius:8,padding:"8px 10px"}}><div style={{fontSize:10,color:"var(--c-dim)",marginBottom:2}}>{l}</div><div style={{fontWeight:700,fontSize:12,wordBreak:"break-word"}}>{v}</div></div>
+          ))}
+        </div>
+        <div style={{marginTop:12}}>
+          <div style={{display:"flex",justifyContent:"space-between",fontSize:13,color:"var(--c-muted)",marginBottom:3}}><span>התקדמות</span><span>{pct}%</span></div>
+          <PBar pct={pct} h={10}/>
+        </div>
+      </Card>
+
+      {/* Serials Manager */}
+      <Card style={{marginBottom:14}}>
+        <SerialsManager order={order} stages={stages} onUpdate={onUpdate} workLogs={workLogs}/>
+      </Card>
+
+      {/* Defects */}
+      <DefectsSection order={order} onUpdate={onUpdate}/>
+    </div>
+  );
+}
+
+function Orders({orders,projects,stages,updO,workLogs}){
+  const {canEdit}=useAuth();
+  const [showForm,setShowForm]=useState(false);
+  const [editing,setEditing]=useState(null);
+  const [detail,setDetail]=useState(null);
+  const [search,setSearch]=useState("");
+  const [filterProj,setFilterProj]=useState("all");
+
+  const filtered=useMemo(()=>{
+    return orders.filter(o=>{
+      if(filterProj!=="all"&&o.projectId!==filterProj)return false;
+      if(search&&!o.woNumber?.toLowerCase().includes(search.toLowerCase())&&!o.description?.toLowerCase().includes(search.toLowerCase())&&!o.pn?.toLowerCase().includes(search.toLowerCase()))return false;
+      return true;
+    });
+  },[orders,filterProj,search]);
+
+  const del=id=>{if(!confirm('למחוק פק"ע זו?'))return;updO(prev=>prev.filter(o=>o.id!==id));if(detail?.id===id)setDetail(null)};
+  const handleUpd=(upd)=>{updO(prev=>prev.map(o=>o.id===upd.id?upd:o));setDetail(upd)};
+
+  // Always get fresh order from state
+  const detailOrder=detail?orders.find(o=>o.id===detail.id)||detail:null;
+
+  if(detailOrder)return<OrderDetail order={detailOrder} projects={projects} stages={stages} onClose={()=>setDetail(null)} onUpdate={handleUpd} workLogs={workLogs}/>;
+
+  return(
+    <div className="fade-in">
+      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:12,flexWrap:"wrap",gap:10}}>
+        <h2 style={{margin:0}}>📋 פקודות עבודה</h2>
+        {canEdit&&<Btn color="var(--c-accent)" onClick={()=>{setEditing(null);setShowForm(true)}}>+ פק"ע חדשה</Btn>}
+      </div>
+      <Card style={{padding:"12px 14px",marginBottom:12,display:"flex",gap:10,flexWrap:"wrap",alignItems:"flex-end"}}>
+        <div style={{display:"flex",flexDirection:"column",gap:3,flex:"1 1 150px"}}><label style={{fontSize:11,color:"var(--c-dim)"}}>חיפוש</label><input value={search} onChange={e=>setSearch(e.target.value)} placeholder="חיפוש לפי מספר / תיאור / P/N..."/></div>
+        <div style={{display:"flex",flexDirection:"column",gap:3}}><label style={{fontSize:11,color:"var(--c-dim)"}}>פרויקט</label><select value={filterProj} onChange={e=>setFilterProj(e.target.value)} style={{padding:"7px 8px",fontSize:12}}><option value="all">כל הפרויקטים</option>{projects.map(p=><option key={p.id} value={p.id}>{p.name}</option>)}</select></div>
+        <div style={{fontSize:12,color:"var(--c-dim)",paddingBottom:4}}>{filtered.length} פק"ע</div>
+      </Card>
+      <div style={{display:"flex",flexDirection:"column",gap:7}}>
+        {filtered.length===0&&<div style={{color:"var(--c-dim)",textAlign:"center",padding:40}}>אין פק"ע להצגה</div>}
+        {filtered.map(o=>{
+          const serials=o.serials||[];
+          const oStages=(o.stageIds||[]).map(sid=>stages.find(s=>s.id===sid)).filter(Boolean);
+          const completed=serials.filter(s=>oStages.every(st=>workLogs.some(w=>w.serialId===s.id&&w.stageId===st.id&&w.completed))).length;
+          const pct=serials.length?Math.round(completed/serials.length*100):0;
+          const proj=projects.find(p=>p.id===o.projectId);
+          const openDef=(o.defects||[]).filter(d=>d.status!=="closed").length;
+          return(
+            <div key={o.id} style={{background:"var(--c-card)",borderRadius:10,padding:"12px 14px",border:"1px solid var(--c-border)",cursor:"pointer",transition:"border-color .15s"}}
+              onClick={()=>setDetail(o)}
+              onMouseEnter={e=>e.currentTarget.style.borderColor="var(--c-accent)"}
+              onMouseLeave={e=>e.currentTarget.style.borderColor="var(--c-border)"}
+            >
+              <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:4}}>
+                <div style={{display:"flex",alignItems:"center",gap:6,flexWrap:"wrap"}}>
+                  <span style={{fontWeight:700,fontSize:15}}>{o.woNumber}</span>
+                  {o.pn&&<span style={{fontSize:11,color:"#a78bfa"}}>P/N: {o.pn}</span>}
+                  {proj&&<span style={{fontSize:11,background:"var(--c-tag-blue-bg)",color:"var(--c-tag-blue)",padding:"2px 7px",borderRadius:20}}>{proj.name}</span>}
+                  {openDef>0&&<span style={{fontSize:11,background:"#450a0a",color:"#fca5a5",padding:"2px 7px",borderRadius:20}}>🔧 {openDef}</span>}
+                </div>
+                <div style={{display:"flex",gap:4,alignItems:"center"}}>
+                  <span style={{fontSize:12,fontWeight:700,color:pct>=100?"#10b981":"var(--c-muted)"}}>{completed}/{serials.length}</span>
+                  {canEdit&&<><IBtn onClick={e=>{e.stopPropagation();setEditing(o);setShowForm(true)}}>✏️</IBtn><IBtn onClick={e=>{e.stopPropagation();del(o.id)}}>🗑️</IBtn></>}
+                </div>
+              </div>
+              {o.description&&<div style={{fontSize:13,color:"var(--c-muted)",marginBottom:4}}>{o.description}</div>}
+              <div style={{display:"flex",gap:10,fontSize:12,color:"var(--c-dim)",marginBottom:5,flexWrap:"wrap"}}>
+                <span>יחידות: <b style={{color:"var(--c-text)"}}>{serials.length}</b></span>
+                <span>מחיר: <b style={{color:"#a78bfa"}}>{fmtMoney(o.unitPrice)}</b></span>
+                <span>שלבים: <b>{(o.stageIds||[]).length}</b></span>
+              </div>
+              <PBar pct={pct}/>
+            </div>
+          );
+        })}
+      </div>
+      {showForm&&(<Modal onClose={()=>setShowForm(false)}><OrderForm initial={editing} projects={projects} stages={stages} onSave={data=>{
+        if(editing){
+          updO(prev=>prev.map(o=>o.id===editing.id?{...editing,...data}:o));
+        }else{
+          updO(prev=>[...prev,{...data,id:uid(),serials:[],defects:[]}]);
+        }
+        setShowForm(false);
+      }} onClose={()=>setShowForm(false)}/></Modal>)}
+    </div>
+  );
+}
+
+// ══════════════════════════════════════════════════════════════════════════
+// ═══ MY WORK (Worker View) ═══════════════════════════════════════════════
+// ══════════════════════════════════════════════════════════════════════════
+function MyWork({orders,stages,workLogs,onStartWork,onEndWork}){
+  const {currentUser}=useAuth();
+  const myStageAccess=currentUser.stageAccess==="all"?stages.map(s=>s.id):(Array.isArray(currentUser.stageAccess)?currentUser.stageAccess:[]);
+  const myActiveLog=workLogs.find(w=>w.userId===currentUser.id&&!w.completed);
+
+  // Get accessible orders with accessible stages
+  const accessibleOrders=orders.filter(o=>{
+    return(o.stageIds||[]).some(sid=>myStageAccess.includes(sid));
+  });
+
+  const startWork=(serialId,stageId,orderId)=>{
+    if(myActiveLog){alert("יש לך עבודה פעילה. סיים אותה קודם.");return}
+    const order=orders.find(o=>o.id===orderId);
+    const serial=(order?.serials||[]).find(s=>s.id===serialId);
+    onStartWork({
+      id:uid(),userId:currentUser.id,userName:currentUser.name,
+      serialId,stageId,orderId,serialSn:serial?.sn||"",
+      startTime:nowISO(),endTime:null,completed:false,durationMin:0
+    });
+  };
+
+  const endWork=()=>{
+    if(!myActiveLog)return;
+    const start=new Date(myActiveLog.startTime);
+    const dur=Math.round((Date.now()-start.getTime())/60000);
+    onEndWork(myActiveLog.id,dur);
+  };
+
+  return(
+    <div className="fade-in">
+      <h2 style={{margin:"0 0 14px"}}>🔨 העבודה שלי</h2>
+
+      {/* Active Work */}
+      {myActiveLog&&(
+        <Card style={{marginBottom:14,border:"2px solid #f59e0b",background:"linear-gradient(135deg,var(--c-card),#1a1800)"}}>
+          <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",flexWrap:"wrap",gap:10}}>
+            <div>
+              <div style={{fontSize:12,color:"#f59e0b",fontWeight:700,marginBottom:4}}>⏱️ עובד כרגע:</div>
+              <div style={{fontWeight:700,fontSize:16}}>{myActiveLog.serialSn}</div>
+              <div style={{fontSize:13,color:"var(--c-muted)"}}>{stages.find(s=>s.id===myActiveLog.stageId)?.name}</div>
+              <div style={{fontSize:12,color:"var(--c-dim)",marginTop:4}}>התחלה: {new Date(myActiveLog.startTime).toLocaleTimeString("he-IL",{hour:"2-digit",minute:"2-digit"})}</div>
+              <ActiveTimer startTime={myActiveLog.startTime}/>
+            </div>
+            <Btn color="#10b981" onClick={endWork} style={{fontSize:16,padding:"12px 24px"}}>✅ סיימתי</Btn>
+          </div>
+        </Card>
+      )}
+
+      {/* Available Work */}
+      {accessibleOrders.map(o=>{
+        const oStages=(o.stageIds||[]).filter(sid=>myStageAccess.includes(sid)).map(sid=>stages.find(s=>s.id===sid)).filter(Boolean).sort((a,b)=>a.order-b.order);
+        const pendingSerials=(o.serials||[]).filter(s=>{
+          return oStages.some(st=>{
+            const done=workLogs.some(w=>w.serialId===s.id&&w.stageId===st.id&&w.completed);
+            const active=workLogs.some(w=>w.serialId===s.id&&w.stageId===st.id&&!w.completed);
+            return!done&&!active;
+          });
+        });
+        if(pendingSerials.length===0)return null;
+        return(
+          <Card key={o.id} style={{marginBottom:10}}>
+            <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:10}}>
+              <span style={{fontWeight:700,color:"#60a5fa"}}>{o.woNumber}</span>
+              {o.pn&&<span style={{fontSize:12,color:"#a78bfa"}}>P/N: {o.pn}</span>}
+              <span style={{fontSize:11,color:"var(--c-dim)"}}>({pendingSerials.length} ממתינות)</span>
+            </div>
+            <div style={{display:"flex",flexDirection:"column",gap:6}}>
+              {pendingSerials.slice(0,10).map(s=>{
+                const nextStage=oStages.find(st=>{
+                  const done=workLogs.some(w=>w.serialId===s.id&&w.stageId===st.id&&w.completed);
+                  return!done;
+                });
+                if(!nextStage)return null;
+                return(
+                  <div key={s.id} style={{display:"flex",justifyContent:"space-between",alignItems:"center",background:"var(--c-deep)",borderRadius:8,padding:"8px 12px"}}>
+                    <div>
+                      <span style={{fontWeight:600,fontSize:13}}>{s.sn}</span>
+                      <span style={{fontSize:11,color:nextStage.color,marginRight:8}}>← {nextStage.name}</span>
+                    </div>
+                    <Btn color={nextStage.color} small onClick={()=>startWork(s.id,nextStage.id,o.id)} disabled={!!myActiveLog}>▶️ התחל</Btn>
+                  </div>
+                );
+              })}
+              {pendingSerials.length>10&&<div style={{fontSize:12,color:"var(--c-dim)",textAlign:"center"}}>ועוד {pendingSerials.length-10}...</div>}
+            </div>
+          </Card>
+        );
+      })}
+      {accessibleOrders.every(o=>{
+        const oStages=(o.stageIds||[]).filter(sid=>myStageAccess.includes(sid));
+        return(o.serials||[]).every(s=>oStages.every(st=>workLogs.some(w=>w.serialId===s.id&&w.stageId===st.id&&w.completed)));
+      })&&!myActiveLog&&<div style={{textAlign:"center",padding:40,color:"var(--c-dim)"}}>🎉 אין עבודה ממתינה!</div>}
+    </div>
+  );
+}
+
+function ActiveTimer({startTime}){
+  const [elapsed,setElapsed]=useState(0);
+  useEffect(()=>{
+    const t=setInterval(()=>{setElapsed(Math.round((Date.now()-new Date(startTime).getTime())/1000))},1000);
+    return()=>clearInterval(t);
+  },[startTime]);
+  const h=Math.floor(elapsed/3600),m=Math.floor((elapsed%3600)/60),s=elapsed%60;
+  return <div style={{fontSize:22,fontWeight:800,color:"#f59e0b",marginTop:6,fontVariantNumeric:"tabular-nums"}}>{String(h).padStart(2,"0")}:{String(m).padStart(2,"0")}:{String(s).padStart(2,"0")}</div>;
+}
+
+// ══════════════════════════════════════════════════════════════════════════
+// ═══ WORKERS DASHBOARD ══════════════════════════════════════════════════
+// ══════════════════════════════════════════════════════════════════════════
+function WorkersDashboard({users,workLogs,orders,stages}){
+  const [selWorker,setSelWorker]=useState("all");
+  const workers=users.filter(u=>u.role!=="admin"&&u.active!==false);
+  const filtered=selWorker==="all"?workLogs:workLogs.filter(w=>w.userId===selWorker);
+  const completedLogs=filtered.filter(w=>w.completed&&w.durationMin);
+
+  const workerData=workers.map(u=>{
+    const logs=workLogs.filter(w=>w.userId===u.id&&w.completed&&w.durationMin);
+    const totalMin=logs.reduce((s,w)=>s+w.durationMin,0);
+    const units=logs.length;
+    const rate=Number(u.hourlyRate||0);
+    const cost=totalMin*(rate/60);
+    const revenue=logs.reduce((s,w)=>{
+      const o=orders.find(o=>(o.serials||[]).some(sr=>sr.id===w.serialId));
+      return s+Number(o?.unitPrice||0);
+    },0);
+    const active=workLogs.find(w=>w.userId===u.id&&!w.completed);
+    return{...u,totalMin,units,cost,revenue,profit:revenue-cost,unitsPerHour:totalMin>0?(units/(totalMin/60)):0,active};
+  });
+
+  return(
+    <div className="fade-in">
+      <h2 style={{margin:"0 0 14px"}}>👥 ביצועי עובדים</h2>
+      <Card style={{padding:"12px 14px",marginBottom:12,display:"flex",gap:10,flexWrap:"wrap",alignItems:"flex-end"}}>
+        <div style={{display:"flex",flexDirection:"column",gap:3,minWidth:160}}>
+          <label style={{fontSize:11,color:"var(--c-dim)"}}>עובד</label>
+          <select value={selWorker} onChange={e=>setSelWorker(e.target.value)}>
+            <option value="all">כל העובדים</option>
+            {workers.map(w=><option key={w.id} value={w.id}>{w.name}</option>)}
+          </select>
+        </div>
+      </Card>
+
+      {/* Worker cards */}
+      <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(280px,1fr))",gap:10,marginBottom:14}}>
+        {workerData.filter(w=>selWorker==="all"||w.id===selWorker).map(w=>(
+          <Card key={w.id} style={{border:w.active?`2px solid #f59e0b`:"1px solid var(--c-border)"}}>
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:10}}>
+              <div style={{fontWeight:700,fontSize:15}}>{w.name}</div>
+              {w.active&&<span style={{fontSize:11,background:"#f59e0b22",color:"#f59e0b",padding:"3px 8px",borderRadius:12,animation:"pulse 1.5s infinite"}}>🔄 עובד</span>}
+            </div>
+            <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:6}}>
+              <div style={{background:"var(--c-deep)",borderRadius:6,padding:"6px 8px"}}><div style={{fontSize:10,color:"var(--c-dim)"}}>יחידות</div><div style={{fontWeight:700,color:"#60a5fa"}}>{w.units}</div></div>
+              <div style={{background:"var(--c-deep)",borderRadius:6,padding:"6px 8px"}}><div style={{fontSize:10,color:"var(--c-dim)"}}>יח'/שעה</div><div style={{fontWeight:700,color:"#06b6d4"}}>{w.unitsPerHour.toFixed(1)}</div></div>
+              <div style={{background:"var(--c-deep)",borderRadius:6,padding:"6px 8px"}}><div style={{fontSize:10,color:"var(--c-dim)"}}>שעות</div><div style={{fontWeight:700}}>{fmtTime(w.totalMin)}</div></div>
+              <div style={{background:"var(--c-deep)",borderRadius:6,padding:"6px 8px"}}><div style={{fontSize:10,color:"var(--c-dim)"}}>רווח</div><div style={{fontWeight:700,color:w.profit>=0?"#10b981":"#ef4444"}}>{fmtMoney(w.profit)}</div></div>
+            </div>
+            {w.hourlyRate>0&&<div style={{fontSize:11,color:"var(--c-dim)",marginTop:6}}>תעריף: {fmtMoney(w.hourlyRate)}/שעה | עלות: {fmtMoney(w.cost)}</div>}
+          </Card>
+        ))}
+      </div>
+
+      {/* Recent activity */}
+      <Card>
+        <div style={{fontWeight:700,fontSize:14,marginBottom:10}}>📋 פעילות אחרונה</div>
+        {completedLogs.length===0?<div style={{color:"var(--c-dim)",textAlign:"center",padding:20}}>אין פעילות</div>:(
+          <div style={{overflowX:"auto"}}><table><thead><tr><th>עובד</th><th>S/N</th><th>שלב</th><th>זמן</th><th>סיום</th></tr></thead><tbody>
+            {completedLogs.sort((a,b)=>(b.endTime||"").localeCompare(a.endTime||"")).slice(0,30).map(w=>{
+              const stage=stages.find(s=>s.id===w.stageId);
+              return(
+                <tr key={w.id}>
+                  <td style={{fontWeight:600}}>{w.userName}</td>
+                  <td style={{color:"#7eb8ff",fontSize:12}}>{w.serialSn}</td>
+                  <td><span style={{color:stage?.color||"var(--c-muted)"}}>{stage?.name||"—"}</span></td>
+                  <td>{fmtTime(w.durationMin)}</td>
+                  <td style={{fontSize:11,color:"var(--c-dim)"}}>{w.endTime?new Date(w.endTime).toLocaleString("he-IL",{day:"2-digit",month:"2-digit",hour:"2-digit",minute:"2-digit"}):""}</td>
+                </tr>
+              );
+            })}
+          </tbody></table></div>
+        )}
+      </Card>
+    </div>
+  );
+}
+
+// ══════════════════════════════════════════════════════════════════════════
+// ═══ STAGES MANAGEMENT ══════════════════════════════════════════════════
+// ══════════════════════════════════════════════════════════════════════════
+function StagesManagement({stages,setStages,persist}){
+  const [showForm,setShowForm]=useState(false);
+  const [name,setName]=useState("");
+  const [color,setColor]=useState("#3b82f6");
+  const add=()=>{
+    if(!name.trim())return;
+    const maxOrder=stages.reduce((m,s)=>Math.max(m,s.order||0),0);
+    const newStages=[...stages,{id:uid(),name:name.trim(),order:maxOrder+1,color}];
+    setStages(newStages);persist(null,null,newStages);
+    setName("");setShowForm(false);
+  };
+  const del=id=>{
+    if(!confirm("למחוק שלב זה?"))return;
+    const newStages=stages.filter(s=>s.id!==id);
+    setStages(newStages);persist(null,null,newStages);
+  };
+  const move=(id,dir)=>{
+    const idx=stages.findIndex(s=>s.id===id);
+    if((dir===-1&&idx===0)||(dir===1&&idx===stages.length-1))return;
+    const arr=[...stages];
+    [arr[idx],arr[idx+dir]]=[arr[idx+dir],arr[idx]];
+    arr.forEach((s,i)=>s.order=i+1);
+    setStages(arr);persist(null,null,arr);
+  };
+  return(
+    <div className="fade-in">
+      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:14}}>
+        <h2 style={{margin:0}}>🔧 שלבי עבודה</h2>
+        <Btn color="var(--c-accent)" onClick={()=>setShowForm(p=>!p)}>+ שלב חדש</Btn>
+      </div>
+      {showForm&&(
+        <Card style={{marginBottom:12,display:"flex",gap:10,alignItems:"flex-end",padding:12,flexWrap:"wrap"}}>
+          <Field label="שם שלב" value={name} onChange={setName} style={{flex:1,minWidth:160}}/>
+          <div style={{display:"flex",flexDirection:"column",gap:4}}>
+            <label style={{fontSize:11,color:"var(--c-dim)",fontWeight:600}}>צבע</label>
+            <input type="color" value={color} onChange={e=>setColor(e.target.value)} style={{width:40,height:36,padding:2,border:"1px solid var(--c-border)",borderRadius:6,background:"var(--c-input-bg)"}}/>
+          </div>
+          <Btn color="#10b981" onClick={add}>הוסף</Btn>
+          <Btn onClick={()=>setShowForm(false)}>ביטול</Btn>
+        </Card>
+      )}
+      <div style={{display:"flex",flexDirection:"column",gap:6}}>
+        {stages.sort((a,b)=>a.order-b.order).map((s,i)=>(
+          <div key={s.id} style={{background:"var(--c-card)",borderRadius:10,padding:"12px 14px",border:`1px solid ${s.color}33`,display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+            <div style={{display:"flex",alignItems:"center",gap:10}}>
+              <span style={{fontSize:18,fontWeight:800,color:s.color,minWidth:28}}>{i+1}</span>
+              <div style={{width:12,height:12,borderRadius:3,background:s.color}}/>
+              <span style={{fontWeight:600}}>{s.name}</span>
+            </div>
+            <div style={{display:"flex",gap:4}}>
+              <IBtn onClick={()=>move(s.id,-1)} title="הזז למעלה">⬆️</IBtn>
+              <IBtn onClick={()=>move(s.id,1)} title="הזז למטה">⬇️</IBtn>
+              <IBtn onClick={()=>del(s.id)}>🗑️</IBtn>
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+// ══════════════════════════════════════════════════════════════════════════
+// ═══ PROJECTS ═══════════════════════════════════════════════════════════
+// ══════════════════════════════════════════════════════════════════════════
+function Projects({projects,orders,updP,stages,workLogs}){
+  const {canEdit}=useAuth();
+  const [showForm,setShowForm]=useState(false);
+  const [name,setName]=useState("");
+  const add=()=>{if(!name.trim())return;updP(prev=>[...prev,{id:uid(),name:name.trim()}]);setName("");setShowForm(false)};
+  const del=id=>{if(orders.some(o=>o.projectId===id))return alert('לא ניתן למחוק פרויקט עם פק"ע');updP(prev=>prev.filter(p=>p.id!==id))};
+  return(
+    <div className="fade-in">
+      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:14}}>
+        <h2 style={{margin:0}}>🏗️ פרויקטים</h2>
+        {canEdit&&<Btn color="var(--c-accent)" onClick={()=>setShowForm(p=>!p)}>+ פרויקט חדש</Btn>}
+      </div>
+      {showForm&&(<Card style={{marginBottom:12,display:"flex",gap:10,alignItems:"flex-end",padding:12}}><div style={{flex:1}}><Field label="שם הפרויקט" value={name} onChange={setName}/></div><Btn color="#10b981" onClick={add}>הוסף</Btn><Btn onClick={()=>setShowForm(false)}>ביטול</Btn></Card>)}
+      <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(250px,1fr))",gap:12}}>
+        {projects.map((p,idx)=>{
+          const po=orders.filter(o=>o.projectId===p.id);
+          const totalSer=po.reduce((s,o)=>s+(o.serials||[]).length,0);
+          const completed=po.reduce((s,o)=>(o.serials||[]).filter(sr=>{
+            const oStages=(o.stageIds||[]);
+            return oStages.every(sid=>workLogs.some(w=>w.serialId===sr.id&&w.stageId===sid&&w.completed));
+          }).length+s,0);
+          const pct=totalSer?Math.round(completed/totalSer*100):0;
+          const rev=completed*po.reduce((s,o)=>s+Number(o.unitPrice||0),0)/Math.max(po.length,1);
+          const c=COLORS[idx%COLORS.length];
+          return(
+            <Card key={p.id}>
+              <div style={{display:"flex",justifyContent:"space-between",marginBottom:10,alignItems:"center"}}>
+                <span style={{fontWeight:700,fontSize:15}}>{p.name}</span>
+                {canEdit&&<IBtn onClick={()=>del(p.id)}>🗑️</IBtn>}
+              </div>
+              <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:7,marginBottom:10}}>
+                {[['פק"ע',po.length],["יחידות",totalSer],["הושלמו",completed],["אחוז",pct+"%"]].map(([l,v])=>(
+                  <div key={l} style={{background:"var(--c-deep)",borderRadius:8,padding:"7px 10px"}}><div style={{fontSize:11,color:"var(--c-dim)"}}>{l}</div><div style={{fontWeight:700,fontSize:14}}>{v}</div></div>
+                ))}
+              </div>
+              {totalSer>0&&<PBar pct={pct} h={7} color={c}/>}
+            </Card>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+// ══════════════════════════════════════════════════════════════════════════
+// ═══ ADMIN PANEL ════════════════════════════════════════════════════════
+// ══════════════════════════════════════════════════════════════════════════
+function AdminPanel({projects,stages,onClose,lightMode}){
+  const {currentUser}=useAuth();
+  const [users,setUsersLocal]=useState(getUsers());
+  const [tab,setTab]=useState("users");
+  const [auditLog]=useState(getAuditLog());
+  const [editUser,setEditUser]=useState(null);
+  const [addMode,setAddMode]=useState(false);
+  const [newUser,setNewUser]=useState({username:"",password:"",name:"",role:"worker",projectAccess:"all",stageAccess:"all",canEdit:false,canView:true,active:true,hourlyRate:0});
+  const lm=lightMode;
+  const card=lm?"#ffffff":"#131829";
+  const border=lm?"#dde1e8":"#1e2a42";
+  const text=lm?"#1a1f2e":"#e2e8f0";
+  const muted=lm?"#5a6478":"#8b95a8";
+  const inp={background:lm?"#f7f8fa":"#0a0e1a",border:`1px solid ${lm?"#c8cdd6":"#283650"}`,color:text,borderRadius:6,padding:"7px 10px",paddingRight:"30px",fontSize:13,width:"100%",outline:"none",fontFamily:"inherit"};
+
+  const addUser=()=>{
+    if(!newUser.username||!newUser.password||!newUser.name)return alert("כל השדות הם חובה");
+    if(users.find(u=>u.username===newUser.username))return alert("שם משתמש קיים");
+    const u={...newUser,id:uid()};
+    const updated=[...users,u];
+    saveUsers(updated);setUsersLocal(updated);
+    addAuditEntry({userId:currentUser.id,username:currentUser.username,name:currentUser.name,action:"הוספת משתמש",target:newUser.username,details:newUser.name});
+    setNewUser({username:"",password:"",name:"",role:"worker",projectAccess:"all",stageAccess:"all",canEdit:false,canView:true,active:true,hourlyRate:0});
+    setAddMode(false);
+  };
+  const saveUser=()=>{
+    if(!editUser.username||!editUser.name)return alert("שם משתמש ושם מלא חובה");
+    const updated=users.map(u=>u.id===editUser.id?editUser:u);
+    saveUsers(updated);setUsersLocal(updated);
+    addAuditEntry({userId:currentUser.id,username:currentUser.username,name:currentUser.name,action:"עדכון משתמש",target:editUser.username,details:editUser.name});
+    setEditUser(null);
+  };
+  const toggleActive=id=>{
+    const updated=users.map(u=>u.id===id?{...u,active:!u.active}:u);
+    saveUsers(updated);setUsersLocal(updated);
+  };
+
+  return(
+    <div onClick={onClose} style={{position:"fixed",inset:0,background:"#000000cc",zIndex:200,display:"flex",alignItems:"center",justifyContent:"center",padding:10,overflowY:"auto"}}>
+      <div onClick={e=>e.stopPropagation()} style={{background:card,borderRadius:16,maxWidth:800,width:"100%",maxHeight:"92vh",overflowY:"auto",border:`1px solid ${border}`}}>
+        <div style={{padding:"18px 24px",borderBottom:`1px solid ${border}`,display:"flex",justifyContent:"space-between",alignItems:"center",position:"sticky",top:0,background:card,zIndex:1,borderRadius:"16px 16px 0 0"}}>
+          <div style={{fontWeight:700,fontSize:18}}>🛡️ ניהול מערכת</div>
+          <button onClick={onClose} style={{background:"none",border:"none",fontSize:20,color:muted}}>✕</button>
+        </div>
+        <div style={{padding:"0 24px 24px"}}>
+          <div style={{display:"flex",gap:6,margin:"14px 0",flexWrap:"wrap"}}>
+            {[["users","👥 משתמשים"],["audit","📋 יומן"]].map(([k,l])=>(
+              <button key={k} onClick={()=>setTab(k)} style={{background:tab===k?"var(--c-accent)":"transparent",border:`1px solid ${tab===k?"var(--c-accent)":border}`,color:tab===k?"#fff":muted,borderRadius:8,padding:"7px 14px",fontSize:13,fontWeight:600,fontFamily:"inherit"}}>{l}</button>
+            ))}
+          </div>
+
+          {tab==="users"&&(
+            <div>
+              <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:12}}>
+                <div style={{fontSize:14,fontWeight:700,color:text}}>משתמשים ({users.length})</div>
+                <Btn color="var(--c-accent)" small onClick={()=>setAddMode(true)}>+ הוסף משתמש</Btn>
+              </div>
+              {addMode&&(
+                <div style={{background:lm?"#f7f8fa":"#0d1120",borderRadius:10,padding:16,marginBottom:12,border:`1px solid ${border}`}}>
+                  <div style={{fontWeight:700,marginBottom:10,color:text}}>משתמש חדש</div>
+                  <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(150px,1fr))",gap:10,marginBottom:10}}>
+                    {[["שם מלא","name","text"],["שם משתמש","username","text"],["סיסמה","password","password"],["תעריף שעתי ₪","hourlyRate","number"]].map(([l,k,t])=>(
+                      <div key={k}><label style={{fontSize:11,color:muted,display:"block",marginBottom:3}}>{l}</label><input style={inp} type={t} value={newUser[k]||""} onChange={e=>setNewUser(p=>({...p,[k]:t==="number"?Number(e.target.value):e.target.value}))}/></div>
+                    ))}
+                    <div><label style={{fontSize:11,color:muted,display:"block",marginBottom:3}}>תפקיד</label>
+                      <select style={inp} value={newUser.role} onChange={e=>setNewUser(p=>({...p,role:e.target.value,canEdit:e.target.value!=="viewer"}))}>
+                        <option value="worker">👷 עובד</option><option value="editor">✏️ עורך</option><option value="admin">🛡️ מנהל</option><option value="viewer">👁️ צופה</option>
+                      </select>
+                    </div>
+                  </div>
+                  {/* Project Access */}
+                  <div style={{marginBottom:10}}>
+                    <label style={{fontSize:11,color:muted,display:"block",marginBottom:3}}>גישה לפרויקטים</label>
+                    <div style={{border:`1px solid ${lm?"#c8cdd6":"#283650"}`,borderRadius:6,background:lm?"#f7f8fa":"#0a0e1a",padding:8}}>
+                      <label style={{display:"flex",alignItems:"center",gap:6,fontSize:12,cursor:"pointer",color:text,marginBottom:6}}>
+                        <input type="checkbox" style={{width:"auto"}} checked={newUser.projectAccess==="all"} onChange={e=>setNewUser(p=>({...p,projectAccess:e.target.checked?"all":[]}))}/>
+                        <b>כל הפרויקטים</b>
+                      </label>
+                      {newUser.projectAccess!=="all"&&projects.map(proj=>(
+                        <label key={proj.id} style={{display:"flex",alignItems:"center",gap:6,fontSize:12,cursor:"pointer",color:text,padding:"2px 0"}}>
+                          <input type="checkbox" style={{width:"auto"}} checked={Array.isArray(newUser.projectAccess)&&newUser.projectAccess.includes(proj.id)} onChange={e=>{const cur=Array.isArray(newUser.projectAccess)?newUser.projectAccess:[];setNewUser(p=>({...p,projectAccess:e.target.checked?[...cur,proj.id]:cur.filter(id=>id!==proj.id)}))}}/>
+                          {proj.name}
+                        </label>
+                      ))}
+                    </div>
+                  </div>
+                  {/* Stage Access */}
+                  <div style={{marginBottom:10}}>
+                    <label style={{fontSize:11,color:muted,display:"block",marginBottom:3}}>גישה לשלבים</label>
+                    <div style={{border:`1px solid ${lm?"#c8cdd6":"#283650"}`,borderRadius:6,background:lm?"#f7f8fa":"#0a0e1a",padding:8}}>
+                      <label style={{display:"flex",alignItems:"center",gap:6,fontSize:12,cursor:"pointer",color:text,marginBottom:6}}>
+                        <input type="checkbox" style={{width:"auto"}} checked={newUser.stageAccess==="all"} onChange={e=>setNewUser(p=>({...p,stageAccess:e.target.checked?"all":[]}))}/>
+                        <b>כל השלבים</b>
+                      </label>
+                      {newUser.stageAccess!=="all"&&stages.map(st=>(
+                        <label key={st.id} style={{display:"flex",alignItems:"center",gap:6,fontSize:12,cursor:"pointer",color:st.color,padding:"2px 0"}}>
+                          <input type="checkbox" style={{width:"auto"}} checked={Array.isArray(newUser.stageAccess)&&newUser.stageAccess.includes(st.id)} onChange={e=>{const cur=Array.isArray(newUser.stageAccess)?newUser.stageAccess:[];setNewUser(p=>({...p,stageAccess:e.target.checked?[...cur,st.id]:cur.filter(id=>id!==st.id)}))}}/>
+                          {st.name}
+                        </label>
+                      ))}
+                    </div>
+                  </div>
+                  <div style={{display:"flex",gap:8}}><Btn color="#10b981" onClick={addUser}>✅ הוסף</Btn><Btn onClick={()=>setAddMode(false)}>ביטול</Btn></div>
+                </div>
+              )}
+              <div style={{display:"flex",flexDirection:"column",gap:6}}>
+                {users.map(u=>(
+                  <div key={u.id} style={{background:lm?"#f7f8fa":"#0d1120",borderRadius:8,padding:"10px 14px",display:"flex",justifyContent:"space-between",alignItems:"center",opacity:u.active===false?.5:1,border:`1px solid ${border}`}}>
+                    <div>
+                      <div style={{fontWeight:600,color:text}}>{u.name} <span style={{fontSize:11,color:muted}}>({u.username})</span></div>
+                      <div style={{fontSize:11,color:muted,display:"flex",gap:8,flexWrap:"wrap",marginTop:2}}>
+                        <span>{u.role==="admin"?"🛡️ מנהל":u.role==="editor"?"✏️ עורך":u.role==="worker"?"👷 עובד":"👁️ צופה"}</span>
+                        {u.hourlyRate>0&&<span>💰 {fmtMoney(u.hourlyRate)}/שעה</span>}
+                        <span>פרויקטים: {u.projectAccess==="all"?"הכל":Array.isArray(u.projectAccess)?u.projectAccess.length:"1"}</span>
+                        <span>שלבים: {u.stageAccess==="all"?"הכל":Array.isArray(u.stageAccess)?u.stageAccess.length:"1"}</span>
+                      </div>
+                    </div>
+                    <div style={{display:"flex",gap:4}}>
+                      <IBtn onClick={()=>setEditUser({...u})} title="ערוך">✏️</IBtn>
+                      {u.role!=="admin"&&<IBtn onClick={()=>toggleActive(u.id)} title={u.active!==false?"השבת":"הפעל"}>{u.active!==false?"🚫":"✅"}</IBtn>}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {tab==="audit"&&(
+            <div>
+              <div style={{fontWeight:700,marginBottom:10,color:text}}>📋 יומן פעילות ({auditLog.length})</div>
+              {auditLog.length===0?<div style={{color:muted,textAlign:"center",padding:20}}>אין פעילות</div>:(
+                <div style={{display:"flex",flexDirection:"column",gap:4}}>
+                  {auditLog.slice(0,50).map(e=>(
+                    <div key={e.id} style={{background:lm?"#f7f8fa":"#0d1120",borderRadius:6,padding:"8px 10px",fontSize:12,border:`1px solid ${border}`}}>
+                      <div style={{display:"flex",justifyContent:"space-between",flexWrap:"wrap",gap:6}}>
+                        <span><b style={{color:"#60a5fa"}}>{e.name||e.username}</b> — {e.action}</span>
+                        <span style={{color:muted,fontSize:11}}>{e.timestamp?new Date(e.timestamp).toLocaleString("he-IL",{day:"2-digit",month:"2-digit",hour:"2-digit",minute:"2-digit"}):""}</span>
+                      </div>
+                      {e.details&&<div style={{color:muted,marginTop:2}}>{e.details}</div>}
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+      </div>
+
+      {/* Edit User Modal */}
+      {editUser&&(
+        <div onClick={()=>setEditUser(null)} style={{position:"fixed",inset:0,background:"#000000cc",zIndex:400,display:"flex",alignItems:"center",justifyContent:"center",padding:16}}>
+          <div onClick={e=>e.stopPropagation()} style={{background:card,borderRadius:16,padding:28,maxWidth:560,width:"100%",border:`1px solid ${border}`,maxHeight:"90vh",overflowY:"auto"}}>
+            <div style={{fontWeight:700,fontSize:17,color:"var(--c-accent)",marginBottom:18}}>✏️ עריכת משתמש: {editUser.name}</div>
+            <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(150px,1fr))",gap:10,marginBottom:12}}>
+              {[["שם מלא","name","text"],["שם משתמש","username","text"],["סיסמה","password","password"],["תעריף שעתי ₪","hourlyRate","number"]].map(([l,k,t])=>(
+                <div key={k}><label style={{fontSize:11,color:muted,display:"block",marginBottom:3}}>{l}</label><input style={inp} type={t} value={editUser[k]||""} onChange={e=>setEditUser(p=>({...p,[k]:t==="number"?Number(e.target.value):e.target.value}))}/></div>
+              ))}
+              <div><label style={{fontSize:11,color:muted,display:"block",marginBottom:3}}>תפקיד</label>
+                <select style={inp} value={editUser.role} onChange={e=>setEditUser(p=>({...p,role:e.target.value,canEdit:e.target.value!=="viewer"&&e.target.value!=="worker"}))}>
+                  <option value="worker">👷 עובד</option><option value="editor">✏️ עורך</option><option value="admin">🛡️ מנהל</option><option value="viewer">👁️ צופה</option>
+                </select>
+              </div>
+            </div>
+            {/* Project Access */}
+            <div style={{marginBottom:10}}>
+              <label style={{fontSize:11,color:muted,display:"block",marginBottom:3}}>גישה לפרויקטים</label>
+              <div style={{border:`1px solid ${lm?"#c8cdd6":"#283650"}`,borderRadius:6,background:lm?"#f7f8fa":"#0a0e1a",padding:8}}>
+                <label style={{display:"flex",alignItems:"center",gap:6,fontSize:12,cursor:"pointer",color:text,marginBottom:6}}>
+                  <input type="checkbox" style={{width:"auto"}} checked={(editUser.projectAccess||"all")==="all"} onChange={e=>setEditUser(p=>({...p,projectAccess:e.target.checked?"all":[]}))}/>
+                  <b>כל הפרויקטים</b>
+                </label>
+                {(editUser.projectAccess||"all")!=="all"&&projects.map(proj=>{const pa=editUser.projectAccess;const sel=Array.isArray(pa)&&pa.includes(proj.id);return(
+                  <label key={proj.id} style={{display:"flex",alignItems:"center",gap:6,fontSize:12,cursor:"pointer",color:sel?text:muted,padding:"2px 0"}}>
+                    <input type="checkbox" style={{width:"auto"}} checked={sel} onChange={e=>{const cur=Array.isArray(pa)?pa:[];setEditUser(p=>({...p,projectAccess:e.target.checked?[...cur,proj.id]:cur.filter(id=>id!==proj.id)}))}}/>
+                    {proj.name}
+                  </label>
+                )})}
+              </div>
+            </div>
+            {/* Stage Access */}
+            <div style={{marginBottom:12}}>
+              <label style={{fontSize:11,color:muted,display:"block",marginBottom:3}}>גישה לשלבים</label>
+              <div style={{border:`1px solid ${lm?"#c8cdd6":"#283650"}`,borderRadius:6,background:lm?"#f7f8fa":"#0a0e1a",padding:8}}>
+                <label style={{display:"flex",alignItems:"center",gap:6,fontSize:12,cursor:"pointer",color:text,marginBottom:6}}>
+                  <input type="checkbox" style={{width:"auto"}} checked={(editUser.stageAccess||"all")==="all"} onChange={e=>setEditUser(p=>({...p,stageAccess:e.target.checked?"all":[]}))}/>
+                  <b>כל השלבים</b>
+                </label>
+                {(editUser.stageAccess||"all")!=="all"&&stages.map(st=>{const sa=editUser.stageAccess;const sel=Array.isArray(sa)&&sa.includes(st.id);return(
+                  <label key={st.id} style={{display:"flex",alignItems:"center",gap:6,fontSize:12,cursor:"pointer",color:st.color,padding:"2px 0"}}>
+                    <input type="checkbox" style={{width:"auto"}} checked={sel} onChange={e=>{const cur=Array.isArray(sa)?sa:[];setEditUser(p=>({...p,stageAccess:e.target.checked?[...cur,st.id]:cur.filter(id=>id!==st.id)}))}}/>
+                    {st.name}
+                  </label>
+                )})}
+              </div>
+            </div>
+            <div style={{display:"flex",gap:8}}><Btn color="#10b981" onClick={saveUser}>✅ שמור</Btn><Btn onClick={()=>setEditUser(null)}>ביטול</Btn></div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ══════════════════════════════════════════════════════════════════════════
+// ═══ YIELD DASHBOARD ════════════════════════════════════════════════════
+// ══════════════════════════════════════════════════════════════════════════
+function YieldDashboard({orders,projects,stages,workLogs}){
+  const yC=p=>p>=95?"#10b981":p>=85?"#3b82f6":p>=70?"#f59e0b":"#ef4444";
+  const yL=p=>p>=95?"מצוין":p>=85?"טוב":p>=70?"בינוני":"נמוך";
+  const typL={quality:"איכות",process:"תהליך",material:"חומר גלם",equipment:"ציוד",human:"גורם אנושי",other:"אחר"};
+  const oY=orders.filter(o=>(o.serials||[]).length>0).map(o=>{
+    const sn=(o.serials||[]).length,df=(o.defects||[]).filter(d=>d.status!=="closed").length;
+    const yP=sn>0?Math.max(0,(1-df/sn)*100):100;
+    return{...o,sn,df,yP,proj:projects.find(p=>p.id===o.projectId)};
+  }).sort((a,b)=>a.yP-b.yP);
+  const avg=oY.length?oY.reduce((s,o)=>s+o.yP,0)/oY.length:100;
+  const worst=oY.filter(o=>o.yP<90).slice(0,5);
+  const typeDonut=Object.entries(typL).map(([k,l])=>({label:l,value:orders.flatMap(o=>(o.defects||[]).filter(d=>d.type===k&&d.status!=="closed")).length})).filter(d=>d.value>0);
+  return(
+    <div className="fade-in">
+      <h2 style={{margin:"0 0 14px"}}>📉 Yield — ניתוח תקלות</h2>
+      <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(140px,1fr))",gap:9,marginBottom:14}}>
+        <Tile icon="📊" label="Yield ממוצע" value={avg.toFixed(1)+"%"} color={yC(avg)} warn={avg<70}/>
+        <Tile icon="🔧" label="תקלות פתוחות" value={orders.flatMap(o=>(o.defects||[]).filter(d=>d.status!=="closed")).length} color="#ef4444"/>
+        <Tile icon="✅" label="נסגרו" value={orders.flatMap(o=>(o.defects||[]).filter(d=>d.status==="closed")).length} color="#10b981"/>
+        <Tile icon="📋" label='פק"ע עם תקלות' value={orders.filter(o=>(o.defects||[]).some(d=>d.status!=="closed")).length} color="#f59e0b"/>
+      </div>
+      <div style={{display:"grid",gridTemplateColumns:"minmax(0,1.6fr) minmax(0,1fr)",gap:12,marginBottom:14}} className="chart-grid">
+        <Card>
+          <div style={{fontWeight:700,marginBottom:12}}>Yield לפי פק"ע</div>
+          {oY.length===0?<div style={{color:"var(--c-dim)",textAlign:"center",padding:20}}>אין נתונים</div>:(
+            <div style={{overflowX:"auto"}}><table><thead><tr><th>פק"ע</th><th>P/N</th><th>יחידות</th><th>תקלות</th><th>Yield</th><th>דרגה</th></tr></thead><tbody>
+              {oY.map(o=>(<tr key={o.id}><td style={{fontWeight:600,color:"#60a5fa"}}>{o.woNumber}</td><td style={{color:"#a78bfa",fontSize:12}}>{o.pn||"—"}</td><td>{o.sn}</td><td style={{color:"#ef4444",fontWeight:600}}>{o.df}</td>
+                <td><div style={{display:"flex",alignItems:"center",gap:6}}><div style={{flex:1,height:6,background:"var(--c-border)",borderRadius:3,overflow:"hidden",minWidth:50}}><div style={{width:o.yP+"%",height:"100%",background:yC(o.yP),borderRadius:3}}/></div><span style={{fontWeight:700,color:yC(o.yP),minWidth:44}}>{o.yP.toFixed(1)}%</span></div></td>
+                <td><span style={{background:yC(o.yP)+"22",color:yC(o.yP),padding:"2px 8px",borderRadius:12,fontSize:11,fontWeight:600}}>{yL(o.yP)}</span></td></tr>))}
+            </tbody></table></div>)}
+        </Card>
+        <Card><div style={{fontWeight:700,marginBottom:10}}>תקלות לפי סוג</div><DonutChart data={typeDonut} size={170}/></Card>
+      </div>
+      {worst.length>0&&(<Card style={{border:"1px solid #ef444433"}}>
+        <div style={{fontWeight:700,fontSize:15,color:"#ef4444",marginBottom:12}}>🚨 Yield נמוך ביותר</div>
+        <div style={{display:"flex",flexDirection:"column",gap:8}}>
+          {worst.map(o=>(<div key={o.id} style={{background:"var(--c-deep)",borderRadius:9,padding:"12px 14px",border:`1px solid ${yC(o.yP)}33`}}>
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+              <div><span style={{fontWeight:700,color:"#60a5fa"}}>{o.woNumber}</span>{o.proj&&<span style={{fontSize:11,color:"var(--c-tag-blue)",marginRight:8}}> {o.proj.name}</span>}<span style={{fontSize:11,background:yC(o.yP)+"22",color:yC(o.yP),padding:"2px 8px",borderRadius:12,fontWeight:600,marginRight:6}}>Yield {o.yP.toFixed(1)}%</span></div>
+              <div style={{fontSize:28,fontWeight:800,color:yC(o.yP)}}>{o.yP.toFixed(0)}%</div>
+            </div></div>))}
+        </div>
+      </Card>)}
+    </div>
+  );
+}
+
+// ══════════════════════════════════════════════════════════════════════════
+// ═══ EXCEL EXPORT / IMPORT ══════════════════════════════════════════════
+// ══════════════════════════════════════════════════════════════════════════
+function doExport(orders,projects,stages,workLogs,users){
+  const FONT="Segoe UI";const wb=XLSX.utils.book_new();
+  const HS=()=>({font:{name:FONT,sz:12,bold:true,color:{rgb:"FFFFFF"}},fill:{fgColor:{rgb:"1E3A5F"}},alignment:{horizontal:"center",vertical:"center",readingOrder:2},border:{top:{style:"thin",color:{rgb:"D1D9E0"}},bottom:{style:"thin",color:{rgb:"D1D9E0"}},left:{style:"thin",color:{rgb:"D1D9E0"}},right:{style:"thin",color:{rgb:"D1D9E0"}}}});
+  const bd={top:{style:"thin",color:{rgb:"D1D9E0"}},bottom:{style:"thin",color:{rgb:"D1D9E0"}},left:{style:"thin",color:{rgb:"D1D9E0"}},right:{style:"thin",color:{rgb:"D1D9E0"}}};
+  const DS=(even)=>({font:{name:FONT,sz:11,color:{rgb:"1E293B"}},fill:{fgColor:{rgb:even?"EBF3FB":"FFFFFF"}},alignment:{horizontal:"center",vertical:"center",readingOrder:2},border:bd});
+  function mkSheet(headers,rows,cw,spFn){
+    const ws=XLSX.utils.aoa_to_sheet([headers,...rows]);
+    headers.forEach((_,c)=>{const a=XLSX.utils.encode_cell({r:0,c});if(ws[a])ws[a].s=HS()});
+    ws["!rows"]=[{hpx:28}];
+    rows.forEach((row,ri)=>{const even=ri%2===0;row.forEach((_,c)=>{const a=XLSX.utils.encode_cell({r:ri+1,c});if(!ws[a])return;ws[a].s=spFn?.(ri,c,row)||DS(even)});ws["!rows"].push({hpx:20})});
+    ws["!cols"]=cw.map(w=>({wch:w}));if(!ws["!opts"])ws["!opts"]={};ws["!opts"].rightToLeft=true;
+    return ws;
+  }
+  // 1: פקודות עבודה
+  const h1=['מספר פק"ע','P/N','תיאור','פרויקט','כמות','מחיר ליחידה','הושלמו','תאריך קבלה','יעד אספקה','תקלות פתוחות'];
+  const r1=orders.map(o=>{const pj=projects.find(p=>p.id===o.projectId);return[o.woNumber,o.pn||"",o.description||"",pj?.name||"",(o.serials||[]).length,Number(o.unitPrice||0),0,o.receivedDate||"",o.targetDate||"",(o.defects||[]).filter(d=>d.status!=="closed").length]});
+  XLSX.utils.book_append_sheet(wb,mkSheet(h1,r1,[16,14,30,14,10,14,10,13,13,10]),"פקודות עבודה");
+  // 2: סידוריים
+  const h2=['פק"ע','P/N','S/N','סטטוס'];
+  const r2=orders.flatMap(o=>(o.serials||[]).map(s=>[o.woNumber,o.pn||"",s.sn,"בתהליך"]));
+  XLSX.utils.book_append_sheet(wb,mkSheet(h2,r2.length?r2:[["","","",""]],[16,14,20,10]),"סידוריים");
+  // 3: תקלות
+  const sevL2={critical:"קריטית",high:"גבוהה",medium:"בינונית",low:"נמוכה"};
+  const typL2={quality:"איכות",process:"תהליך",material:"חומר גלם",equipment:"ציוד",human:"גורם אנושי",other:"אחר"};
+  const h3=['פק"ע','S/N','כותרת','סוג','חומרה','אחראי','תאריך גילוי','סטטוס','תיאור'];
+  const r3=orders.flatMap(o=>(o.defects||[]).map(d=>{const sn2=(o.serials||[]).find(s=>s.id===d.serialId);return[o.woNumber,sn2?.sn||"כללי",d.title,typL2[d.type]||"",sevL2[d.severity]||"",d.responsible||"",d.discoveredDate||"",d.status==="closed"?"סגורה":"פתוחה",d.description||""]}));
+  const sevSt={complete:{font:{name:FONT,sz:11,bold:true,color:{rgb:"065F46"}},fill:{fgColor:{rgb:"D1FAE5"}},alignment:{horizontal:"center",vertical:"center",readingOrder:2},border:bd},blocked:{font:{name:FONT,sz:11,bold:true,color:{rgb:"991B1B"}},fill:{fgColor:{rgb:"FEE2E2"}},alignment:{horizontal:"center",vertical:"center",readingOrder:2},border:bd}};
+  XLSX.utils.book_append_sheet(wb,mkSheet(h3,r3.length?r3:[["","","","","","","","",""]],[16,18,24,10,10,14,13,10,30],(ri,c,row)=>{if(c===7)return row[7]==="סגורה"?sevSt.complete:sevSt.blocked;return null}),"תקלות");
+  // 4: לוג עבודה
+  const h4=['עובד','פק"ע','S/N','שלב','התחלה','סיום','זמן (דק)'];
+  const r4=workLogs.filter(w=>w.completed).sort((a,b)=>(b.endTime||"").localeCompare(a.endTime||"")).map(w=>[w.userName,orders.find(o=>o.id===w.orderId)?.woNumber||"",w.serialSn,stages.find(s=>s.id===w.stageId)?.name||"",w.startTime?.slice(0,16).replace("T"," ")||"",w.endTime?.slice(0,16).replace("T"," ")||"",w.durationMin||0]);
+  XLSX.utils.book_append_sheet(wb,mkSheet(h4,r4.length?r4:[["","","","","","",0]],[14,14,18,14,18,18,10]),"לוג עבודה");
+  // 5: ביצועי עובדים
+  const h5=['עובד','תעריף שעתי','יחידות','שעות עבודה','יח/שעה','עלות','הכנסה','רווח'];
+  const r5=users.filter(u=>u.role!=="admin"&&u.active!==false).map(u=>{const logs=workLogs.filter(w=>w.userId===u.id&&w.completed&&w.durationMin);const mins=logs.reduce((s,w)=>s+w.durationMin,0);const cost=mins*(Number(u.hourlyRate||0)/60);const rev=logs.reduce((s,w)=>{const o2=orders.find(o3=>(o3.serials||[]).some(sr=>sr.id===w.serialId));return s+Number(o2?.unitPrice||0)},0);return[u.name,Number(u.hourlyRate||0),logs.length,Math.round(mins/60*10)/10,mins>0?Math.round(logs.length/(mins/60)*10)/10:0,Math.round(cost),Math.round(rev),Math.round(rev-cost)]});
+  XLSX.utils.book_append_sheet(wb,mkSheet(h5,r5.length?r5:[["",0,0,0,0,0,0,0]],[16,12,10,12,10,12,12,12]),"ביצועי עובדים");
+  XLSX.writeFile(wb,"דוח_קו_ייצור_"+today()+".xlsx");
+}
+
+function doImport(file,projects,stages,cb){
+  const fr=new FileReader();
+  fr.onload=e=>{try{
+    const wb=XLSX.read(e.target.result,{type:"array"});const sn=wb.SheetNames;
+    const wsO=wb.Sheets[sn[0]];if(!wsO){cb(null,"גיליון ריק");return}
+    const rowsO=XLSX.utils.sheet_to_json(wsO,{defval:""});const oMap={};
+    rowsO.forEach(r=>{const wo=String(r['מספר פק"ע']||r["WO"]||"").trim();if(!wo)return;const pn2=String(r["פרויקט"]||"").trim();
+      oMap[wo]={id:uid(),woNumber:wo,pn:String(r["P/N"]||r["PN"]||"").trim(),description:String(r["תיאור"]||"").trim(),qty:Number(r["כמות"]||0),unitPrice:Number(r["מחיר ליחידה"]||r["מחיר"]||0),projectId:projects.find(p=>p.name===pn2)?.id||"",receivedDate:r["תאריך קבלה"]||"",targetDate:r["יעד אספקה"]||r["יעד"]||"",stageIds:stages.map(s=>s.id),serials:[],defects:[]}});
+    // Sheet 2: serials
+    const wsS=wb.Sheets[sn[1]];
+    if(wsS)XLSX.utils.sheet_to_json(wsS,{defval:""}).forEach(r=>{const wo=String(r['פק"ע']||r['מספר פק"ע']||"").trim();if(!wo||!oMap[wo])return;const snV=String(r["S/N"]||r["SN"]||"").trim();if(!snV)return;oMap[wo].serials.push({id:uid(),sn:snV,createdAt:nowISO()})});
+    // Sheet 3: defects
+    const wsD=wb.Sheets[sn[2]];const sMap={"קריטית":"critical","גבוהה":"high","בינונית":"medium","נמוכה":"low"};const tMap={"איכות":"quality","תהליך":"process","חומר גלם":"material","ציוד":"equipment","גורם אנושי":"human","אחר":"other"};
+    if(wsD)XLSX.utils.sheet_to_json(wsD,{defval:""}).forEach(r=>{const wo=String(r['פק"ע']||r['מספר פק"ע']||"").trim();if(!wo||!oMap[wo])return;const title=String(r["כותרת"]||r["תקלה"]||"").trim();if(!title)return;const snV2=String(r["S/N"]||"").trim();const ms=oMap[wo].serials.find(s=>s.sn===snV2);
+      oMap[wo].defects.push({id:uid(),title,serialId:ms?.id||"",type:tMap[String(r["סוג"]||"")]||"other",severity:sMap[String(r["חומרה"]||"")]||"medium",description:String(r["תיאור"]||"").trim(),responsible:String(r["אחראי"]||"").trim(),discoveredDate:r["תאריך גילוי"]||today(),status:String(r["סטטוס"]||"").includes("סגור")?"closed":"open"})});
+    cb(Object.values(oMap),null);
+  }catch(err){cb(null,"שגיאה: "+err.message)}};
+  fr.readAsArrayBuffer(file);
+}
+
+function ExcelTab({orders,projects,stages,workLogs,users,updO}){
+  const [preview,setPreview]=useState(null);const[mode,setMode]=useState("replace");const[drag,setDrag]=useState(false);
+  const handleFile=file=>{doImport(file,projects,stages,(data,err)=>{if(err)return alert(err);setPreview(data)})};
+  return(
+    <div className="fade-in">
+      <h2 style={{margin:"0 0 14px"}}>📂 ייבוא / ייצוא Excel</h2>
+      <Card style={{marginBottom:14}}>
+        <div style={{fontWeight:700,marginBottom:10}}>📤 ייצוא דוח מסוגנן</div>
+        <div style={{fontSize:13,color:"var(--c-muted)",marginBottom:12}}>5 גיליונות: פקודות עבודה, סידוריים, תקלות, לוג עבודה, ביצועי עובדים — צבעוני ומעוצב</div>
+        <Btn color="var(--c-accent)" onClick={()=>doExport(orders,projects,stages,workLogs,users)}>📥 הורד Excel</Btn>
+      </Card>
+      <Card>
+        <div style={{fontWeight:700,marginBottom:10}}>📥 ייבוא נתונים מ-Excel</div>
+        <div style={{display:"flex",gap:10,marginBottom:12}}><SegBtn options={[["replace","החלף הכל"],["merge","הוסף לקיימים"]]} value={mode} onChange={setMode}/></div>
+        <div className={`dz${drag?" drag":""}`} onDragOver={e=>{e.preventDefault();setDrag(true)}} onDragLeave={()=>setDrag(false)} onDrop={e=>{e.preventDefault();setDrag(false);handleFile(e.dataTransfer.files[0])}} onClick={()=>{const inp=document.createElement("input");inp.type="file";inp.accept=".xlsx,.xls";inp.onchange=ev=>handleFile(ev.target.files[0]);inp.click()}}>
+          <div style={{fontSize:36,marginBottom:8}}>📁</div>
+          <div style={{fontWeight:600,marginBottom:4}}>גרור קובץ Excel לכאן או לחץ לבחירה</div>
+          <div style={{fontSize:12,color:"var(--c-dim)"}}>גיליונות: פקודות עבודה → סידוריים → תקלות</div>
+        </div>
+        {preview&&(<div style={{marginTop:14}}>
+          <div style={{fontWeight:700,color:"#10b981",marginBottom:8}}>✅ {preview.length} פקעות | {preview.reduce((s,o)=>s+(o.serials||[]).length,0)} סידוריים | {preview.reduce((s,o)=>s+(o.defects||[]).length,0)} תקלות</div>
+          <div style={{overflowX:"auto",marginBottom:10}}><table><thead><tr><th>פק"ע</th><th>P/N</th><th>תיאור</th><th>סידוריים</th><th>תקלות</th></tr></thead><tbody>{preview.slice(0,10).map(o=>(<tr key={o.id}><td style={{fontWeight:600}}>{o.woNumber}</td><td>{o.pn||"—"}</td><td>{o.description||"—"}</td><td>{(o.serials||[]).length}</td><td>{(o.defects||[]).length}</td></tr>))}</tbody></table></div>
+          <div style={{display:"flex",gap:10}}><Btn color="#10b981" onClick={()=>{updO(prev=>mode==="replace"?preview:[...prev,...preview]);setPreview(null)}}>✅ אשר ({preview.length})</Btn><Btn onClick={()=>setPreview(null)}>ביטול</Btn></div>
+        </div>)}
+      </Card>
+    </div>
+  );
+}
+
+// ══════════════════════════════════════════════════════════════════════════
+// ═══ ALERTS PANEL ════════════════════════════════════════════════════════
+// ══════════════════════════════════════════════════════════════════════════
+function AlertsPanel({orders,stages,workLogs,users,onClose}){
+  const alerts=useMemo(()=>{
+    const a=[];
+    // Critical/high defects
+    orders.forEach(o=>(o.defects||[]).filter(d=>d.status!=="closed"&&(d.severity==="critical"||d.severity==="high")).forEach(d=>{
+      a.push({sev:d.severity==="critical"?0:1,icon:d.severity==="critical"?"🔴":"🟠",text:`תקלה ${d.severity==="critical"?"קריטית":"גבוהה"}: ${d.title}`,sub:`פק"ע ${o.woNumber}${d.discoveredDate?` | ${fmt(d.discoveredDate)}`:""}`,color:d.severity==="critical"?"#dc2626":"#f97316"})}));
+    // Overdue orders
+    orders.filter(o=>o.targetDate&&new Date(o.targetDate)<new Date()).forEach(o=>{const d=daysBetween(o.targetDate,todays());if(d>0)a.push({sev:1,icon:"🚨",text:`פק"ע ${o.woNumber} באיחור ${d} ימים`,sub:`יעד: ${fmt(o.targetDate)}`,color:"#ef4444"})});
+    // Workers stuck > 2h
+    workLogs.filter(w=>!w.completed).forEach(w=>{const m=Math.round((Date.now()-new Date(w.startTime).getTime())/60000);if(m>120)a.push({sev:2,icon:"⏳",text:`${w.userName} תקוע ${fmtTime(m)} על ${w.serialSn}`,sub:stages.find(s=>s.id===w.stageId)?.name||"",color:"#f59e0b"})});
+    // Low yield
+    orders.forEach(o=>{const sn=(o.serials||[]).length,df=(o.defects||[]).filter(d=>d.status!=="closed").length;if(sn>0&&df/sn>.2)a.push({sev:2,icon:"📉",text:`Yield נמוך ב-${o.woNumber}: ${df}/${sn} תקלות`,sub:`${Math.round(df/sn*100)}% שיעור תקלות`,color:"#f97316"})});
+    // No progress 7+ days
+    orders.forEach(o=>{if(!(o.serials||[]).length)return;const last=workLogs.filter(w=>w.orderId===o.id&&w.completed).sort((x,y)=>(y.endTime||"").localeCompare(x.endTime||""))[0];if(last){const d=daysBetween(last.endTime?.slice(0,10),todays());if(d>7)a.push({sev:3,icon:"💤",text:`אין התקדמות ב-${o.woNumber} כבר ${d} ימים`,sub:`אחרון: ${fmt(last.endTime?.slice(0,10))}`,color:"#8b95a8"})}});
+    return a.sort((x,y)=>x.sev-y.sev);
+  },[orders,stages,workLogs]);
+  return(
+    <div onClick={onClose} style={{position:"fixed",inset:0,background:"#000c",zIndex:200,display:"flex",justifyContent:"flex-start"}}>
+      <div onClick={e=>e.stopPropagation()} style={{background:"var(--c-card)",width:"min(420px,90vw)",height:"100%",overflowY:"auto",borderLeft:"1px solid var(--c-border)",padding:20}}>
+        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:16}}>
+          <div style={{fontWeight:700,fontSize:18}}>🔔 התראות ({alerts.length})</div>
+          <button onClick={onClose} style={{background:"none",border:"none",fontSize:20,color:"var(--c-muted)"}}>✕</button>
+        </div>
+        {alerts.length===0?<div style={{textAlign:"center",padding:40,color:"var(--c-dim)"}}><div style={{fontSize:40,marginBottom:10}}>✅</div>הכל תקין!</div>:(
+          <div style={{display:"flex",flexDirection:"column",gap:8}}>
+            {alerts.map((a,i)=>(<div key={i} style={{background:"var(--c-deep)",borderRadius:10,padding:"12px 14px",borderRight:`4px solid ${a.color}`}}>
+              <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:4}}><span style={{fontSize:16}}>{a.icon}</span><span style={{fontWeight:600,fontSize:13,color:a.color,flex:1}}>{a.text}</span></div>
+              {a.sub&&<div style={{fontSize:11,color:"var(--c-dim)",paddingRight:24}}>{a.sub}</div>}
+            </div>))}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ══════════════════════════════════════════════════════════════════════════
+// ═══ PWA BANNERS ════════════════════════════════════════════════════════
+// ══════════════════════════════════════════════════════════════════════════
+function InstallBanner({onInstall,onDismiss,lm}){return(
+  <div style={{position:"fixed",bottom:16,left:12,right:12,zIndex:999,background:lm?"#eff6ff":"linear-gradient(135deg,#1e3a5f,#131829)",border:"2px solid #3b82f6",borderRadius:16,padding:"14px 16px",display:"flex",alignItems:"center",gap:12,boxShadow:lm?"0 4px 24px rgba(59,130,246,.25)":"0 8px 32px #000a"}}>
+    <div style={{fontSize:34,lineHeight:1,flexShrink:0}}>⚙️</div>
+    <div style={{flex:1,minWidth:0}}><div style={{fontWeight:700,fontSize:14,color:lm?"#1e40af":"#e2e8f0",marginBottom:2}}>התקן את האפליקציה</div><div style={{fontSize:12,color:lm?"#3b82f6":"#93c5fd"}}>גישה מהירה — גם offline</div></div>
+    <div style={{display:"flex",gap:8,flexShrink:0}}><button onClick={onDismiss} style={{background:lm?"#dbeafe":"#374151",border:"none",borderRadius:8,padding:"8px 12px",color:lm?"#1d4ed8":"#94a3b8",fontSize:13,fontFamily:"inherit"}}>לא עכשיו</button><button onClick={onInstall} style={{background:"#3b82f6",border:"none",borderRadius:8,padding:"8px 16px",color:"#fff",fontSize:13,fontWeight:700,fontFamily:"inherit"}}>התקן ↓</button></div>
+  </div>
+)}
+function UpdateBanner({onUpdate,onDismiss,lm}){return(
+  <div style={{position:"fixed",top:0,left:0,right:0,zIndex:1000,background:lm?"#f0fdf4":"linear-gradient(135deg,#052e16,#064e3b)",borderBottom:lm?"2px solid #16a34a":"2px solid #10b981",padding:"10px 16px",display:"flex",alignItems:"center",gap:12,boxShadow:"0 4px 20px #0003"}}>
+    <div style={{fontSize:22,flexShrink:0}}>🔄</div>
+    <div style={{flex:1}}><div style={{fontWeight:700,fontSize:13,color:lm?"#15803d":"#6ee7b7"}}>עדכון זמין!</div><div style={{fontSize:11,color:lm?"#16a34a":"#34d399"}}>גרסה חדשה מוכנה</div></div>
+    <div style={{display:"flex",gap:8,flexShrink:0}}><button onClick={onDismiss} style={{background:"none",border:`1px solid ${lm?"#16a34a":"#065f46"}`,borderRadius:7,padding:"5px 10px",color:lm?"#15803d":"#6ee7b7",fontSize:12,fontFamily:"inherit"}}>אחר כך</button><button onClick={onUpdate} style={{background:lm?"#16a34a":"#10b981",border:"none",borderRadius:8,padding:"6px 14px",color:"#fff",fontSize:13,fontWeight:700,fontFamily:"inherit"}}>עדכן →</button></div>
+  </div>
+)}
+
+// ══════════════════════════════════════════════════════════════════════════
+// ═══ NAVBAR ═════════════════════════════════════════════════════════════
+// ══════════════════════════════════════════════════════════════════════════
+function Navbar({tab,setTab,tabs,lightMode,toggleLight,sync,onAdmin,onLogout,alertCount,onAlerts}){
+  const {currentUser}=useAuth();
+  const [menuOpen,setMenuOpen]=useState(false);
+  const lm=lightMode;
+  const navBg=lm?"#ffffff":"#131829";
+  const navBorder=lm?"#dde1e8":"#1e2a42";
+  const navMuted=lm?"#5a6478":"#8b95a8";
+  const navActive=lm?"#2563eb":"#60a5fa";
+  return(
+    <div className="nav-wrapper" style={{background:navBg,borderBottom:`1px solid ${navBorder}`,position:"sticky",top:0,zIndex:50,transition:"background .3s"}}>
+      <div style={{maxWidth:1440,margin:"0 auto",padding:"0 16px",display:"flex",alignItems:"center",gap:0,height:52}}>
+        <div style={{display:"flex",alignItems:"center",gap:6,flexShrink:0,paddingLeft:8}}>
+          <div style={{fontWeight:800,fontSize:15,color:navActive,whiteSpace:"nowrap"}}>⚙️ קו ייצור</div>
+          <span style={{fontSize:9,background:navActive+"22",color:navActive,padding:"2px 6px",borderRadius:10,border:`1px solid ${navActive}44`,fontWeight:700}}>v{APP_VERSION}</span>
+        </div>
+        <div className="desk-nav" style={{flex:1,overflowX:"auto",scrollbarWidth:"none",justifyContent:"flex-start"}}>
+          {tabs.map(t=>(<button key={t.id} onClick={()=>setTab(t.id)} style={{padding:"0 14px",height:52,background:"none",border:"none",color:tab===t.id?navActive:navMuted,borderBottom:tab===t.id?`3px solid ${navActive}`:"3px solid transparent",fontWeight:tab===t.id?700:400,fontSize:13,whiteSpace:"nowrap",fontFamily:"inherit"}}>{t.label}</button>))}
+        </div>
+        <div className="hide-mobile" style={{display:"flex",gap:6,alignItems:"center",flexShrink:0}}>
+          <button onClick={onAlerts} style={{background:alertCount>0?"#ef444422":"transparent",border:`1px solid ${alertCount>0?"#ef4444":navBorder}`,borderRadius:8,padding:"5px 10px",fontSize:14,color:alertCount>0?"#ef4444":navMuted,fontFamily:"inherit",position:"relative"}}>🔔{alertCount>0&&<span style={{position:"absolute",top:-4,right:-4,background:"#ef4444",color:"#fff",fontSize:9,fontWeight:700,borderRadius:10,padding:"1px 5px",minWidth:16,textAlign:"center"}}>{alertCount}</span>}</button>
+          <button onClick={toggleLight} style={{background:lm?"#e2e8f0":"#0d1120",border:`1px solid ${navBorder}`,borderRadius:8,padding:"5px 12px",fontSize:13,color:navMuted,fontFamily:"inherit"}}>{lm?"🌙":"☀️"}</button>
+          {currentUser?.role==="admin"&&<button onClick={onAdmin} style={{background:"#f59e0b22",border:"1px solid #f59e0b44",color:"#f59e0b",borderRadius:8,padding:"5px 12px",fontSize:12,fontWeight:700,fontFamily:"inherit"}}>🛡️</button>}
+          <div style={{display:"flex",alignItems:"center",gap:6,padding:"4px 10px",background:lm?"#e2e8f0":"#0d1120",borderRadius:8,border:`1px solid ${navBorder}`}}>
+            <span style={{fontSize:12,color:navActive,fontWeight:700}}>{currentUser?.name}</span>
+            <span style={{color:navMuted}}>·</span>
+            <button onClick={onLogout} style={{background:"none",border:"none",color:"#ef4444",fontSize:12,padding:0,fontWeight:600,fontFamily:"inherit"}}>יציאה</button>
+          </div>
+        </div>
+        <div className="show-mobile-only" style={{display:"flex",gap:6,alignItems:"center",marginRight:"auto"}}>
+          <button onClick={onAlerts} style={{background:"none",border:`1px solid ${navBorder}`,borderRadius:8,padding:"5px 8px",fontSize:14,color:alertCount>0?"#ef4444":navMuted,position:"relative"}}>🔔{alertCount>0&&<span style={{position:"absolute",top:-4,right:-4,background:"#ef4444",color:"#fff",fontSize:9,borderRadius:10,padding:"1px 4px"}}>{alertCount}</span>}</button>
+          <button onClick={()=>setMenuOpen(p=>!p)} style={{background:"none",border:`1px solid ${navBorder}`,borderRadius:8,padding:"5px 10px",fontSize:18,color:navMuted,lineHeight:1}}>{menuOpen?"✕":"☰"}</button>
+        </div>
+      </div>
+      <div className="mob-tabs" style={{borderTop:`1px solid ${navBorder}`}}>
+        {tabs.map(t=>(<button key={t.id} onClick={()=>{setTab(t.id);setMenuOpen(false)}} style={{flex:"0 0 auto",padding:"8px 12px",background:"none",border:"none",color:tab===t.id?navActive:navMuted,borderBottom:tab===t.id?`3px solid ${navActive}`:"3px solid transparent",fontWeight:tab===t.id?700:400,fontSize:12,fontFamily:"inherit",whiteSpace:"nowrap"}}>{t.label}</button>))}
+      </div>
+      {menuOpen&&(
+        <div style={{background:navBg,borderBottom:`1px solid ${navBorder}`,padding:"12px 16px",display:"flex",flexDirection:"column",gap:10}}>
+          <div style={{display:"flex",alignItems:"center",gap:8}}>
+            <span style={{fontSize:13,color:navActive,fontWeight:700}}>👤 {currentUser?.name}</span>
+            <button onClick={()=>{onLogout();setMenuOpen(false)}} style={{marginRight:"auto",background:"#450a0a",color:"#fca5a5",border:"none",borderRadius:6,padding:"4px 10px",fontSize:12,fontFamily:"inherit"}}>יציאה</button>
+          </div>
+          <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
+            <button onClick={()=>{toggleLight();setMenuOpen(false)}} style={{background:lm?"#e2e8f0":"#0d1120",border:`1px solid ${navBorder}`,borderRadius:8,padding:"7px 14px",fontSize:13,color:navMuted,fontFamily:"inherit"}}>{lm?"🌙 כהה":"☀️ בהיר"}</button>
+            {currentUser?.role==="admin"&&<button onClick={()=>{onAdmin();setMenuOpen(false)}} style={{background:"#f59e0b22",border:"1px solid #f59e0b44",color:"#f59e0b",borderRadius:8,padding:"7px 14px",fontSize:13,fontWeight:700,fontFamily:"inherit"}}>🛡️ ניהול</button>}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ══════════════════════════════════════════════════════════════════════════
+// ═══ APP ════════════════════════════════════════════════════════════════
+// ══════════════════════════════════════════════════════════════════════════
+let saveTimer=null;
+function App(){
+  const [lightMode,setLightMode]=useState(()=>{try{return localStorage.getItem(LS_PREFIX+"light")==="1"}catch{return false}});
+  const [currentUser,setCurrentUser]=useState(()=>{
+    try{const saved=localStorage.getItem(LS_PREFIX+"session");if(saved){const s=JSON.parse(saved);const cached=JSON.parse(localStorage.getItem(LS_PREFIX+"users")||"[]");const found=cached.find(u=>u.id===s.id&&u.username===s.username&&u.active!==false);if(found)return found}return null}catch{return null}
+  });
+  const [tab,setTab]=useState("dashboard");
+  const [showAdmin,setShowAdmin]=useState(false);
+  const [showAlerts,setShowAlerts]=useState(false);
+  const [orders,setOrders]=useState([]);
+  const [projects,setProjects]=useState(DEF_PROJ);
+  const [stages,setStages]=useState(DEF_STAGES);
+  const [workLogs,setWorkLogs]=useState([]);
+  const [loading,setLoading]=useState(true);
+  const [sync,setSync]=useState("ok");
+  // PWA state
+  const [installPrompt,setInstallPrompt]=useState(null);
+  const [showInstall,setShowInstall]=useState(false);
+  const [showUpdate,setShowUpdate]=useState(false);
+  const swRegRef=useRef(null);
+  const oRef=useRef(orders),pRef=useRef(projects),sRef=useRef(stages),wRef=useRef(workLogs);
+
+  useEffect(()=>{
+    document.body.classList.toggle("light-mode",lightMode);
+    try{localStorage.setItem(LS_PREFIX+"light",lightMode?"1":"0")}catch{};
+    const m=document.getElementById("tcm");
+    if(m)m.content=lightMode?"#ffffff":"#0a0e1a";
+  },[lightMode]);
+
+  useEffect(()=>{
+    const lo=LS.get("orders"),lp=LS.get("projects"),ls=LS.get("stages"),lw=LS.get("workLogs");
+    if(lo){setOrders(lo);if(lp)setProjects(lp);if(ls)setStages(ls);if(lw)setWorkLogs(lw);setLoading(false);return}
+    // ── DEMO DATA — seed on first load ────────────────────────────────
+    const demoSerials1=[
+      {id:"sn1a",sn:"ALF-PCB-0001",createdAt:"2026-01-05T08:00:00Z"},
+      {id:"sn1b",sn:"ALF-PCB-0002",createdAt:"2026-01-05T08:00:00Z"},
+      {id:"sn1c",sn:"ALF-PCB-0003",createdAt:"2026-01-05T08:00:00Z"},
+      {id:"sn1d",sn:"ALF-PCB-0004",createdAt:"2026-01-06T08:00:00Z"},
+      {id:"sn1e",sn:"ALF-PCB-0005",createdAt:"2026-01-06T08:00:00Z"},
+      {id:"sn1f",sn:"ALF-PCB-0006",createdAt:"2026-01-07T08:00:00Z"},
+      {id:"sn1g",sn:"ALF-PCB-0007",createdAt:"2026-01-07T08:00:00Z"},
+      {id:"sn1h",sn:"ALF-PCB-0008",createdAt:"2026-01-08T08:00:00Z"},
+    ];
+    const demoSerials2=[
+      {id:"sn2a",sn:"BET-SNS-0001",createdAt:"2026-01-10T08:00:00Z"},
+      {id:"sn2b",sn:"BET-SNS-0002",createdAt:"2026-01-10T08:00:00Z"},
+      {id:"sn2c",sn:"BET-SNS-0003",createdAt:"2026-01-10T08:00:00Z"},
+      {id:"sn2d",sn:"BET-SNS-0004",createdAt:"2026-01-11T08:00:00Z"},
+      {id:"sn2e",sn:"BET-SNS-0005",createdAt:"2026-01-11T08:00:00Z"},
+      {id:"sn2f",sn:"BET-SNS-0006",createdAt:"2026-01-12T08:00:00Z"},
+    ];
+    const demoSerials3=[
+      {id:"sn3a",sn:"GAM-MOT-0001",createdAt:"2026-02-01T08:00:00Z"},
+      {id:"sn3b",sn:"GAM-MOT-0002",createdAt:"2026-02-01T08:00:00Z"},
+      {id:"sn3c",sn:"GAM-MOT-0003",createdAt:"2026-02-02T08:00:00Z"},
+      {id:"sn3d",sn:"GAM-MOT-0004",createdAt:"2026-02-02T08:00:00Z"},
+      {id:"sn3e",sn:"GAM-MOT-0005",createdAt:"2026-02-03T08:00:00Z"},
+    ];
+    const demoSerials4=[
+      {id:"sn4a",sn:"ALF-PWR-0001",createdAt:"2026-02-15T08:00:00Z"},
+      {id:"sn4b",sn:"ALF-PWR-0002",createdAt:"2026-02-15T08:00:00Z"},
+      {id:"sn4c",sn:"ALF-PWR-0003",createdAt:"2026-02-16T08:00:00Z"},
+      {id:"sn4d",sn:"ALF-PWR-0004",createdAt:"2026-02-16T08:00:00Z"},
+    ];
+    const demoSerials5=[
+      {id:"sn5a",sn:"BET-CTL-0001",createdAt:"2026-03-01T08:00:00Z"},
+      {id:"sn5b",sn:"BET-CTL-0002",createdAt:"2026-03-01T08:00:00Z"},
+      {id:"sn5c",sn:"BET-CTL-0003",createdAt:"2026-03-02T08:00:00Z"},
+    ];
+    const demoOrders=[
+      {id:"o1",woNumber:"WO-2601",pn:"ALF-PCB-100",description:"לוח PCB ראשי — בקר תעשייתי",qty:8,unitPrice:1200,projectId:"p1",receivedDate:"2026-01-05",targetDate:"2026-02-28",stageIds:["s1","s2","s3","s4","s5","s6"],serials:demoSerials1,defects:[
+        {id:"d1",title:"הלחמה קרה ברכיב U3",serialId:"sn1c",type:"quality",severity:"high",description:"נמצאה הלחמה קרה ב-IC U3 בבדיקת חשמל",responsible:"יוסי כהן",discoveredDate:"2026-01-20",status:"closed",closedDate:"2026-01-22"},
+        {id:"d2",title:"שריטה על שכבת PCB",serialId:"sn1f",type:"material",severity:"medium",description:"שריטה על שכבת הנחושת — לא משפיע על מעגל",responsible:"דנה לוי",discoveredDate:"2026-02-05",status:"open"},
+        {id:"d3",title:"קצר ב-connector J4",serialId:"sn1h",type:"quality",severity:"critical",description:"קצר בין פין 3-4 בקונקטור J4",responsible:"משה אברהם",discoveredDate:"2026-03-10",status:"open"}
+      ]},
+      {id:"o2",woNumber:"WO-2602",pn:"BET-SNS-200",description:"חיישן תעשייתי — טמפרטורה ולחץ",qty:6,unitPrice:850,projectId:"p2",receivedDate:"2026-01-10",targetDate:"2026-03-15",stageIds:["s1","s2","s3","s5","s6"],serials:demoSerials2,defects:[
+        {id:"d4",title:"סטיית כיול מעל 2%",serialId:"sn2b",type:"process",severity:"medium",description:"סטייה של 2.3% מהספק — נדרש כיול מחדש",responsible:"רונית שרון",discoveredDate:"2026-02-12",status:"closed",closedDate:"2026-02-14"},
+      ]},
+      {id:"o3",woNumber:"WO-2603",pn:"GAM-MOT-300",description:"בקר מנוע סרוו — 3 צירים",qty:5,unitPrice:2200,projectId:"p3",receivedDate:"2026-02-01",targetDate:"2026-04-30",stageIds:["s1","s2","s3","s4","s5"],serials:demoSerials3,defects:[
+        {id:"d5",title:"רעש חריג במנוע",serialId:"sn3a",type:"equipment",severity:"high",description:"רעש מכני חריג בתדר 2kHz",responsible:"אבי מזרחי",discoveredDate:"2026-02-20",status:"open"},
+        {id:"d6",title:"פלט PWM לא יציב",serialId:"sn3c",type:"process",severity:"medium",description:"תנודות בפלט PWM — ייתכן בעיית firmware",responsible:"דנה לוי",discoveredDate:"2026-03-01",status:"open"},
+      ]},
+      {id:"o4",woNumber:"WO-2604",pn:"ALF-PWR-150",description:"ספק כוח תעשייתי 48V/10A",qty:4,unitPrice:680,projectId:"p1",receivedDate:"2026-02-15",targetDate:"2026-03-31",stageIds:["s1","s2","s3","s4","s5","s6"],serials:demoSerials4,defects:[]},
+      {id:"o5",woNumber:"WO-2605",pn:"BET-CTL-250",description:"בקר PLC מודולרי",qty:3,unitPrice:3500,projectId:"p2",receivedDate:"2026-03-01",targetDate:"2026-05-15",stageIds:["s1","s2","s3","s4","s5","s6"],serials:demoSerials5,defects:[
+        {id:"d7",title:"תקלת תקשורת Modbus",serialId:"sn5a",type:"process",severity:"high",description:"תקשורת Modbus RTU נופלת אחרי 30 דקות פעילות רציפה",responsible:"אבי מזרחי",discoveredDate:"2026-03-14",status:"open"},
+      ]},
+    ];
+    // ── WORK LOGS — realistic demo history ─────────────────────────────
+    const workers=["w1","w2","w3","w4","w5"];
+    const wNames={"w1":"יוסי כהן","w2":"דנה לוי","w3":"משה אברהם","w4":"רונית שרון","w5":"אבי מזרחי"};
+    const demoLogs=[];
+    const mkLog=(sId,sn,stId,uId,startDate,durMin,oId)=>{
+      const st=new Date(startDate);
+      const en=new Date(st.getTime()+durMin*60000);
+      demoLogs.push({id:"wl"+demoLogs.length,userId:uId,userName:wNames[uId],serialId:sId,serialSn:sn,stageId:stId,orderId:oId,startTime:st.toISOString(),endTime:en.toISOString(),completed:true,durationMin:durMin});
+    };
+    // WO-2601 (8 serials, 6 stages) — first 5 fully complete, 6th partially, 7-8 early stages
+    // Serial 1: all 6 stages done
+    mkLog("sn1a","ALF-PCB-0001","s1","w1","2026-01-06T07:30:00",18,"o1");
+    mkLog("sn1a","ALF-PCB-0001","s2","w1","2026-01-07T08:00:00",42,"o1");
+    mkLog("sn1a","ALF-PCB-0001","s3","w2","2026-01-08T07:45:00",35,"o1");
+    mkLog("sn1a","ALF-PCB-0001","s4","w3","2026-01-09T08:15:00",28,"o1");
+    mkLog("sn1a","ALF-PCB-0001","s5","w4","2026-01-10T07:30:00",22,"o1");
+    mkLog("sn1a","ALF-PCB-0001","s6","w4","2026-01-10T14:00:00",15,"o1");
+    // Serial 2: all done
+    mkLog("sn1b","ALF-PCB-0002","s1","w1","2026-01-06T09:00:00",20,"o1");
+    mkLog("sn1b","ALF-PCB-0002","s2","w2","2026-01-07T10:00:00",48,"o1");
+    mkLog("sn1b","ALF-PCB-0002","s3","w2","2026-01-08T10:00:00",32,"o1");
+    mkLog("sn1b","ALF-PCB-0002","s4","w3","2026-01-09T10:30:00",30,"o1");
+    mkLog("sn1b","ALF-PCB-0002","s5","w3","2026-01-10T09:00:00",25,"o1");
+    mkLog("sn1b","ALF-PCB-0002","s6","w4","2026-01-11T07:30:00",12,"o1");
+    // Serial 3: all done
+    mkLog("sn1c","ALF-PCB-0003","s1","w4","2026-01-07T07:30:00",16,"o1");
+    mkLog("sn1c","ALF-PCB-0003","s2","w1","2026-01-08T08:00:00",55,"o1");
+    mkLog("sn1c","ALF-PCB-0003","s3","w2","2026-01-09T08:00:00",40,"o1");
+    mkLog("sn1c","ALF-PCB-0003","s4","w3","2026-01-10T08:00:00",26,"o1");
+    mkLog("sn1c","ALF-PCB-0003","s5","w4","2026-01-11T10:00:00",20,"o1");
+    mkLog("sn1c","ALF-PCB-0003","s6","w3","2026-01-12T07:30:00",14,"o1");
+    // Serial 4: all done
+    mkLog("sn1d","ALF-PCB-0004","s1","w1","2026-01-08T07:30:00",22,"o1");
+    mkLog("sn1d","ALF-PCB-0004","s2","w5","2026-01-09T08:00:00",50,"o1");
+    mkLog("sn1d","ALF-PCB-0004","s3","w5","2026-01-10T08:00:00",38,"o1");
+    mkLog("sn1d","ALF-PCB-0004","s4","w3","2026-01-11T08:00:00",32,"o1");
+    mkLog("sn1d","ALF-PCB-0004","s5","w4","2026-01-12T09:00:00",24,"o1");
+    mkLog("sn1d","ALF-PCB-0004","s6","w4","2026-01-13T07:30:00",13,"o1");
+    // Serial 5: all done
+    mkLog("sn1e","ALF-PCB-0005","s1","w4","2026-01-09T07:30:00",19,"o1");
+    mkLog("sn1e","ALF-PCB-0005","s2","w2","2026-01-10T08:00:00",44,"o1");
+    mkLog("sn1e","ALF-PCB-0005","s3","w2","2026-01-11T08:00:00",36,"o1");
+    mkLog("sn1e","ALF-PCB-0005","s4","w3","2026-01-12T08:00:00",29,"o1");
+    mkLog("sn1e","ALF-PCB-0005","s5","w3","2026-01-13T08:00:00",21,"o1");
+    mkLog("sn1e","ALF-PCB-0005","s6","w4","2026-01-14T07:30:00",11,"o1");
+    // Serial 6: stages 1-3 done, 4 pending
+    mkLog("sn1f","ALF-PCB-0006","s1","w1","2026-02-01T07:30:00",17,"o1");
+    mkLog("sn1f","ALF-PCB-0006","s2","w5","2026-02-02T08:00:00",46,"o1");
+    mkLog("sn1f","ALF-PCB-0006","s3","w2","2026-02-03T08:00:00",33,"o1");
+    // Serial 7: stages 1-2 done
+    mkLog("sn1g","ALF-PCB-0007","s1","w1","2026-02-05T07:30:00",21,"o1");
+    mkLog("sn1g","ALF-PCB-0007","s2","w1","2026-02-06T08:00:00",52,"o1");
+    // Serial 8: stage 1 done
+    mkLog("sn1h","ALF-PCB-0008","s1","w4","2026-03-01T07:30:00",20,"o1");
+
+    // WO-2602 (6 serials, stages s1,s2,s3,s5,s6) — first 3 fully done
+    mkLog("sn2a","BET-SNS-0001","s1","w1","2026-01-12T07:30:00",15,"o2");
+    mkLog("sn2a","BET-SNS-0001","s2","w5","2026-01-13T08:00:00",38,"o2");
+    mkLog("sn2a","BET-SNS-0001","s3","w5","2026-01-14T08:00:00",30,"o2");
+    mkLog("sn2a","BET-SNS-0001","s5","w3","2026-01-15T08:00:00",24,"o2");
+    mkLog("sn2a","BET-SNS-0001","s6","w4","2026-01-16T07:30:00",10,"o2");
+    mkLog("sn2b","BET-SNS-0002","s1","w4","2026-01-13T07:30:00",14,"o2");
+    mkLog("sn2b","BET-SNS-0002","s2","w2","2026-01-14T08:00:00",40,"o2");
+    mkLog("sn2b","BET-SNS-0002","s3","w2","2026-01-15T08:00:00",28,"o2");
+    mkLog("sn2b","BET-SNS-0002","s5","w3","2026-01-16T08:00:00",20,"o2");
+    mkLog("sn2b","BET-SNS-0002","s6","w3","2026-01-17T07:30:00",12,"o2");
+    mkLog("sn2c","BET-SNS-0003","s1","w1","2026-01-14T07:30:00",16,"o2");
+    mkLog("sn2c","BET-SNS-0003","s2","w5","2026-01-15T08:00:00",42,"o2");
+    mkLog("sn2c","BET-SNS-0003","s3","w5","2026-01-16T08:00:00",34,"o2");
+    mkLog("sn2c","BET-SNS-0003","s5","w4","2026-01-17T08:00:00",22,"o2");
+    mkLog("sn2c","BET-SNS-0003","s6","w4","2026-01-18T07:30:00",11,"o2");
+    // Serial 4: stages 1-2 done
+    mkLog("sn2d","BET-SNS-0004","s1","w1","2026-02-10T07:30:00",18,"o2");
+    mkLog("sn2d","BET-SNS-0004","s2","w2","2026-02-11T08:00:00",45,"o2");
+    // Serial 5: stage 1 done
+    mkLog("sn2e","BET-SNS-0005","s1","w4","2026-02-15T07:30:00",17,"o2");
+    // Serial 6: nothing done yet
+
+    // WO-2603 (5 serials, stages s1,s2,s3,s4,s5) — serial 1 fully done, 2 partially
+    mkLog("sn3a","GAM-MOT-0001","s1","w1","2026-02-03T07:30:00",25,"o3");
+    mkLog("sn3a","GAM-MOT-0001","s2","w5","2026-02-04T08:00:00",65,"o3");
+    mkLog("sn3a","GAM-MOT-0001","s3","w5","2026-02-05T08:00:00",55,"o3");
+    mkLog("sn3a","GAM-MOT-0001","s4","w3","2026-02-06T08:00:00",40,"o3");
+    mkLog("sn3a","GAM-MOT-0001","s5","w3","2026-02-07T08:00:00",30,"o3");
+    mkLog("sn3b","GAM-MOT-0002","s1","w4","2026-02-05T07:30:00",22,"o3");
+    mkLog("sn3b","GAM-MOT-0002","s2","w2","2026-02-06T08:00:00",58,"o3");
+    mkLog("sn3b","GAM-MOT-0002","s3","w2","2026-02-07T08:00:00",48,"o3");
+    // Serial 3: stage 1 done
+    mkLog("sn3c","GAM-MOT-0003","s1","w1","2026-02-10T07:30:00",24,"o3");
+    // Serials 4-5: nothing
+
+    // WO-2604 (4 serials, all 6 stages) — serial 1: stages 1-4 done, serial 2: stage 1
+    mkLog("sn4a","ALF-PWR-0001","s1","w1","2026-02-18T07:30:00",14,"o4");
+    mkLog("sn4a","ALF-PWR-0001","s2","w2","2026-02-19T08:00:00",35,"o4");
+    mkLog("sn4a","ALF-PWR-0001","s3","w2","2026-02-20T08:00:00",28,"o4");
+    mkLog("sn4a","ALF-PWR-0001","s4","w3","2026-02-21T08:00:00",22,"o4");
+    mkLog("sn4b","ALF-PWR-0002","s1","w4","2026-03-01T07:30:00",16,"o4");
+
+    // WO-2605 (3 serials, all 6 stages) — serial 1: stage 1 done only
+    mkLog("sn5a","BET-CTL-0001","s1","w1","2026-03-05T07:30:00",20,"o3");
+
+    setOrders(demoOrders);
+    setWorkLogs(demoLogs);
+    // Save users to LS so login works
+    LS.set("users",FALLBACK_USERS);
+    setLoading(false);
+  },[]);
+
+  useEffect(()=>{oRef.current=orders},[orders]);
+  useEffect(()=>{pRef.current=projects},[projects]);
+  useEffect(()=>{sRef.current=stages},[stages]);
+  useEffect(()=>{wRef.current=workLogs},[workLogs]);
+
+  const persist=(no,np,ns,nw)=>{
+    const o=no??oRef.current,p=np??pRef.current,s=ns??sRef.current,w=nw??wRef.current;
+    LS.set("orders",o);LS.set("projects",p);LS.set("stages",s);LS.set("workLogs",w);
+    if(GS_URL){setSync("saving");clearTimeout(saveTimer);saveTimer=setTimeout(async()=>{try{await fetch(GS_URL,{method:"POST",body:JSON.stringify({action:"save",payload:{orders:o,projects:p,stages:s,workLogs:w}})});setSync("ok")}catch{setSync("error")}},800)}
+  };
+
+  const handleLogin=u=>{setCurrentUser(u);try{localStorage.setItem(LS_PREFIX+"session",JSON.stringify({id:u.id,username:u.username}))}catch{}};
+  const handleLogout=()=>{
+    if(currentUser)addAuditEntry({userId:currentUser.id,username:currentUser.username,name:currentUser.name,action:"התנתקות",target:"",details:""});
+    setCurrentUser(null);try{localStorage.removeItem(LS_PREFIX+"session")}catch{}
+  };
+
+  const canEdit=currentUser?.role==="admin"||currentUser?.role==="editor"||currentUser?.canEdit===true;
+  const canViewProject=pid=>{if(!currentUser)return false;if(currentUser.role==="admin")return true;const pa=currentUser.projectAccess;if(pa==="all")return true;if(Array.isArray(pa))return pa.includes(pid);return pa===pid};
+
+  const filteredProjects=projects.filter(p=>canViewProject(p.id));
+  const filteredOrders=orders.filter(o=>canViewProject(o.projectId));
+  const filteredWorkLogs=workLogs;
+
+  const updO=useCallback((fn)=>{setOrders(prev=>{const next=typeof fn==="function"?fn(prev):fn;persist(next,null,null,null);return next})},[]);
+  const updP=useCallback((fn)=>{setProjects(prev=>{const next=typeof fn==="function"?fn(prev):fn;persist(null,next,null,null);return next})},[]);
+
+  const handleStartWork=(log)=>{
+    setWorkLogs(prev=>{const next=[...prev,log];persist(null,null,null,next);return next});
+    addAuditEntry({userId:currentUser.id,username:currentUser.username,name:currentUser.name,action:"התחלת עבודה",target:log.serialSn,details:stages.find(s=>s.id===log.stageId)?.name||""});
+  };
+  const handleEndWork=(logId,duration)=>{
+    setWorkLogs(prev=>{
+      const next=prev.map(w=>w.id===logId?{...w,completed:true,endTime:nowISO(),durationMin:duration}:w);
+      persist(null,null,null,next);
+      return next;
+    });
+    const log=workLogs.find(w=>w.id===logId);
+    if(log)addAuditEntry({userId:currentUser.id,username:currentUser.username,name:currentUser.name,action:"סיום עבודה",target:log.serialSn,details:`${fmtTime(duration)} — ${stages.find(s=>s.id===log.stageId)?.name||""}`});
+  };
+
+  const isAdmin=currentUser?.role==="admin";
+  const isWorker=currentUser?.role==="worker";
+
+  const TABS=isAdmin?[
+    {id:"dashboard",label:"📊 דאשבורד"},
+    {id:"orders",label:'📋 פק"ע'},
+    {id:"mywork",label:"🔨 עבודה"},
+    {id:"workers",label:"👥 עובדים"},
+    {id:"yield",label:"📉 Yield"},
+    {id:"stages",label:"🔧 שלבים"},
+    {id:"projects",label:"🏗️ פרויקטים"},
+    {id:"excel",label:"📂 Excel"},
+  ]:isWorker?[
+    {id:"mywork",label:"🔨 העבודה שלי"},
+    {id:"orders",label:'📋 פק"ע'},
+  ]:[
+    {id:"dashboard",label:"📊 דאשבורד"},
+    {id:"orders",label:'📋 פק"ע'},
+    {id:"mywork",label:"🔨 עבודה"},
+    {id:"projects",label:"🏗️ פרויקטים"},
+  ];
+
+  // Alert count for badge
+  const alertCount=useMemo(()=>{let c=0;filteredOrders.forEach(o=>(o.defects||[]).filter(d=>d.status!=="closed"&&(d.severity==="critical"||d.severity==="high")).forEach(()=>c++));filteredOrders.filter(o=>o.targetDate&&new Date(o.targetDate)<new Date()).forEach(()=>c++);filteredWorkLogs.filter(w=>!w.completed).forEach(w=>{if(Math.round((Date.now()-new Date(w.startTime).getTime())/60000)>120)c++});return c},[filteredOrders,filteredWorkLogs]);
+
+  // PWA Install
+  useEffect(()=>{const isi=window.matchMedia("(display-mode:standalone)").matches||window.navigator.standalone;if(isi)return;const h=e=>{e.preventDefault();setInstallPrompt(e);setShowInstall(true)};window.addEventListener("beforeinstallprompt",h);window.addEventListener("appinstalled",()=>{setShowInstall(false);setInstallPrompt(null)});return()=>window.removeEventListener("beforeinstallprompt",h)},[]);
+  // Service Worker
+  useEffect(()=>{if(!("serviceWorker" in navigator))return;navigator.serviceWorker.register("./sw.js?v=2").then(reg=>{swRegRef.current=reg;if(reg.waiting)setShowUpdate(true);reg.addEventListener("updatefound",()=>{const nw=reg.installing;if(!nw)return;nw.addEventListener("statechange",()=>{if(nw.state==="installed"&&navigator.serviceWorker.controller)setShowUpdate(true)})});setInterval(()=>reg.update(),30*60*1000)}).catch(()=>{});navigator.serviceWorker.addEventListener("controllerchange",()=>window.location.reload())},[]);
+  const handleInstall=async()=>{if(!installPrompt)return;installPrompt.prompt();setInstallPrompt(null);setShowInstall(false)};
+  const handleUpdate=()=>{const r=swRegRef.current;if(r?.waiting)r.waiting.postMessage({type:"SKIP_WAITING"});else window.location.reload();setShowUpdate(false)};
+
+  if(!currentUser)return(<AuthCtx.Provider value={{currentUser,canEdit:false,canViewProject:()=>false}}><LoginScreen onLogin={handleLogin} lightMode={lightMode} toggleLight={()=>setLightMode(p=>!p)}/></AuthCtx.Provider>);
+  if(loading)return(<div style={{display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",height:"100vh",gap:16}}><div style={{fontSize:48}}>⚙️</div><div style={{color:"#60a5fa",fontSize:20,fontWeight:700}}>טוען...</div></div>);
+
+  // Default tab for workers
+  if(isWorker&&tab==="dashboard")setTab("mywork");
+  const lm=lightMode;
+
+  return(
+    <AuthCtx.Provider value={{currentUser,canEdit,canViewProject}}>
+      {showUpdate&&<UpdateBanner onUpdate={handleUpdate} onDismiss={()=>setShowUpdate(false)} lm={lm}/>}
+      <Navbar tab={tab} setTab={setTab} tabs={TABS} lightMode={lightMode} toggleLight={()=>setLightMode(p=>!p)} sync={sync} onAdmin={()=>setShowAdmin(true)} onLogout={handleLogout} alertCount={alertCount} onAlerts={()=>setShowAlerts(true)}/>
+      <main className="main-content" style={{maxWidth:1440,margin:"0 auto",padding:"16px 14px",paddingBottom:showInstall?"100px":"calc(16px + env(safe-area-inset-bottom,0px))"}}>
+        {tab==="dashboard"&&<Dashboard orders={filteredOrders} projects={filteredProjects} stages={stages} users={getUsers()} workLogs={filteredWorkLogs}/>}
+        {tab==="orders"&&<Orders orders={filteredOrders} projects={filteredProjects} stages={stages} updO={updO} workLogs={filteredWorkLogs}/>}
+        {tab==="mywork"&&<MyWork orders={filteredOrders} stages={stages} workLogs={filteredWorkLogs} onStartWork={handleStartWork} onEndWork={handleEndWork}/>}
+        {tab==="workers"&&isAdmin&&<WorkersDashboard users={getUsers()} workLogs={filteredWorkLogs} orders={filteredOrders} stages={stages}/>}
+        {tab==="yield"&&<YieldDashboard orders={filteredOrders} projects={filteredProjects} stages={stages} workLogs={filteredWorkLogs}/>}
+        {tab==="stages"&&isAdmin&&<StagesManagement stages={stages} setStages={setStages} persist={persist}/>}
+        {tab==="projects"&&<Projects projects={filteredProjects} orders={filteredOrders} updP={updP} stages={stages} workLogs={filteredWorkLogs}/>}
+        {tab==="excel"&&isAdmin&&<ExcelTab orders={filteredOrders} projects={filteredProjects} stages={stages} workLogs={filteredWorkLogs} users={getUsers()} updO={updO}/>}
+      </main>
+      {showInstall&&<InstallBanner onInstall={handleInstall} onDismiss={()=>setShowInstall(false)} lm={lm}/>}
+      {showAdmin&&isAdmin&&<AdminPanel projects={projects} stages={stages} onClose={()=>setShowAdmin(false)} lightMode={lightMode}/>}
+      {showAlerts&&<AlertsPanel orders={filteredOrders} stages={stages} workLogs={filteredWorkLogs} users={getUsers()} onClose={()=>setShowAlerts(false)}/>}
+    </AuthCtx.Provider>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById("root")).render(<App/>);
+</script>
+</body>
+</html>
