@@ -5,55 +5,62 @@
 2. לחץ על **"גיליון אלקטרוני ריק"**
 3. שנה את השם ל: **"ניהול קו ייצור — Data"**
 
-## שלב 2: יצירת הגיליונות (Sheets)
-צור 3 גיליונות (טאבים בתחתית):
-- **data** — כאן יישמרו הפקעות, שלבים, פרויקטים, ולוגי עבודה
-- **users** — כאן יישמרו המשתמשים
-- **audit** — כאן יישמר לוג הפעילות
-
-## שלב 3: פתיחת Apps Script
+## שלב 2: פתיחת Apps Script
+(הגיליונות `data` ו-`users` ייווצרו אוטומטית)
 1. בתפריט העליון: **הרחבות** → **Apps Script**
 2. מחק את כל הטקסט ב-`Code.gs`
 3. הדבק את הקוד הבא:
 
 ```javascript
-const SHEET_ID = SpreadsheetApp.getActiveSpreadsheet().getId();
+const SS = SpreadsheetApp.getActiveSpreadsheet();
+
+function getOrCreateSheet(name) {
+  let sheet = SS.getSheetByName(name);
+  if (!sheet) {
+    sheet = SS.insertSheet(name);
+    sheet.getRange("A1").setValue(name + "_json");
+  }
+  return sheet;
+}
 
 function doGet(e) {
-  const type = e.parameter.type;
+  const type = (e && e.parameter && e.parameter.type) || "";
   
   if (type === "users") {
-    const sheet = SpreadsheetApp.openById(SHEET_ID).getSheetByName("users");
-    if (!sheet || sheet.getLastRow() < 2) return ContentService.createTextOutput("[]").setMimeType(ContentService.MimeType.JSON);
+    const sheet = getOrCreateSheet("users");
+    if (sheet.getLastRow() < 2) return ContentService.createTextOutput("[]").setMimeType(ContentService.MimeType.JSON);
     const data = sheet.getRange("A2").getValue();
-    return ContentService.createTextOutput(data).setMimeType(ContentService.MimeType.JSON);
+    return ContentService.createTextOutput(data || "[]").setMimeType(ContentService.MimeType.JSON);
   }
   
-  // Default: load main data
-  const sheet = SpreadsheetApp.openById(SHEET_ID).getSheetByName("data");
-  if (!sheet || sheet.getLastRow() < 2) return ContentService.createTextOutput("{}").setMimeType(ContentService.MimeType.JSON);
+  const sheet = getOrCreateSheet("data");
+  if (sheet.getLastRow() < 2) return ContentService.createTextOutput("{}").setMimeType(ContentService.MimeType.JSON);
   const data = sheet.getRange("A2").getValue();
-  return ContentService.createTextOutput(data).setMimeType(ContentService.MimeType.JSON);
+  return ContentService.createTextOutput(data || "{}").setMimeType(ContentService.MimeType.JSON);
 }
 
 function doPost(e) {
-  const body = JSON.parse(e.postData.contents);
-  
-  if (body.action === "saveUsers") {
-    const sheet = SpreadsheetApp.openById(SHEET_ID).getSheetByName("users");
-    sheet.getRange("A1").setValue("users_json");
-    sheet.getRange("A2").setValue(JSON.stringify(body.users));
-    return ContentService.createTextOutput("ok").setMimeType(ContentService.MimeType.TEXT);
+  try {
+    const body = JSON.parse(e.postData.contents);
+    
+    if (body.action === "saveUsers") {
+      const sheet = getOrCreateSheet("users");
+      sheet.getRange("A1").setValue("users_json");
+      sheet.getRange("A2").setValue(JSON.stringify(body.users));
+      return ContentService.createTextOutput("ok").setMimeType(ContentService.MimeType.TEXT);
+    }
+    
+    if (body.action === "save") {
+      const sheet = getOrCreateSheet("data");
+      sheet.getRange("A1").setValue("data_json");
+      sheet.getRange("A2").setValue(JSON.stringify(body.payload));
+      return ContentService.createTextOutput("ok").setMimeType(ContentService.MimeType.TEXT);
+    }
+    
+    return ContentService.createTextOutput("unknown action").setMimeType(ContentService.MimeType.TEXT);
+  } catch(err) {
+    return ContentService.createTextOutput("error: " + err.message).setMimeType(ContentService.MimeType.TEXT);
   }
-  
-  if (body.action === "save") {
-    const sheet = SpreadsheetApp.openById(SHEET_ID).getSheetByName("data");
-    sheet.getRange("A1").setValue("data_json");
-    sheet.getRange("A2").setValue(JSON.stringify(body.payload));
-    return ContentService.createTextOutput("ok").setMimeType(ContentService.MimeType.TEXT);
-  }
-  
-  return ContentService.createTextOutput("unknown action").setMimeType(ContentService.MimeType.TEXT);
 }
 ```
 
@@ -100,3 +107,19 @@ function doPost(e) {
 | avi    | 1234   | עובד |
 
 > ⚠️ **חשוב:** שנה סיסמאות לאחר ההתחברות הראשונה!
+
+## 🔧 פתרון בעיות סנכרון
+
+### הסנכרון לא עובד?
+1. **פתח Console בדפדפן** (F12 → Console) — חפש הודעות `[SYNC]`
+2. **בדוק שה-URL נכון** — פתח את ה-URL בטאב חדש, אתה צריך לראות `{}` או את הנתונים
+3. **פרוס מחדש** — Apps Script → Deploy → Manage deployments → עריכה → New version → Deploy
+4. **⚠️ חשוב מאוד:** אחרי כל שינוי בקוד של Apps Script — חובה **פריסה חדשה** (New deployment) ולא רק שמירה!
+5. **נקה localStorage** — בדפדפן הפלאפון: הגדרות אתר → מחק נתונים, ואז רענן
+
+### בדיקה ידנית:
+פתח בדפדפן:
+```
+YOUR_URL?t=123
+```
+אם מחזיר `{}` — הנתונים עוד לא נשמרו. תעשה פעולה כלשהי באפליקציה ותבדוק שוב.
