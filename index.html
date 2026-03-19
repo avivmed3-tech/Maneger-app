@@ -1412,25 +1412,39 @@ function WorkersDashboard({users,workLogs,orders,stages,customTasks,onAddTask}){
       {/* Recent activity table — filtered by search */}
       <Card>
         <div style={{fontWeight:700,fontSize:14,marginBottom:10}}>📋 פעילות אחרונה{search?` — ${search}`:""}</div>
-        <div style={{overflowX:"auto"}}><table><thead><tr><th>עובד</th><th>S/N</th><th>שלב</th><th>עבודה נטו</th><th>קבוצה</th><th>תמחור שלב</th><th>הפסקות</th><th>סיום</th></tr></thead><tbody>
-          {workLogs.filter(w=>w.completed&&filterByPeriod(w.endTime)&&(!search||w.userName.includes(search))).sort((a,b)=>(b.endTime||"").localeCompare(a.endTime||"")).slice(0,50).map(w=>{
-            const stage=stages.find(s=>s.id===w.stageId);
-            const stagePrice=Number(stage?.price||0);
-            const groupSize=w.bulkCount||1;
-            const perUnitTime=w.durationMin?Math.round(w.durationMin/groupSize):0;
-            return(
-              <tr key={w.id}>
-                <td style={{fontWeight:600}}>{w.userName}</td>
-                <td style={{color:"#7eb8ff",fontSize:12}}>{w.serialSn}</td>
-                <td><span style={{color:stage?.color||"var(--c-muted)"}}>{stage?.name||"—"}</span></td>
-                <td>{fmtTime(w.durationMin)}{groupSize>1&&<span style={{fontSize:10,color:"var(--c-dim)"}}> ({fmtTime(perUnitTime)}/יח')</span>}</td>
-                <td style={{color:groupSize>1?"#60a5fa":"var(--c-dim)"}}>{groupSize>1?`×${groupSize}`:"—"}</td>
-                <td style={{color:stagePrice?"#a78bfa":"var(--c-dim)"}}>{stagePrice?fmtMoney(stagePrice):"—"}</td>
-                <td style={{color:"#f97316"}}>{(w.pauseLog||[]).length>0?`${(w.pauseLog||[]).length} (${fmtTime(w.totalPauseMin||0)})`:"—"}</td>
-                <td style={{fontSize:11,color:"var(--c-dim)"}}>{w.endTime?new Date(w.endTime).toLocaleString("he-IL",{day:"2-digit",month:"2-digit",hour:"2-digit",minute:"2-digit"}):""}</td>
-              </tr>
-            );
-          })}
+        <div style={{overflowX:"auto"}}><table><thead><tr><th>עובד</th><th>S/N</th><th>שלב</th><th>זמן כולל</th><th>ליחידה</th><th>תמחור</th><th>הפסקות</th><th>סיום</th></tr></thead><tbody>
+          {(()=>{
+            const logs=workLogs.filter(w=>w.completed&&filterByPeriod(w.endTime)&&(!search||w.userName.includes(search))).sort((a,b)=>(b.endTime||"").localeCompare(a.endTime||""));
+            // Group by bulkGroupId
+            const seen=new Set();const rows=[];
+            logs.forEach(w=>{
+              if(w.bulkGroupId){
+                if(seen.has(w.bulkGroupId))return;
+                seen.add(w.bulkGroupId);
+                const group=logs.filter(l=>l.bulkGroupId===w.bulkGroupId);
+                const sns=group.map(l=>l.serialSn).join(", ");
+                rows.push({...w,_sns:sns,_count:group.length,_grouped:true});
+              }else{
+                rows.push({...w,_sns:w.serialSn,_count:1,_grouped:false});
+              }
+            });
+            return rows.slice(0,50).map(w=>{
+              const stage=stages.find(s=>s.id===w.stageId);
+              const stagePrice=Number(stage?.price||0);
+              const perUnit=w._count>1?Math.round(w.durationMin/w._count):w.durationMin;
+              return(
+                <tr key={w.id}>
+                  <td style={{fontWeight:600}}>{w.userName}</td>
+                  <td style={{color:"#7eb8ff",fontSize:12}}>{w._count>1?<span>{w._count} יחידות<div style={{fontSize:10,color:"var(--c-dim)",maxWidth:200,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{w._sns}</div></span>:w._sns}</td>
+                  <td><span style={{color:stage?.color||"var(--c-muted)"}}>{stage?.name||"—"}</span></td>
+                  <td style={{fontWeight:w._count>1?700:400}}>{fmtTime(w.durationMin)}</td>
+                  <td style={{color:w._count>1?"#06b6d4":"var(--c-dim)"}}>{w._count>1?fmtTime(perUnit):"—"}</td>
+                  <td style={{color:stagePrice?"#a78bfa":"var(--c-dim)"}}>{stagePrice?`₪${stagePrice}${w._count>1?` × ${w._count} = ₪${stagePrice*w._count}`:""}`:"—"}</td>
+                  <td style={{color:"#f97316"}}>{(w.pauseLog||[]).length>0?`${(w.pauseLog||[]).length} (${fmtTime(w.totalPauseMin||0)})`:"—"}</td>
+                  <td style={{fontSize:11,color:"var(--c-dim)"}}>{w.endTime?new Date(w.endTime).toLocaleString("he-IL",{day:"2-digit",month:"2-digit",hour:"2-digit",minute:"2-digit"}):""}</td>
+                </tr>);
+            });
+          })()}
         </tbody></table></div>
       </Card>
 
