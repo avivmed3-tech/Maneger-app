@@ -854,7 +854,7 @@ function Orders({orders,projects,stages,stageBlocks,updO,workLogs}){
               {o.description&&<div style={{fontSize:13,color:"var(--c-muted)",marginBottom:4}}>{o.description}</div>}
               <div style={{display:"flex",gap:10,fontSize:12,color:"var(--c-dim)",marginBottom:5,flexWrap:"wrap"}}>
                 <span>יחידות: <b style={{color:"var(--c-text)"}}>{serials.length}</b></span>
-                <span>מחיר: <b style={{color:"#a78bfa"}}>{fmtMoney(o.unitPrice)}</b></span>
+                {canEdit&&<span>מחיר: <b style={{color:"#a78bfa"}}>{fmtMoney(o.unitPrice)}</b></span>}
                 <span>שלבים: <b>{(o.stageIds||[]).length}</b></span>
               </div>
               <PBar pct={pct}/>
@@ -1209,17 +1209,19 @@ function MyWork({orders,stages,workLogs,onStartWork,onEndWork,onPauseWork,onResu
 
       {/* Available Work */}
       {accessible.map(o=>{
-        const oStages=(o.stageIds||[]).filter(sid=>myAccess.includes(sid)).map(sid=>stages.find(s=>s.id===sid)).filter(Boolean).sort((a,b)=>a.order-b.order);
+        // ALL stages in order (not just worker's access)
+        const allStagesOrdered=(o.stageIds||[]).map(sid=>stages.find(s=>s.id===sid)).filter(Boolean).sort((a,b)=>a.order-b.order);
+        // For each serial, find its true next stage (respecting order)
         const pendingSerials=(o.serials||[]).filter(s=>{
-          return oStages.some(st=>{
-            const done=workLogs.some(w=>w.serialId===s.id&&w.stageId===st.id&&w.completed);
-            const active=workLogs.some(w=>w.serialId===s.id&&w.stageId===st.id&&!w.completed);
-            return!done&&!active;
-          });
+          // Find the first uncompleted stage for this serial
+          const nextSt=allStagesOrdered.find(st=>!workLogs.some(w=>w.serialId===s.id&&w.stageId===st.id&&w.completed));
+          if(!nextSt)return false; // all stages done
+          // Worker can only see if the next stage is one they have access to
+          return myAccess.includes(nextSt.id)&&!workLogs.some(w=>w.serialId===s.id&&w.stageId===nextSt.id&&!w.completed);
         });
         if(pendingSerials.length===0)return null;
         // For bulk: find common next stage
-        const commonStage=oStages.find(st=>pendingSerials.some(s=>!workLogs.some(w=>w.serialId===s.id&&w.stageId===st.id&&w.completed)));
+        const commonStage=allStagesOrdered.find(st=>myAccess.includes(st.id)&&pendingSerials.some(s=>{const ns=allStagesOrdered.find(st2=>!workLogs.some(w=>w.serialId===s.id&&w.stageId===st2.id&&w.completed));return ns?.id===st.id}));
         return(
           <Card key={o.id} style={{marginBottom:10}}>
             <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:10,flexWrap:"wrap"}}>
@@ -1230,8 +1232,8 @@ function MyWork({orders,stages,workLogs,onStartWork,onEndWork,onPauseWork,onResu
             </div>
             <div style={{display:"flex",flexDirection:"column",gap:6}}>
               {pendingSerials.slice(0,15).map(s=>{
-                const nextStage=oStages.find(st=>!workLogs.some(w=>w.serialId===s.id&&w.stageId===st.id&&w.completed));
-                if(!nextStage)return null;
+                const nextStage=allStagesOrdered.find(st=>!workLogs.some(w=>w.serialId===s.id&&w.stageId===st.id&&w.completed));
+                if(!nextStage||!myAccess.includes(nextStage.id))return null;
                 const isSel=bulkSelected.includes(s.id);
                 return(
                   <div key={s.id} style={{display:"flex",justifyContent:"space-between",alignItems:"center",background:isSel?"#3b82f611":"var(--c-deep)",borderRadius:8,padding:"8px 12px",border:isSel?"1px solid #3b82f6":"1px solid transparent"}}>
