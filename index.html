@@ -23,6 +23,7 @@
   --c-input-bg:#0a0e1a;--c-input-border:#283650;--c-row-hover:#151d32;
   --c-table-border:#151d32;--c-tag-blue-bg:#152240;--c-tag-blue:#7eb8ff;
   --c-accent:#3b82f6;--c-accent2:#06b6d4;--c-green:#10b981;--c-amber:#f59e0b;--c-red:#ef4444;
+  --c-chart-label:#8b95a8;--c-chart-grid:#283650;--c-chart-tooltip:#0d1120;
   --safe-top:env(safe-area-inset-top,0px);
   --safe-bottom:env(safe-area-inset-bottom,0px);
 }
@@ -31,9 +32,12 @@ body.light-mode{
   --c-border:#dde1e8;--c-border2:#c8cdd6;--c-text:#1a1f2e;--c-muted:#5a6478;--c-dim:#8b95a8;
   --c-input-bg:#ffffff;--c-input-border:#c8cdd6;--c-row-hover:#f7f8fa;
   --c-table-border:#ebeef2;--c-tag-blue-bg:#dbeafe;--c-tag-blue:#2563eb;
+  --c-chart-label:#374151;--c-chart-grid:#d1d5db;--c-chart-tooltip:#1e293b;
 }
 body{background:var(--c-bg);font-family:'Segoe UI',Tahoma,Arial,sans-serif;color:var(--c-text);direction:rtl;transition:background .25s,color .25s;min-height:100vh;min-height:100dvh;overflow-x:hidden}
 input,select,textarea{background:var(--c-input-bg);border:1px solid var(--c-input-border);border-radius:8px;padding:9px 12px;color:var(--c-text);font-size:14px;font-family:inherit;width:100%;outline:none;transition:background .25s,color .25s,border-color .2s;-webkit-appearance:none;appearance:none}
+input[type=checkbox]{width:auto!important;-webkit-appearance:checkbox!important;appearance:checkbox!important;accent-color:var(--c-accent);min-width:16px;min-height:16px}
+input[type=color]{-webkit-appearance:auto!important;appearance:auto!important;padding:2px}
 input:focus,select:focus,textarea:focus{border-color:var(--c-accent)}
 select{background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='11' height='7' viewBox='0 0 11 7'%3E%3Cpath fill='%238b95a8' d='M5.5 7L0 0h11z'/%3E%3C/svg%3E");background-repeat:no-repeat;background-position:right 10px center;padding-right:30px !important;padding-left:8px}
 select option{background:var(--c-card)}
@@ -76,8 +80,7 @@ const {useState,useEffect,useCallback,useRef,useMemo}=React;
 
 // ── Config ─────────────────────────────────────────────────────────────────
 const GS_URL="https://script.google.com/macros/s/AKfycbwUFwqj8UBGbhDgRATwJeKiTO8MHlAeOoX66Lu6NibH5vwcSTknuJAupcqNqTuko6SZ2A/exec";
-const APP_VERSION="1.0.0";
-const APP_DATE="2026-03-18";
+const APP_VERSION="2.0.0";const APP_DATE="2026-03-19";
 const FALLBACK_USERS=[
   {id:"admin",username:"admin",password:"admin123",role:"admin",name:"מנהל מערכת",projectAccess:"all",stageAccess:"all",canEdit:true,canView:true,active:true,hourlyRate:0},
   {id:"w1",username:"yossi",password:"1234",role:"worker",name:"יוסי כהן",projectAccess:"all",stageAccess:["s1","s2","s3"],canEdit:false,canView:true,active:true,hourlyRate:55},
@@ -109,6 +112,8 @@ const todays=()=>new Date().toISOString().slice(0,10);
 const nowISO=()=>new Date().toISOString();
 const daysBetween=(a,b)=>{if(!a||!b)return null;return Math.round((new Date(b)-new Date(a))/86400000)};
 const mkKey=d=>d?d.slice(0,7):null;
+const qK=d=>{if(!d)return null;const[y,m]=d.split("-");return`${y}-Q${Math.ceil(Number(m)/3)}`};
+const yK=d=>d?d.slice(0,4):null;
 
 // ── Storage ────────────────────────────────────────────────────────────────
 const LS={
@@ -117,6 +122,8 @@ const LS={
 };
 function getUsers(){try{const u=localStorage.getItem(LS_PREFIX+"users");return u?JSON.parse(u):FALLBACK_USERS}catch{return FALLBACK_USERS}}
 function saveUsers(u){LS.set("users",u);if(GS_URL)fetch(GS_URL,{method:"POST",body:JSON.stringify({action:"saveUsers",users:u})}).catch(()=>{})}
+async function gsLoad(){if(!GS_URL)return null;try{const r=await fetch(GS_URL+"?t="+Date.now());const t=await r.text();const d=JSON.parse(t);return d&&(d.orders||d.workLogs)?d:null}catch{return null}}
+async function gsLoadUsers(){if(!GS_URL)return null;try{const r=await fetch(GS_URL+"?type=users&t="+Date.now());const t=await r.text();const d=JSON.parse(t);if(Array.isArray(d)&&d.length>0){LS.set("users",d);return d}return null}catch{return null}}
 function getAuditLog(){return LS.get("audit")||[]}
 function addAuditEntry(entry){try{const log=getAuditLog();log.unshift({...entry,id:uid(),timestamp:nowISO(),reverted:false});LS.set("audit",log.slice(0,1000))}catch{}}
 
@@ -202,16 +209,16 @@ function BarChart({data,color,formatVal,height=130}){
   const fmtL=l=>{if(/^\d{4}-\d{2}$/.test(l)){const[y,m]=l.split("-");return MN[+m]+"'"+y.slice(2)}return l};
   return(
     <svg viewBox={`0 0 ${W} ${H}`} style={{width:"100%",height:"auto",display:"block"}}>
-      {grids.map((v,i)=>{const y=padT+height-(v/niceMax)*height;return(<g key={i}><line x1={padL} y1={y} x2={W-padR} y2={y} stroke={i===0?"var(--c-border)":"var(--c-border)"} strokeWidth={i===0?1.5:1} strokeDasharray={i===0?"":"3 3"} opacity={i===0?1:.3}/><text x={padL-6} y={y+4} textAnchor="end" fill="var(--c-dim)" fontSize={10} fontFamily="sans-serif">{fmtA(v)}</text></g>)})}
+      {grids.map((v,i)=>{const y=padT+height-(v/niceMax)*height;return(<g key={i}><line x1={padL} y1={y} x2={W-padR} y2={y} stroke="var(--c-chart-grid)" strokeWidth={i===0?1.5:1} strokeDasharray={i===0?"":"3 3"} opacity={i===0?1:.4}/><text x={padL-6} y={y+4} textAnchor="end" fill="var(--c-chart-label)" fontSize={10} fontFamily="sans-serif">{fmtA(v)}</text></g>)})}
       {data.map((d,i)=>{const x=bx(i),h=bh(d.value),y=by(d.value),isH=hov===i;return(
         <g key={i} onMouseEnter={()=>setHov(i)} onMouseLeave={()=>setHov(null)} style={{cursor:"pointer"}}>
           {isH&&<rect x={x-3} y={y-3} width={bw+6} height={h+3} rx={5} fill={color} opacity={0.12}/>}
           <rect x={x} y={y} width={bw} height={h} rx={4} fill={isH?color:color+"bb"}/>
-          {isH&&(()=>{const tw=80,tx=Math.min(Math.max(bx(i)+bw/2-tw/2,padL),W-padR-tw);return(<g><rect x={tx} y={y-34} width={tw} height={26} rx={5} fill="var(--c-deep)" stroke={color} strokeWidth={1}/><text x={tx+tw/2} y={y-17} textAnchor="middle" fill={color} fontSize={11} fontWeight="700" fontFamily="sans-serif">{formatVal(d.value)}</text></g>)})()}
+          {isH&&(()=>{const tw=80,tx=Math.min(Math.max(bx(i)+bw/2-tw/2,padL),W-padR-tw);return(<g><rect x={tx} y={y-34} width={tw} height={26} rx={5} fill="var(--c-chart-tooltip)" stroke={color} strokeWidth={1}/><text x={tx+tw/2} y={y-17} textAnchor="middle" fill={color} fontSize={11} fontWeight="700" fontFamily="sans-serif">{formatVal(d.value)}</text></g>)})()}
         </g>
       )})}
-      <line x1={padL} y1={padT+height} x2={W-padR} y2={padT+height} stroke="var(--c-border)" strokeWidth={1.5}/>
-      {data.map((d,i)=><text key={i} x={bx(i)+bw/2} y={padT+height+20} textAnchor="middle" fill="var(--c-muted)" fontSize={11} fontWeight="600" fontFamily="sans-serif">{fmtL(d.label)}</text>)}
+      <line x1={padL} y1={padT+height} x2={W-padR} y2={padT+height} stroke="var(--c-chart-grid)" strokeWidth={1.5}/>
+      {data.map((d,i)=><text key={i} x={bx(i)+bw/2} y={padT+height+20} textAnchor="middle" fill="var(--c-chart-label)" fontSize={11} fontWeight="600" fontFamily="sans-serif">{fmtL(d.label)}</text>)}
     </svg>
   );
 }
@@ -286,151 +293,148 @@ function LoginScreen({onLogin,lightMode,toggleLight}){
 // ═══ DASHBOARD ═══════════════════════════════════════════════════════════
 // ══════════════════════════════════════════════════════════════════════════
 function Dashboard({orders,projects,stages,users,workLogs}){
-  const allSerials=orders.flatMap(o=>(o.serials||[]));
-  const totalSerials=allSerials.length;
-  const completedSerials=allSerials.filter(s=>{
-    const oStages=(orders.find(o=>o.serials?.some(sr=>sr.id===s.id))?.stageIds)||[];
-    const logs=workLogs.filter(w=>w.serialId===s.id&&w.completed);
-    return oStages.length>0&&oStages.every(sid=>logs.some(l=>l.stageId===sid));
-  }).length;
-  const totalRev=orders.reduce((s,o)=>s+((o.serials||[]).length)*Number(o.unitPrice||0)*(completedSerials>0?1:0),0);
-  const actualRev=orders.reduce((sum,o)=>{
-    const price=Number(o.unitPrice||0);
-    const completed=(o.serials||[]).filter(s=>{
-      const oStages=o.stageIds||[];
-      const logs=workLogs.filter(w=>w.serialId===s.id&&w.completed);
-      return oStages.length>0&&oStages.every(sid=>logs.some(l=>l.stageId===sid));
-    }).length;
-    return sum+completed*price;
-  },0);
-  const totalWorkMins=workLogs.filter(w=>w.completed&&w.durationMin).reduce((s,w)=>s+w.durationMin,0);
-  const totalWorkCost=workLogs.filter(w=>w.completed&&w.durationMin).reduce((s,w)=>{
-    const user=users.find(u=>u.id===w.userId);
-    const rate=Number(user?.hourlyRate||0)/60;
-    return s+w.durationMin*rate;
-  },0);
-  const openDefects=orders.flatMap(o=>(o.defects||[]).filter(d=>d.status!=="closed")).length;
-  const openOrders=orders.filter(o=>{
-    const sers=o.serials||[];
-    if(sers.length===0)return true;
-    return sers.some(s=>{
-      const oStages=o.stageIds||[];
-      const logs=workLogs.filter(w=>w.serialId===s.id&&w.completed);
-      return !oStages.every(sid=>logs.some(l=>l.stageId===sid));
-    });
-  }).length;
+  const [period,setPeriod]=useState("month");
+  const [selYear,setSelYear]=useState("all");
+  const [selProj,setSelProj]=useState("all");
+  const [donutSlice,setDonutSlice]=useState("status");
 
-  // Revenue by month
-  const revByMonth={};
-  workLogs.filter(w=>w.completed&&w.endTime).forEach(w=>{
-    const k=mkKey(w.endTime);if(!k)return;
-    const o=orders.find(o=>(o.serials||[]).some(s=>s.id===w.serialId));
-    if(!o)return;
-    // Only count revenue when ALL stages of that serial are done
-    const ser=o.serials?.find(s=>s.id===w.serialId);
-    if(!ser)return;
-    const allDone=(o.stageIds||[]).every(sid=>workLogs.some(l=>l.serialId===w.serialId&&l.stageId===sid&&l.completed));
-    if(!allDone)return;
-    // Avoid double counting per serial
-    const alreadyCounted=revByMonth[k]?._serials?.has(w.serialId);
-    if(alreadyCounted)return;
-    if(!revByMonth[k])revByMonth[k]={rev:0,_serials:new Set()};
-    revByMonth[k].rev+=Number(o.unitPrice||0);
-    revByMonth[k]._serials.add(w.serialId);
+  // Compute all years from workLogs
+  const allYears=useMemo(()=>[...new Set(workLogs.filter(w=>w.completed&&w.endTime).map(w=>yK(w.endTime)).filter(Boolean))].sort().reverse(),[workLogs]);
+
+  // Filter orders by project
+  const fOrders=useMemo(()=>orders.filter(o=>selProj==="all"||o.projectId===selProj),[orders,selProj]);
+
+  // Filter workLogs by year
+  const fLogs=useMemo(()=>workLogs.filter(w=>{if(!w.completed||!w.endTime)return false;if(selYear!=="all"&&yK(w.endTime)!==selYear)return false;return true}),[workLogs,selYear]);
+
+  // Helper: is serial done
+  const isSerDone=(o,s)=>{const st=o.stageIds||[];return st.length>0&&st.every(sid=>workLogs.some(w=>w.serialId===s.id&&w.stageId===sid&&w.completed))};
+
+  // KPIs
+  const totalSerials=fOrders.reduce((s,o)=>s+(o.serials||[]).length,0);
+  const completedSerials=fOrders.reduce((s,o)=>s+(o.serials||[]).filter(sr=>isSerDone(o,sr)).length,0);
+  const actualRev=fOrders.reduce((s,o)=>{const done=(o.serials||[]).filter(sr=>isSerDone(o,sr)).length;return s+done*Number(o.unitPrice||0)},0);
+  const totalWorkMins=fLogs.reduce((s,w)=>s+(w.durationMin||0),0);
+  const totalWorkCost=fLogs.reduce((s,w)=>{const u=users.find(u2=>u2.id===w.userId);return s+(w.durationMin||0)*(Number(u?.hourlyRate||0)/60)},0);
+  const openDefects=fOrders.flatMap(o=>(o.defects||[]).filter(d=>d.status!=="closed")).length;
+  const openOrders=fOrders.filter(o=>{const sers=o.serials||[];return sers.length===0||sers.some(s=>!isSerDone(o,s))}).length;
+  const openShortages=fOrders.flatMap(o=>(o.shortages||[]).filter(s2=>!s2.received)).length;
+  const forecastRev=fOrders.reduce((s,o)=>{const remaining=Math.max(0,(o.serials||[]).length-(o.serials||[]).filter(sr=>isSerDone(o,sr)).length);return s+remaining*Number(o.unitPrice||0)},0);
+
+  // Revenue by period
+  const keyFn=d=>period==="year"?yK(d):period==="quarter"?qK(d):mkKey(d);
+  const revByPeriod={};
+  const counted=new Set();
+  fLogs.forEach(w=>{
+    const k=keyFn(w.endTime);if(!k)return;
+    const o=fOrders.find(o2=>(o2.serials||[]).some(s=>s.id===w.serialId));if(!o)return;
+    if(!isSerDone(o,{id:w.serialId}))return;
+    const ck=w.serialId+"|"+k;if(counted.has(ck))return;counted.add(ck);
+    if(!revByPeriod[k])revByPeriod[k]={rev:0,qty:0};
+    revByPeriod[k].rev+=Number(o.unitPrice||0);revByPeriod[k].qty+=1;
   });
-  const revKeys=Object.keys(revByMonth).sort().slice(-8);
-  const revData=revKeys.map(k=>({label:k,value:revByMonth[k].rev}));
+  const pKeys=Object.keys(revByPeriod).sort().slice(-10);
 
-  // Workers productivity
+  // Donut data
+  let donutData=[];
+  if(donutSlice==="status"){
+    donutData=[{label:"הושלמו",value:completedSerials},{label:"בתהליך",value:totalSerials-completedSerials}].filter(d=>d.value>0);
+  }else if(donutSlice==="project"){
+    donutData=projects.map(p=>{const po=fOrders.filter(o=>o.projectId===p.id);const done=po.reduce((s,o)=>(o.serials||[]).filter(sr=>isSerDone(o,sr)).length+s,0);return{label:p.name,value:done}}).filter(d=>d.value>0);
+  }else{
+    donutData=stages.map(st=>({label:st.name,value:fLogs.filter(w=>w.stageId===st.id).length,color:st.color})).filter(d=>d.value>0);
+  }
+
+  // Worker stats
   const workerStats=users.filter(u=>u.role!=="admin"&&u.active!==false).map(u=>{
-    const logs=workLogs.filter(w=>w.userId===u.id&&w.completed&&w.durationMin);
-    const totalMin=logs.reduce((s,w)=>s+w.durationMin,0);
-    const units=logs.length;
-    const rate=Number(u.hourlyRate||0);
-    const cost=totalMin*(rate/60);
-    const revenue=logs.reduce((s,w)=>{
-      const o=orders.find(o=>(o.serials||[]).some(sr=>sr.id===w.serialId));
-      return s+Number(o?.unitPrice||0);
-    },0);
-    return{...u,totalMin,units,cost,revenue,profit:revenue-cost,unitsPerHour:totalMin>0?(units/(totalMin/60)):0};
-  }).sort((a,b)=>b.unitsPerHour-a.unitsPerHour);
+    const logs=fLogs.filter(w=>w.userId===u.id&&w.durationMin);const totalMin=logs.reduce((s,w)=>s+w.durationMin,0);const units=logs.length;
+    const cost=totalMin*(Number(u.hourlyRate||0)/60);const rev=logs.reduce((s,w)=>{const o2=orders.find(o3=>(o3.serials||[]).some(sr=>sr.id===w.serialId));return s+Number(o2?.unitPrice||0)},0);
+    return{...u,totalMin,units,cost,revenue:rev,profit:rev-cost,uph:totalMin>0?(units/(totalMin/60)):0};
+  }).sort((a,b)=>b.uph-a.uph);
 
-  // Stage completion donut
-  const stageDonut=stages.map(st=>{
-    const completed=workLogs.filter(w=>w.stageId===st.id&&w.completed).length;
-    return{label:st.name,value:completed,color:st.color};
-  }).filter(d=>d.value>0);
+  // Overdue
+  const overdue=fOrders.filter(o=>o.targetDate&&new Date(o.targetDate)<new Date()&&(o.serials||[]).some(s=>!isSerDone(o,s)));
 
   return(
     <div className="fade-in">
-      <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(130px,1fr))",gap:9,marginBottom:14}}>
+      {/* Filter bar */}
+      <div className="dash-filter-sticky" style={{position:"sticky",zIndex:40,background:"var(--c-bg)",paddingTop:8,paddingBottom:4,marginBottom:8}}>
+        <Card style={{padding:"10px 14px",display:"flex",gap:12,flexWrap:"wrap",alignItems:"flex-end",boxShadow:"0 2px 8px #0003"}}>
+          <span style={{fontSize:13,color:"var(--c-dim)",fontWeight:600,paddingBottom:2}}>🔍</span>
+          <div style={{display:"flex",flexDirection:"column",gap:3,minWidth:140}}><label style={{fontSize:11,color:"var(--c-dim)"}}>פרויקט</label><select value={selProj} onChange={e=>setSelProj(e.target.value)} style={{padding:"5px 8px",fontSize:12}}><option value="all">כל הפרויקטים</option>{projects.map(p=><option key={p.id} value={p.id}>{p.name}</option>)}</select></div>
+          <div style={{display:"flex",flexDirection:"column",gap:3}}><label style={{fontSize:11,color:"var(--c-dim)"}}>שנה</label><select value={selYear} onChange={e=>setSelYear(e.target.value)} style={{padding:"5px 8px",fontSize:12}}><option value="all">כל השנים</option>{allYears.map(y=><option key={y} value={y}>{y}</option>)}</select></div>
+          <div style={{display:"flex",flexDirection:"column",gap:3}}><label style={{fontSize:11,color:"var(--c-dim)"}}>תקופה</label><SegBtn options={[["month","חודשי"],["quarter","רבעוני"],["year","שנתי"]]} value={period} onChange={setPeriod}/></div>
+          {(selProj!=="all"||selYear!=="all")&&<button onClick={()=>{setSelProj("all");setSelYear("all")}} style={{background:"#374151",color:"#e2e8f0",border:"none",borderRadius:6,padding:"5px 10px",fontSize:12,fontFamily:"inherit"}}>✕ נקה</button>}
+        </Card>
+      </div>
+
+      {/* KPIs */}
+      <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(120px,1fr))",gap:9,marginBottom:14}}>
         <KpiBox i="📋" v={openOrders} label='פק"ע פתוחות' c="#f59e0b"/>
         <KpiBox i="🔢" v={totalSerials.toLocaleString()} label='סה"כ יחידות' c="#60a5fa"/>
-        <KpiBox i="✅" v={completedSerials.toLocaleString()} label="יחידות שהושלמו" c="#10b981"/>
+        <KpiBox i="✅" v={completedSerials.toLocaleString()} label="הושלמו" c="#10b981"/>
         <KpiBox i="💰" v={fmtMoney(actualRev)} label="הכנסה ממומשת" c="#a78bfa"/>
-        <KpiBox i="⏱️" v={fmtTime(totalWorkMins)} label="שעות עבודה" c="#06b6d4"/>
+        <KpiBox i="🔮" v={fmtMoney(forecastRev)} label="צפי הכנסות" c="#06b6d4"/>
+        <KpiBox i="⏱️" v={fmtTime(totalWorkMins)} label="שעות עבודה" c="#3b82f6"/>
         <KpiBox i="💵" v={fmtMoney(totalWorkCost)} label="עלות עבודה" c="#f97316"/>
         <KpiBox i="🔧" v={openDefects} label="תקלות פתוחות" c="#ef4444"/>
+        <KpiBox i="⚠️" v={openShortages} label="חוסרים פתוחים" c="#dc2626"/>
       </div>
+
+      {/* Operational insights */}
+      {(overdue.length>0)&&(
+        <Card style={{marginBottom:12,border:"1px solid #ef444433"}}>
+          <div style={{fontWeight:700,fontSize:13,color:"#ef4444",marginBottom:8}}>🚨 פק"ע באיחור ({overdue.length})</div>
+          {overdue.slice(0,5).map(o=>{const d=daysBetween(o.targetDate,todays());return(
+            <div key={o.id} style={{background:"var(--c-deep)",borderRadius:8,padding:"8px 12px",marginBottom:4,display:"flex",justifyContent:"space-between",alignItems:"center",border:"1px solid #ef444422"}}>
+              <div><span style={{fontWeight:700,color:"#60a5fa"}}>{o.woNumber}</span><span style={{fontSize:11,color:"var(--c-dim)",marginRight:8}}>{o.description}</span></div>
+              <span style={{color:"#ef4444",fontWeight:700,fontSize:12}}>+{d} ימים</span>
+            </div>
+          )})}
+        </Card>
+      )}
 
       {/* Worker Productivity */}
       <Card style={{marginBottom:14}}>
         <div style={{fontWeight:700,fontSize:15,marginBottom:12}}>👥 הספק עובדים</div>
         {workerStats.length===0?<div style={{color:"var(--c-dim)",textAlign:"center",padding:20}}>אין נתונים</div>:(
-          <div style={{overflowX:"auto"}}><table><thead><tr><th>עובד</th><th>יחידות</th><th>שעות עבודה</th><th>יח'/שעה</th><th>עלות</th><th>הכנסה</th><th>רווח</th></tr></thead><tbody>
-            {workerStats.map(w=>{const profitColor=w.profit>=0?"#10b981":"#ef4444";return(
-              <tr key={w.id}>
-                <td style={{fontWeight:600}}>{w.name}</td>
-                <td style={{color:"#60a5fa"}}>{w.units}</td>
-                <td>{fmtTime(w.totalMin)}</td>
-                <td style={{fontWeight:700,color:"#06b6d4"}}>{w.unitsPerHour.toFixed(1)}</td>
-                <td style={{color:"#f97316"}}>{fmtMoney(w.cost)}</td>
-                <td style={{color:"#a78bfa"}}>{fmtMoney(w.revenue)}</td>
-                <td style={{fontWeight:700,color:profitColor}}>{fmtMoney(w.profit)}</td>
-              </tr>
-            )})}
+          <div style={{overflowX:"auto"}}><table><thead><tr><th>עובד</th><th>יחידות</th><th>שעות</th><th>יח'/שעה</th><th>עלות</th><th>הכנסה</th><th>רווח</th></tr></thead><tbody>
+            {workerStats.map(w=>(<tr key={w.id}><td style={{fontWeight:600}}>{w.name}</td><td style={{color:"#60a5fa"}}>{w.units}</td><td>{fmtTime(w.totalMin)}</td><td style={{fontWeight:700,color:"#06b6d4"}}>{w.uph.toFixed(1)}</td><td style={{color:"#f97316"}}>{fmtMoney(w.cost)}</td><td style={{color:"#a78bfa"}}>{fmtMoney(w.revenue)}</td><td style={{fontWeight:700,color:w.profit>=0?"#10b981":"#ef4444"}}>{fmtMoney(w.profit)}</td></tr>))}
           </tbody></table></div>
         )}
       </Card>
 
+      {/* Charts */}
       <div style={{display:"grid",gridTemplateColumns:"minmax(0,1.6fr) minmax(0,1fr)",gap:12,marginBottom:12}} className="chart-grid">
         <Card>
-          <div style={{fontWeight:700,fontSize:14,marginBottom:12}}>💰 הכנסות לפי חודש</div>
-          <BarChart data={revData} color="#a78bfa" formatVal={v=>fmtMoney(v)} height={130}/>
+          <div style={{fontWeight:700,fontSize:14,marginBottom:12}}>💰 הכנסות לפי {period==="month"?"חודש":period==="quarter"?"רבעון":"שנה"}</div>
+          <BarChart data={pKeys.map(k=>({label:k,value:revByPeriod[k].rev}))} color="#a78bfa" formatVal={v=>fmtMoney(v)} height={130}/>
         </Card>
-        <Card>
-          <div style={{fontWeight:700,fontSize:14,marginBottom:10}}>📊 ביצועים לפי שלב</div>
-          <DonutChart data={stageDonut} size={170}/>
+        <Card style={{display:"flex",flexDirection:"column"}}>
+          <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:10}}><div style={{fontWeight:700,fontSize:14}}>📊 התפלגות</div><select value={donutSlice} onChange={e=>setDonutSlice(e.target.value)} style={{padding:"3px 6px",fontSize:11,width:"auto"}}><option value="status">סטטוס</option><option value="project">פרויקטים</option><option value="stage">שלבים</option></select></div>
+          <div style={{flex:1,display:"flex",alignItems:"center",justifyContent:"center"}}><DonutChart data={donutData} size={170}/></div>
         </Card>
       </div>
 
-      {/* Stage progress per project */}
+      {/* Quantities bar */}
       <Card style={{marginBottom:12}}>
+        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:12}}><div style={{fontWeight:700,fontSize:14}}>📦 כמויות שהושלמו</div><div style={{fontSize:12,color:"var(--c-muted)"}}>סה"כ: <b style={{color:"#3b82f6"}}>{pKeys.reduce((s,k)=>s+revByPeriod[k].qty,0).toLocaleString()}</b></div></div>
+        <BarChart data={pKeys.map(k=>({label:k,value:revByPeriod[k].qty}))} color="#3b82f6" formatVal={v=>v.toLocaleString()} height={100}/>
+      </Card>
+
+      {/* Project progress */}
+      <Card>
         <div style={{fontWeight:700,fontSize:15,marginBottom:14}}>🏗️ התקדמות לפי פרויקט</div>
         {projects.map((p,idx)=>{
-          const po=orders.filter(o=>o.projectId===p.id);
-          const totalSer=po.reduce((s,o)=>s+(o.serials||[]).length,0);
-          const completeSer=po.reduce((s,o)=>(o.serials||[]).filter(sr=>{
-            const oStages=o.stageIds||[];
-            const logs=workLogs.filter(w=>w.serialId===sr.id&&w.completed);
-            return oStages.length>0&&oStages.every(sid=>logs.some(l=>l.stageId===sid));
-          }).length+s,0);
-          const pct=totalSer?Math.round(completeSer/totalSer*100):0;
-          const c=COLORS[idx%COLORS.length];
+          const po=fOrders.filter(o=>o.projectId===p.id);const totalSer=po.reduce((s,o)=>s+(o.serials||[]).length,0);
+          const completeSer=po.reduce((s,o)=>(o.serials||[]).filter(sr=>isSerDone(o,sr)).length+s,0);
+          const pct=totalSer?Math.round(completeSer/totalSer*100):0;const c=COLORS[idx%COLORS.length];
           if(totalSer===0)return null;
-          return(
-            <div key={p.id} style={{background:"var(--c-deep)",borderRadius:10,padding:"12px 14px",marginBottom:8}}>
-              <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8}}>
-                <div style={{display:"flex",alignItems:"center",gap:7}}><div style={{width:9,height:9,borderRadius:2,background:c}}/><span style={{fontWeight:600,fontSize:13}}>{p.name}</span></div>
-                <span style={{fontSize:14,fontWeight:800,color:c}}>{pct}%</span>
-              </div>
-              <PBar pct={pct} h={7} color={c}/>
-              <div style={{display:"flex",justifyContent:"space-between",fontSize:11,color:"var(--c-dim)",marginTop:4}}>
-                <span>{completeSer}/{totalSer} יחידות</span>
-                <span>{po.length} פק"ע</span>
-              </div>
-            </div>
-          );
+          return(<div key={p.id} style={{background:"var(--c-deep)",borderRadius:10,padding:"12px 14px",marginBottom:8}}>
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8}}><div style={{display:"flex",alignItems:"center",gap:7}}><div style={{width:9,height:9,borderRadius:2,background:c}}/><span style={{fontWeight:600,fontSize:13}}>{p.name}</span></div><span style={{fontSize:14,fontWeight:800,color:c}}>{pct}%</span></div>
+            <PBar pct={pct} h={7} color={c}/>
+            <div style={{display:"flex",justifyContent:"space-between",fontSize:11,color:"var(--c-dim)",marginTop:4}}><span>{completeSer}/{totalSer} יחידות</span><span>{po.length} פק"ע</span></div>
+          </div>);
         })}
       </Card>
     </div>
@@ -756,35 +760,114 @@ function Orders({orders,projects,stages,updO,workLogs}){
 }
 
 // ══════════════════════════════════════════════════════════════════════════
-// ═══ MY WORK (Worker View) ═══════════════════════════════════════════════
+// ═══ SHORTAGES (חוסרים) ═════════════════════════════════════════════════
 // ══════════════════════════════════════════════════════════════════════════
-function MyWork({orders,stages,workLogs,onStartWork,onEndWork}){
-  const {currentUser}=useAuth();
-  const myStageAccess=currentUser.stageAccess==="all"?stages.map(s=>s.id):(Array.isArray(currentUser.stageAccess)?currentUser.stageAccess:[]);
-  const myActiveLog=workLogs.find(w=>w.userId===currentUser.id&&!w.completed);
-
-  // Get accessible orders with accessible stages
-  const accessibleOrders=orders.filter(o=>{
-    return(o.stageIds||[]).some(sid=>myStageAccess.includes(sid));
+function Shortages({orders,updO,projects}){
+  const {canEdit}=useAuth();
+  const [filter,setFilter]=useState("open");
+  const [filterProj,setFilterProj]=useState("all");
+  const [partialModal,setPartialModal]=useState(null);
+  const [partialQty,setPartialQty]=useState("");
+  const all=orders.flatMap(o=>(o.shortages||[]).map(s=>({...s,order:o,proj:projects.find(p=>p.id===o.projectId)}))).filter(s=>{
+    if(filterProj!=="all"&&s.order.projectId!==filterProj)return false;
+    return filter==="all"||(filter==="open"&&!s.received)||(filter==="received"&&s.received);
   });
+  const markRec=(oid,sid)=>{updO(prev=>prev.map(o=>{if(o.id!==oid)return o;const sh=o.shortages.map(s=>s.id===sid?{...s,received:true,receivedDate:todays(),receivedQty:Number(s.missing||0)}:s);return{...o,shortages:sh}}))};
+  const markRecPartial=(oid,sid,qty)=>{updO(prev=>prev.map(o=>{if(o.id!==oid)return o;const sh=o.shortages.map(s=>{if(s.id!==sid)return s;const nq=Number(s.receivedQty||0)+Number(qty),tot=Number(s.missing||0);return{...s,receivedQty:nq,received:tot>0&&nq>=tot,receivedDate:todays()}});return{...o,shortages:sh}}));setPartialModal(null);setPartialQty("")};
+  return(
+    <div className="fade-in">
+      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:12,flexWrap:"wrap",gap:10}}>
+        <h2 style={{margin:0,fontSize:22,color:"#f87171"}}>⚠️ חוסרים</h2>
+        <SegBtn options={[["open","פתוחים"],["received","שהתקבלו"],["all","הכל"]]} value={filter} onChange={setFilter}/>
+      </div>
+      <Card style={{padding:"10px 14px",marginBottom:12,display:"flex",gap:12,alignItems:"flex-end",flexWrap:"wrap"}}>
+        <div style={{display:"flex",flexDirection:"column",gap:3,minWidth:160}}><label style={{fontSize:11,color:"var(--c-dim)"}}>פרויקט</label><select value={filterProj} onChange={e=>setFilterProj(e.target.value)} style={{padding:"6px 8px",fontSize:12}}><option value="all">הכל</option>{projects.map(p=><option key={p.id} value={p.id}>{p.name}</option>)}</select></div>
+        <div style={{fontSize:12,color:"var(--c-dim)",paddingBottom:4}}>{all.length} חוסרים</div>
+      </Card>
+      {all.length===0?<div style={{textAlign:"center",padding:60,color:"var(--c-dim)",fontSize:18}}>{filter==="open"?"🎉 אין חוסרים פתוחים!":"אין נתונים"}</div>:(
+        <div style={{display:"flex",flexDirection:"column",gap:8}}>
+          {all.map(s=>{const rq=Number(s.receivedQty||0),tot=Number(s.missing||0),isPar=rq>0&&!s.received;return(
+            <div key={s.id} style={{background:"var(--c-card)",borderRadius:10,padding:"12px 14px",border:`1px solid ${s.received?"#10b98133":isPar?"#f59e0b33":"#ef444433"}`,display:"flex",justifyContent:"space-between",alignItems:"center",flexWrap:"wrap",gap:10}}>
+              <div style={{flex:1}}>
+                <div style={{fontWeight:700,color:s.received?"#10b981":isPar?"#f59e0b":"#f87171",marginBottom:3}}>{s.item}{s.sku&&<span style={{fontSize:11,color:"#7eb8ff",marginRight:8,fontWeight:400}}>מק"ט: {s.sku}</span>}</div>
+                <div style={{fontSize:12,color:"var(--c-muted)",display:"flex",gap:10,flexWrap:"wrap"}}>
+                  <span style={{color:"#60a5fa"}}>{s.order.woNumber}</span>
+                  {tot>0&&<span>נדרש: {tot}{isPar?` | התקבל: ${rq}`:""}</span>}
+                  <span>הוזמן: {fmt(s.orderedDate)}</span>
+                  {s.received&&s.orderedDate&&s.receivedDate&&<span style={{color:"#a78bfa"}}>⏱ {daysBetween(s.orderedDate,s.receivedDate)} ימים</span>}
+                </div>
+                {(s.reason||s.responsible)&&<div style={{fontSize:11,color:"var(--c-dim)",marginTop:3,display:"flex",gap:10,flexWrap:"wrap"}}>{s.reason&&<span>סיבה: {s.reason}</span>}{s.responsible&&<span style={{color:"#a78bfa"}}>אחראי: {s.responsible}</span>}</div>}
+              </div>
+              <div style={{display:"flex",gap:6,alignItems:"center",flexWrap:"wrap"}}>
+                {canEdit&&!s.received&&<><Btn color="#f59e0b" small onClick={()=>{setPartialModal({oid:s.order.id,sid:s.id,item:s.item});setPartialQty("")}}>📦 חלקי</Btn><Btn color="#10b981" small onClick={()=>markRec(s.order.id,s.id)}>✅ הכל</Btn></>}
+                {s.received?<span style={{fontSize:11,background:"#052e16",color:"#6ee7b7",padding:"3px 9px",borderRadius:20}}>✅ הושלם</span>:isPar?<span style={{fontSize:11,background:"#451a0344",color:"#fbbf24",padding:"3px 9px",borderRadius:20}}>📦 חלקי</span>:<span style={{fontSize:11,background:"#450a0a",color:"#fca5a5",padding:"3px 9px",borderRadius:20}}>❌ ממתין</span>}
+              </div>
+            </div>
+          )})}
+        </div>
+      )}
+      {partialModal&&(<div onClick={()=>setPartialModal(null)} style={{position:"fixed",inset:0,background:"#000c",zIndex:200,display:"flex",alignItems:"center",justifyContent:"center",padding:16}}><div onClick={e=>e.stopPropagation()} style={{background:"var(--c-card)",borderRadius:12,padding:24,minWidth:280,border:"1px solid var(--c-border2)"}}><div style={{fontWeight:700,fontSize:16,marginBottom:12,color:"#f59e0b"}}>📦 קבלה חלקית</div><div style={{fontSize:13,color:"var(--c-muted)",marginBottom:12}}>{partialModal.item}</div><Field label="כמות שהתקבלה" type="number" value={partialQty} onChange={setPartialQty}/><div style={{display:"flex",gap:8,marginTop:14}}><Btn color="#f59e0b" onClick={()=>partialQty&&markRecPartial(partialModal.oid,partialModal.sid,partialQty)}>שמור</Btn><Btn onClick={()=>setPartialModal(null)}>ביטול</Btn></div></div></div>)}
+    </div>
+  );
+}
+
+// ══════════════════════════════════════════════════════════════════════════
+// ═══ MY WORK (Worker View) — Enhanced with Break, Bulk, Custom Tasks ════
+// ══════════════════════════════════════════════════════════════════════════
+function MyWork({orders,stages,workLogs,onStartWork,onEndWork,onPauseWork,onResumeWork,customTasks,onAddTask,onStartTask,onEndTask}){
+  const {currentUser}=useAuth();
+  const myAccess=currentUser.stageAccess==="all"?stages.map(s=>s.id):(Array.isArray(currentUser.stageAccess)?currentUser.stageAccess:[]);
+  const myActiveLogs=workLogs.filter(w=>w.userId===currentUser.id&&!w.completed);
+  const myActiveLog=myActiveLogs[0];
+  const [bulkMode,setBulkMode]=useState(false);
+  const [bulkSelected,setBulkSelected]=useState([]);
+  const [showTaskForm,setShowTaskForm]=useState(false);
+  const [taskName,setTaskName]=useState("");
+  const [taskDesc,setTaskDesc]=useState("");
+
+  const accessible=orders.filter(o=>(o.stageIds||[]).some(sid=>myAccess.includes(sid)));
 
   const startWork=(serialId,stageId,orderId)=>{
-    if(myActiveLog){alert("יש לך עבודה פעילה. סיים אותה קודם.");return}
-    const order=orders.find(o=>o.id===orderId);
-    const serial=(order?.serials||[]).find(s=>s.id===serialId);
-    onStartWork({
-      id:uid(),userId:currentUser.id,userName:currentUser.name,
-      serialId,stageId,orderId,serialSn:serial?.sn||"",
-      startTime:nowISO(),endTime:null,completed:false,durationMin:0
+    if(myActiveLog&&!myActiveLog.paused){alert("יש לך עבודה פעילה. סיים או עצור לפני שמתחיל חדשה.");return}
+    const order=orders.find(o=>o.id===orderId);const serial=(order?.serials||[]).find(s=>s.id===serialId);
+    onStartWork({id:uid(),userId:currentUser.id,userName:currentUser.name,serialId,stageId,orderId,serialSn:serial?.sn||"",startTime:nowISO(),endTime:null,completed:false,durationMin:0,paused:false,pauseStart:null,totalPauseMin:0,pauseLog:[]});
+  };
+
+  const startBulk=(oId,stId)=>{
+    if(myActiveLog&&!myActiveLog.paused){alert("יש עבודה פעילה");return}
+    const order=orders.find(o=>o.id===oId);
+    bulkSelected.forEach(sId=>{
+      const serial=(order?.serials||[]).find(s=>s.id===sId);
+      onStartWork({id:uid(),userId:currentUser.id,userName:currentUser.name,serialId:sId,stageId:stId,orderId:oId,serialSn:serial?.sn||"",startTime:nowISO(),endTime:null,completed:false,durationMin:0,paused:false,pauseStart:null,totalPauseMin:0,pauseLog:[],bulk:true});
     });
+    setBulkSelected([]);setBulkMode(false);
   };
 
   const endWork=()=>{
     if(!myActiveLog)return;
     const start=new Date(myActiveLog.startTime);
-    const dur=Math.round((Date.now()-start.getTime())/60000);
-    onEndWork(myActiveLog.id,dur);
+    let dur=Math.round((Date.now()-start.getTime())/60000);
+    dur-=(myActiveLog.totalPauseMin||0);
+    if(myActiveLog.paused&&myActiveLog.pauseStart)dur-=Math.round((Date.now()-new Date(myActiveLog.pauseStart).getTime())/60000);
+    onEndWork(myActiveLog.id,Math.max(0,dur));
+    // If bulk, end all
+    myActiveLogs.filter(w=>w.bulk&&w.id!==myActiveLog.id).forEach(w=>{
+      let d2=Math.round((Date.now()-new Date(w.startTime).getTime())/60000)-(w.totalPauseMin||0);
+      onEndWork(w.id,Math.max(0,d2));
+    });
   };
+
+  const togglePause=()=>{
+    if(!myActiveLog)return;
+    if(myActiveLog.paused){onResumeWork(myActiveLog.id)}
+    else{onPauseWork(myActiveLog.id)}
+  };
+
+  // My custom tasks
+  const myTasks=(customTasks||[]).filter(t=>t.userId===currentUser.id);
+  const activeTask=myTasks.find(t=>t.active&&!t.completed);
+
+  const addTask=()=>{if(!taskName.trim())return;onAddTask({id:uid(),userId:currentUser.id,userName:currentUser.name,name:taskName.trim(),description:taskDesc.trim(),createdAt:nowISO(),active:false,completed:false,startTime:null,endTime:null,durationMin:0,paused:false,pauseStart:null,totalPauseMin:0,pauseLog:[]});setTaskName("");setTaskDesc("");setShowTaskForm(false)};
 
   return(
     <div className="fade-in">
@@ -792,23 +875,84 @@ function MyWork({orders,stages,workLogs,onStartWork,onEndWork}){
 
       {/* Active Work */}
       {myActiveLog&&(
-        <Card style={{marginBottom:14,border:"2px solid #f59e0b",background:"linear-gradient(135deg,var(--c-card),#1a1800)"}}>
+        <Card style={{marginBottom:14,border:`2px solid ${myActiveLog.paused?"#8b95a8":"#f59e0b"}`,background:myActiveLog.paused?"var(--c-card)":"linear-gradient(135deg,var(--c-card),#1a1800)"}}>
           <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",flexWrap:"wrap",gap:10}}>
             <div>
-              <div style={{fontSize:12,color:"#f59e0b",fontWeight:700,marginBottom:4}}>⏱️ עובד כרגע:</div>
-              <div style={{fontWeight:700,fontSize:16}}>{myActiveLog.serialSn}</div>
+              <div style={{fontSize:12,color:myActiveLog.paused?"#8b95a8":"#f59e0b",fontWeight:700,marginBottom:4}}>{myActiveLog.paused?"⏸️ בהפסקה":"⏱️ עובד כרגע:"}{myActiveLogs.length>1&&<span style={{marginRight:6,fontSize:11,background:"#3b82f622",color:"#60a5fa",padding:"2px 8px",borderRadius:12}}>×{myActiveLogs.length} יחידות</span>}</div>
+              <div style={{fontWeight:700,fontSize:16}}>{myActiveLog.serialSn}{myActiveLogs.length>1&&` + ${myActiveLogs.length-1}`}</div>
               <div style={{fontSize:13,color:"var(--c-muted)"}}>{stages.find(s=>s.id===myActiveLog.stageId)?.name}</div>
               <div style={{fontSize:12,color:"var(--c-dim)",marginTop:4}}>התחלה: {new Date(myActiveLog.startTime).toLocaleTimeString("he-IL",{hour:"2-digit",minute:"2-digit"})}</div>
-              <ActiveTimer startTime={myActiveLog.startTime}/>
+              {(myActiveLog.totalPauseMin>0||(myActiveLog.pauseLog||[]).length>0)&&<div style={{fontSize:11,color:"#8b95a8",marginTop:2}}>הפסקות: {fmtTime(myActiveLog.totalPauseMin||0)} ({(myActiveLog.pauseLog||[]).length} פעמים)</div>}
+              {!myActiveLog.paused&&<ActiveTimer startTime={myActiveLog.startTime} pauseMin={myActiveLog.totalPauseMin||0}/>}
+              {myActiveLog.paused&&<div style={{fontSize:22,fontWeight:800,color:"#8b95a8",marginTop:6}}>⏸️ מושהה</div>}
             </div>
-            <Btn color="#10b981" onClick={endWork} style={{fontSize:16,padding:"12px 24px"}}>✅ סיימתי</Btn>
+            <div style={{display:"flex",flexDirection:"column",gap:8}}>
+              <Btn color={myActiveLog.paused?"#3b82f6":"#f97316"} onClick={togglePause} style={{fontSize:14,padding:"10px 20px"}}>{myActiveLog.paused?"▶️ חזור לעבודה":"⏸️ הפסקה"}</Btn>
+              <Btn color="#10b981" onClick={endWork} style={{fontSize:16,padding:"12px 24px"}}>✅ סיימתי</Btn>
+            </div>
           </div>
         </Card>
       )}
 
+      {/* Active Custom Task */}
+      {activeTask&&(
+        <Card style={{marginBottom:14,border:"2px solid #a78bfa"}}>
+          <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",flexWrap:"wrap",gap:10}}>
+            <div>
+              <div style={{fontSize:12,color:"#a78bfa",fontWeight:700,marginBottom:4}}>📌 משימה מותאמת:</div>
+              <div style={{fontWeight:700,fontSize:16}}>{activeTask.name}</div>
+              {activeTask.description&&<div style={{fontSize:12,color:"var(--c-muted)"}}>{activeTask.description}</div>}
+              <ActiveTimer startTime={activeTask.startTime} pauseMin={activeTask.totalPauseMin||0}/>
+            </div>
+            <Btn color="#10b981" onClick={()=>onEndTask(activeTask.id)} style={{fontSize:16,padding:"12px 24px"}}>✅ סיימתי</Btn>
+          </div>
+        </Card>
+      )}
+
+      {/* Custom Tasks Section */}
+      <Card style={{marginBottom:14,border:"1px solid #a78bfa33"}}>
+        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:10}}>
+          <h3 style={{margin:0,fontSize:15,color:"#a78bfa"}}>📌 משימות מותאמות</h3>
+          <Btn color="#a78bfa" small onClick={()=>setShowTaskForm(p=>!p)}>+ חדשה</Btn>
+        </div>
+        {showTaskForm&&(
+          <div style={{background:"var(--c-deep)",borderRadius:8,padding:12,marginBottom:10,display:"flex",gap:10,flexWrap:"wrap",alignItems:"flex-end"}}>
+            <Field label="שם משימה *" value={taskName} onChange={setTaskName} style={{minWidth:160}}/>
+            <Field label="תיאור" value={taskDesc} onChange={setTaskDesc} style={{minWidth:200}}/>
+            <Btn color="#a78bfa" onClick={addTask} small>הוסף</Btn>
+            <Btn onClick={()=>setShowTaskForm(false)} small>ביטול</Btn>
+          </div>
+        )}
+        {myTasks.filter(t=>!t.completed).length===0&&!showTaskForm?<div style={{color:"var(--c-dim)",fontSize:12,textAlign:"center",padding:10}}>אין משימות פתוחות</div>:(
+          <div style={{display:"flex",flexDirection:"column",gap:6}}>
+            {myTasks.filter(t=>!t.completed).map(t=>(
+              <div key={t.id} style={{display:"flex",justifyContent:"space-between",alignItems:"center",background:"var(--c-deep)",borderRadius:8,padding:"8px 12px",border:t.active?"1px solid #a78bfa":"1px solid var(--c-border)"}}>
+                <div><span style={{fontWeight:600,fontSize:13}}>{t.name}</span>{t.description&&<span style={{fontSize:11,color:"var(--c-dim)",marginRight:6}}> — {t.description}</span>}{t.active&&<span style={{fontSize:11,color:"#a78bfa",marginRight:6}}>🔄 פעיל</span>}</div>
+                {!t.active?<Btn color="#a78bfa" small onClick={()=>onStartTask(t.id)} disabled={!!activeTask||!!myActiveLog}>▶️ התחל</Btn>:<Btn color="#10b981" small onClick={()=>onEndTask(t.id)}>✅ סיים</Btn>}
+              </div>
+            ))}
+          </div>
+        )}
+        {myTasks.filter(t=>t.completed).length>0&&(
+          <div style={{marginTop:10,borderTop:"1px solid var(--c-border)",paddingTop:8}}>
+            <div style={{fontSize:11,color:"var(--c-dim)",marginBottom:6}}>הושלמו:</div>
+            {myTasks.filter(t=>t.completed).slice(0,5).map(t=>(
+              <div key={t.id} style={{fontSize:12,color:"var(--c-muted)",padding:"3px 0",display:"flex",gap:10}}>
+                <span>✅ {t.name}</span><span style={{color:"#a78bfa"}}>{fmtTime(t.durationMin)}</span>
+              </div>
+            ))}
+          </div>
+        )}
+      </Card>
+
+      {/* Bulk mode toggle */}
+      <div style={{display:"flex",gap:8,marginBottom:10}}>
+        <Btn color={bulkMode?"#ef4444":"#374151"} small onClick={()=>{setBulkMode(p=>!p);setBulkSelected([])}}>{bulkMode?"✕ בטל מצב קבוצתי":"📦 הפעלת טיימר קבוצתי"}</Btn>
+      </div>
+
       {/* Available Work */}
-      {accessibleOrders.map(o=>{
-        const oStages=(o.stageIds||[]).filter(sid=>myStageAccess.includes(sid)).map(sid=>stages.find(s=>s.id===sid)).filter(Boolean).sort((a,b)=>a.order-b.order);
+      {accessible.map(o=>{
+        const oStages=(o.stageIds||[]).filter(sid=>myAccess.includes(sid)).map(sid=>stages.find(s=>s.id===sid)).filter(Boolean).sort((a,b)=>a.order-b.order);
         const pendingSerials=(o.serials||[]).filter(s=>{
           return oStages.some(st=>{
             const done=workLogs.some(w=>w.serialId===s.id&&w.stageId===st.id&&w.completed);
@@ -817,51 +961,50 @@ function MyWork({orders,stages,workLogs,onStartWork,onEndWork}){
           });
         });
         if(pendingSerials.length===0)return null;
+        // For bulk: find common next stage
+        const commonStage=oStages.find(st=>pendingSerials.some(s=>!workLogs.some(w=>w.serialId===s.id&&w.stageId===st.id&&w.completed)));
         return(
           <Card key={o.id} style={{marginBottom:10}}>
-            <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:10}}>
+            <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:10,flexWrap:"wrap"}}>
               <span style={{fontWeight:700,color:"#60a5fa"}}>{o.woNumber}</span>
               {o.pn&&<span style={{fontSize:12,color:"#a78bfa"}}>P/N: {o.pn}</span>}
               <span style={{fontSize:11,color:"var(--c-dim)"}}>({pendingSerials.length} ממתינות)</span>
+              {bulkMode&&commonStage&&bulkSelected.length>0&&<Btn color={commonStage.color} small onClick={()=>startBulk(o.id,commonStage.id)}>▶️ התחל {bulkSelected.length} יחידות — {commonStage.name}</Btn>}
             </div>
             <div style={{display:"flex",flexDirection:"column",gap:6}}>
-              {pendingSerials.slice(0,10).map(s=>{
-                const nextStage=oStages.find(st=>{
-                  const done=workLogs.some(w=>w.serialId===s.id&&w.stageId===st.id&&w.completed);
-                  return!done;
-                });
+              {pendingSerials.slice(0,15).map(s=>{
+                const nextStage=oStages.find(st=>!workLogs.some(w=>w.serialId===s.id&&w.stageId===st.id&&w.completed));
                 if(!nextStage)return null;
+                const isSel=bulkSelected.includes(s.id);
                 return(
-                  <div key={s.id} style={{display:"flex",justifyContent:"space-between",alignItems:"center",background:"var(--c-deep)",borderRadius:8,padding:"8px 12px"}}>
-                    <div>
+                  <div key={s.id} style={{display:"flex",justifyContent:"space-between",alignItems:"center",background:isSel?"#3b82f611":"var(--c-deep)",borderRadius:8,padding:"8px 12px",border:isSel?"1px solid #3b82f6":"1px solid transparent"}}>
+                    <div style={{display:"flex",alignItems:"center",gap:8}}>
+                      {bulkMode&&<input type="checkbox" checked={isSel} onChange={e=>{setBulkSelected(p=>e.target.checked?[...p,s.id]:p.filter(x=>x!==s.id))}}/>}
                       <span style={{fontWeight:600,fontSize:13}}>{s.sn}</span>
-                      <span style={{fontSize:11,color:nextStage.color,marginRight:8}}>← {nextStage.name}</span>
+                      <span style={{fontSize:11,color:nextStage.color}}>← {nextStage.name}</span>
                     </div>
-                    <Btn color={nextStage.color} small onClick={()=>startWork(s.id,nextStage.id,o.id)} disabled={!!myActiveLog}>▶️ התחל</Btn>
+                    {!bulkMode&&<Btn color={nextStage.color} small onClick={()=>startWork(s.id,nextStage.id,o.id)} disabled={!!(myActiveLog&&!myActiveLog.paused)}>▶️ התחל</Btn>}
                   </div>
                 );
               })}
-              {pendingSerials.length>10&&<div style={{fontSize:12,color:"var(--c-dim)",textAlign:"center"}}>ועוד {pendingSerials.length-10}...</div>}
+              {pendingSerials.length>15&&<div style={{fontSize:12,color:"var(--c-dim)",textAlign:"center"}}>ועוד {pendingSerials.length-15}...</div>}
             </div>
           </Card>
         );
       })}
-      {accessibleOrders.every(o=>{
-        const oStages=(o.stageIds||[]).filter(sid=>myStageAccess.includes(sid));
-        return(o.serials||[]).every(s=>oStages.every(st=>workLogs.some(w=>w.serialId===s.id&&w.stageId===st.id&&w.completed)));
-      })&&!myActiveLog&&<div style={{textAlign:"center",padding:40,color:"var(--c-dim)"}}>🎉 אין עבודה ממתינה!</div>}
+      {!myActiveLog&&!activeTask&&accessible.every(o=>{
+        const oSt=(o.stageIds||[]).filter(sid=>myAccess.includes(sid));
+        return(o.serials||[]).every(s=>oSt.every(st=>workLogs.some(w=>w.serialId===s.id&&w.stageId===st.id&&w.completed)));
+      })&&<div style={{textAlign:"center",padding:40,color:"var(--c-dim)"}}>🎉 אין עבודה ממתינה!</div>}
     </div>
   );
 }
 
-function ActiveTimer({startTime}){
-  const [elapsed,setElapsed]=useState(0);
-  useEffect(()=>{
-    const t=setInterval(()=>{setElapsed(Math.round((Date.now()-new Date(startTime).getTime())/1000))},1000);
-    return()=>clearInterval(t);
-  },[startTime]);
-  const h=Math.floor(elapsed/3600),m=Math.floor((elapsed%3600)/60),s=elapsed%60;
-  return <div style={{fontSize:22,fontWeight:800,color:"#f59e0b",marginTop:6,fontVariantNumeric:"tabular-nums"}}>{String(h).padStart(2,"0")}:{String(m).padStart(2,"0")}:{String(s).padStart(2,"0")}</div>;
+function ActiveTimer({startTime,pauseMin=0}){
+  const[e2,setE]=useState(0);
+  useEffect(()=>{const t=setInterval(()=>{setE(Math.max(0,Math.round((Date.now()-new Date(startTime).getTime())/1000)-pauseMin*60))},1000);return()=>clearInterval(t)},[startTime,pauseMin]);
+  const h=Math.floor(e2/3600),m=Math.floor((e2%3600)/60),s=e2%60;
+  return<div style={{fontSize:22,fontWeight:800,color:"#f59e0b",marginTop:6,fontVariantNumeric:"tabular-nums"}}>{String(h).padStart(2,"0")}:{String(m).padStart(2,"0")}:{String(s).padStart(2,"0")}</div>;
 }
 
 // ══════════════════════════════════════════════════════════════════════════
@@ -1349,7 +1492,7 @@ function doExport(orders,projects,stages,workLogs,users){
   const h5=['עובד','תעריף שעתי','יחידות','שעות עבודה','יח/שעה','עלות','הכנסה','רווח'];
   const r5=users.filter(u=>u.role!=="admin"&&u.active!==false).map(u=>{const logs=workLogs.filter(w=>w.userId===u.id&&w.completed&&w.durationMin);const mins=logs.reduce((s,w)=>s+w.durationMin,0);const cost=mins*(Number(u.hourlyRate||0)/60);const rev=logs.reduce((s,w)=>{const o2=orders.find(o3=>(o3.serials||[]).some(sr=>sr.id===w.serialId));return s+Number(o2?.unitPrice||0)},0);return[u.name,Number(u.hourlyRate||0),logs.length,Math.round(mins/60*10)/10,mins>0?Math.round(logs.length/(mins/60)*10)/10:0,Math.round(cost),Math.round(rev),Math.round(rev-cost)]});
   XLSX.utils.book_append_sheet(wb,mkSheet(h5,r5.length?r5:[["",0,0,0,0,0,0,0]],[16,12,10,12,10,12,12,12]),"ביצועי עובדים");
-  XLSX.writeFile(wb,"דוח_קו_ייצור_"+today()+".xlsx");
+  XLSX.writeFile(wb,"דוח_קו_ייצור_"+todays()+".xlsx");
 }
 
 function doImport(file,projects,stages,cb){
@@ -1366,7 +1509,7 @@ function doImport(file,projects,stages,cb){
     // Sheet 3: defects
     const wsD=wb.Sheets[sn[2]];const sMap={"קריטית":"critical","גבוהה":"high","בינונית":"medium","נמוכה":"low"};const tMap={"איכות":"quality","תהליך":"process","חומר גלם":"material","ציוד":"equipment","גורם אנושי":"human","אחר":"other"};
     if(wsD)XLSX.utils.sheet_to_json(wsD,{defval:""}).forEach(r=>{const wo=String(r['פק"ע']||r['מספר פק"ע']||"").trim();if(!wo||!oMap[wo])return;const title=String(r["כותרת"]||r["תקלה"]||"").trim();if(!title)return;const snV2=String(r["S/N"]||"").trim();const ms=oMap[wo].serials.find(s=>s.sn===snV2);
-      oMap[wo].defects.push({id:uid(),title,serialId:ms?.id||"",type:tMap[String(r["סוג"]||"")]||"other",severity:sMap[String(r["חומרה"]||"")]||"medium",description:String(r["תיאור"]||"").trim(),responsible:String(r["אחראי"]||"").trim(),discoveredDate:r["תאריך גילוי"]||today(),status:String(r["סטטוס"]||"").includes("סגור")?"closed":"open"})});
+      oMap[wo].defects.push({id:uid(),title,serialId:ms?.id||"",type:tMap[String(r["סוג"]||"")]||"other",severity:sMap[String(r["חומרה"]||"")]||"medium",description:String(r["תיאור"]||"").trim(),responsible:String(r["אחראי"]||"").trim(),discoveredDate:r["תאריך גילוי"]||todays(),status:String(r["סטטוס"]||"").includes("סגור")?"closed":"open"})});
     cb(Object.values(oMap),null);
   }catch(err){cb(null,"שגיאה: "+err.message)}};
   fr.readAsArrayBuffer(file);
@@ -1529,6 +1672,7 @@ function App(){
   const [projects,setProjects]=useState(DEF_PROJ);
   const [stages,setStages]=useState(DEF_STAGES);
   const [workLogs,setWorkLogs]=useState([]);
+  const [customTasks,setCustomTasks]=useState([]);
   const [loading,setLoading]=useState(true);
   const [sync,setSync]=useState("ok");
   // PWA state
@@ -1546,169 +1690,67 @@ function App(){
   },[lightMode]);
 
   useEffect(()=>{
+    // Load from localStorage first for instant display
     const lo=LS.get("orders"),lp=LS.get("projects"),ls=LS.get("stages"),lw=LS.get("workLogs");
-    if(lo){setOrders(lo);if(lp)setProjects(lp);if(ls)setStages(ls);if(lw)setWorkLogs(lw);setLoading(false);return}
-    // ── DEMO DATA — seed on first load ────────────────────────────────
-    const demoSerials1=[
-      {id:"sn1a",sn:"ALF-PCB-0001",createdAt:"2026-01-05T08:00:00Z"},
-      {id:"sn1b",sn:"ALF-PCB-0002",createdAt:"2026-01-05T08:00:00Z"},
-      {id:"sn1c",sn:"ALF-PCB-0003",createdAt:"2026-01-05T08:00:00Z"},
-      {id:"sn1d",sn:"ALF-PCB-0004",createdAt:"2026-01-06T08:00:00Z"},
-      {id:"sn1e",sn:"ALF-PCB-0005",createdAt:"2026-01-06T08:00:00Z"},
-      {id:"sn1f",sn:"ALF-PCB-0006",createdAt:"2026-01-07T08:00:00Z"},
-      {id:"sn1g",sn:"ALF-PCB-0007",createdAt:"2026-01-07T08:00:00Z"},
-      {id:"sn1h",sn:"ALF-PCB-0008",createdAt:"2026-01-08T08:00:00Z"},
-    ];
-    const demoSerials2=[
-      {id:"sn2a",sn:"BET-SNS-0001",createdAt:"2026-01-10T08:00:00Z"},
-      {id:"sn2b",sn:"BET-SNS-0002",createdAt:"2026-01-10T08:00:00Z"},
-      {id:"sn2c",sn:"BET-SNS-0003",createdAt:"2026-01-10T08:00:00Z"},
-      {id:"sn2d",sn:"BET-SNS-0004",createdAt:"2026-01-11T08:00:00Z"},
-      {id:"sn2e",sn:"BET-SNS-0005",createdAt:"2026-01-11T08:00:00Z"},
-      {id:"sn2f",sn:"BET-SNS-0006",createdAt:"2026-01-12T08:00:00Z"},
-    ];
-    const demoSerials3=[
-      {id:"sn3a",sn:"GAM-MOT-0001",createdAt:"2026-02-01T08:00:00Z"},
-      {id:"sn3b",sn:"GAM-MOT-0002",createdAt:"2026-02-01T08:00:00Z"},
-      {id:"sn3c",sn:"GAM-MOT-0003",createdAt:"2026-02-02T08:00:00Z"},
-      {id:"sn3d",sn:"GAM-MOT-0004",createdAt:"2026-02-02T08:00:00Z"},
-      {id:"sn3e",sn:"GAM-MOT-0005",createdAt:"2026-02-03T08:00:00Z"},
-    ];
-    const demoSerials4=[
-      {id:"sn4a",sn:"ALF-PWR-0001",createdAt:"2026-02-15T08:00:00Z"},
-      {id:"sn4b",sn:"ALF-PWR-0002",createdAt:"2026-02-15T08:00:00Z"},
-      {id:"sn4c",sn:"ALF-PWR-0003",createdAt:"2026-02-16T08:00:00Z"},
-      {id:"sn4d",sn:"ALF-PWR-0004",createdAt:"2026-02-16T08:00:00Z"},
-    ];
-    const demoSerials5=[
-      {id:"sn5a",sn:"BET-CTL-0001",createdAt:"2026-03-01T08:00:00Z"},
-      {id:"sn5b",sn:"BET-CTL-0002",createdAt:"2026-03-01T08:00:00Z"},
-      {id:"sn5c",sn:"BET-CTL-0003",createdAt:"2026-03-02T08:00:00Z"},
-    ];
-    const demoOrders=[
-      {id:"o1",woNumber:"WO-2601",pn:"ALF-PCB-100",description:"לוח PCB ראשי — בקר תעשייתי",qty:8,unitPrice:1200,projectId:"p1",receivedDate:"2026-01-05",targetDate:"2026-02-28",stageIds:["s1","s2","s3","s4","s5","s6"],serials:demoSerials1,defects:[
-        {id:"d1",title:"הלחמה קרה ברכיב U3",serialId:"sn1c",type:"quality",severity:"high",description:"נמצאה הלחמה קרה ב-IC U3 בבדיקת חשמל",responsible:"יוסי כהן",discoveredDate:"2026-01-20",status:"closed",closedDate:"2026-01-22"},
-        {id:"d2",title:"שריטה על שכבת PCB",serialId:"sn1f",type:"material",severity:"medium",description:"שריטה על שכבת הנחושת — לא משפיע על מעגל",responsible:"דנה לוי",discoveredDate:"2026-02-05",status:"open"},
-        {id:"d3",title:"קצר ב-connector J4",serialId:"sn1h",type:"quality",severity:"critical",description:"קצר בין פין 3-4 בקונקטור J4",responsible:"משה אברהם",discoveredDate:"2026-03-10",status:"open"}
-      ]},
-      {id:"o2",woNumber:"WO-2602",pn:"BET-SNS-200",description:"חיישן תעשייתי — טמפרטורה ולחץ",qty:6,unitPrice:850,projectId:"p2",receivedDate:"2026-01-10",targetDate:"2026-03-15",stageIds:["s1","s2","s3","s5","s6"],serials:demoSerials2,defects:[
-        {id:"d4",title:"סטיית כיול מעל 2%",serialId:"sn2b",type:"process",severity:"medium",description:"סטייה של 2.3% מהספק — נדרש כיול מחדש",responsible:"רונית שרון",discoveredDate:"2026-02-12",status:"closed",closedDate:"2026-02-14"},
-      ]},
-      {id:"o3",woNumber:"WO-2603",pn:"GAM-MOT-300",description:"בקר מנוע סרוו — 3 צירים",qty:5,unitPrice:2200,projectId:"p3",receivedDate:"2026-02-01",targetDate:"2026-04-30",stageIds:["s1","s2","s3","s4","s5"],serials:demoSerials3,defects:[
-        {id:"d5",title:"רעש חריג במנוע",serialId:"sn3a",type:"equipment",severity:"high",description:"רעש מכני חריג בתדר 2kHz",responsible:"אבי מזרחי",discoveredDate:"2026-02-20",status:"open"},
-        {id:"d6",title:"פלט PWM לא יציב",serialId:"sn3c",type:"process",severity:"medium",description:"תנודות בפלט PWM — ייתכן בעיית firmware",responsible:"דנה לוי",discoveredDate:"2026-03-01",status:"open"},
-      ]},
-      {id:"o4",woNumber:"WO-2604",pn:"ALF-PWR-150",description:"ספק כוח תעשייתי 48V/10A",qty:4,unitPrice:680,projectId:"p1",receivedDate:"2026-02-15",targetDate:"2026-03-31",stageIds:["s1","s2","s3","s4","s5","s6"],serials:demoSerials4,defects:[]},
-      {id:"o5",woNumber:"WO-2605",pn:"BET-CTL-250",description:"בקר PLC מודולרי",qty:3,unitPrice:3500,projectId:"p2",receivedDate:"2026-03-01",targetDate:"2026-05-15",stageIds:["s1","s2","s3","s4","s5","s6"],serials:demoSerials5,defects:[
-        {id:"d7",title:"תקלת תקשורת Modbus",serialId:"sn5a",type:"process",severity:"high",description:"תקשורת Modbus RTU נופלת אחרי 30 דקות פעילות רציפה",responsible:"אבי מזרחי",discoveredDate:"2026-03-14",status:"open"},
-      ]},
-    ];
-    // ── WORK LOGS — realistic demo history ─────────────────────────────
-    const workers=["w1","w2","w3","w4","w5"];
-    const wNames={"w1":"יוסי כהן","w2":"דנה לוי","w3":"משה אברהם","w4":"רונית שרון","w5":"אבי מזרחי"};
-    const demoLogs=[];
-    const mkLog=(sId,sn,stId,uId,startDate,durMin,oId)=>{
-      const st=new Date(startDate);
-      const en=new Date(st.getTime()+durMin*60000);
-      demoLogs.push({id:"wl"+demoLogs.length,userId:uId,userName:wNames[uId],serialId:sId,serialSn:sn,stageId:stId,orderId:oId,startTime:st.toISOString(),endTime:en.toISOString(),completed:true,durationMin:durMin});
-    };
-    // WO-2601 (8 serials, 6 stages) — first 5 fully complete, 6th partially, 7-8 early stages
-    // Serial 1: all 6 stages done
-    mkLog("sn1a","ALF-PCB-0001","s1","w1","2026-01-06T07:30:00",18,"o1");
-    mkLog("sn1a","ALF-PCB-0001","s2","w1","2026-01-07T08:00:00",42,"o1");
-    mkLog("sn1a","ALF-PCB-0001","s3","w2","2026-01-08T07:45:00",35,"o1");
-    mkLog("sn1a","ALF-PCB-0001","s4","w3","2026-01-09T08:15:00",28,"o1");
-    mkLog("sn1a","ALF-PCB-0001","s5","w4","2026-01-10T07:30:00",22,"o1");
-    mkLog("sn1a","ALF-PCB-0001","s6","w4","2026-01-10T14:00:00",15,"o1");
-    // Serial 2: all done
-    mkLog("sn1b","ALF-PCB-0002","s1","w1","2026-01-06T09:00:00",20,"o1");
-    mkLog("sn1b","ALF-PCB-0002","s2","w2","2026-01-07T10:00:00",48,"o1");
-    mkLog("sn1b","ALF-PCB-0002","s3","w2","2026-01-08T10:00:00",32,"o1");
-    mkLog("sn1b","ALF-PCB-0002","s4","w3","2026-01-09T10:30:00",30,"o1");
-    mkLog("sn1b","ALF-PCB-0002","s5","w3","2026-01-10T09:00:00",25,"o1");
-    mkLog("sn1b","ALF-PCB-0002","s6","w4","2026-01-11T07:30:00",12,"o1");
-    // Serial 3: all done
-    mkLog("sn1c","ALF-PCB-0003","s1","w4","2026-01-07T07:30:00",16,"o1");
-    mkLog("sn1c","ALF-PCB-0003","s2","w1","2026-01-08T08:00:00",55,"o1");
-    mkLog("sn1c","ALF-PCB-0003","s3","w2","2026-01-09T08:00:00",40,"o1");
-    mkLog("sn1c","ALF-PCB-0003","s4","w3","2026-01-10T08:00:00",26,"o1");
-    mkLog("sn1c","ALF-PCB-0003","s5","w4","2026-01-11T10:00:00",20,"o1");
-    mkLog("sn1c","ALF-PCB-0003","s6","w3","2026-01-12T07:30:00",14,"o1");
-    // Serial 4: all done
-    mkLog("sn1d","ALF-PCB-0004","s1","w1","2026-01-08T07:30:00",22,"o1");
-    mkLog("sn1d","ALF-PCB-0004","s2","w5","2026-01-09T08:00:00",50,"o1");
-    mkLog("sn1d","ALF-PCB-0004","s3","w5","2026-01-10T08:00:00",38,"o1");
-    mkLog("sn1d","ALF-PCB-0004","s4","w3","2026-01-11T08:00:00",32,"o1");
-    mkLog("sn1d","ALF-PCB-0004","s5","w4","2026-01-12T09:00:00",24,"o1");
-    mkLog("sn1d","ALF-PCB-0004","s6","w4","2026-01-13T07:30:00",13,"o1");
-    // Serial 5: all done
-    mkLog("sn1e","ALF-PCB-0005","s1","w4","2026-01-09T07:30:00",19,"o1");
-    mkLog("sn1e","ALF-PCB-0005","s2","w2","2026-01-10T08:00:00",44,"o1");
-    mkLog("sn1e","ALF-PCB-0005","s3","w2","2026-01-11T08:00:00",36,"o1");
-    mkLog("sn1e","ALF-PCB-0005","s4","w3","2026-01-12T08:00:00",29,"o1");
-    mkLog("sn1e","ALF-PCB-0005","s5","w3","2026-01-13T08:00:00",21,"o1");
-    mkLog("sn1e","ALF-PCB-0005","s6","w4","2026-01-14T07:30:00",11,"o1");
-    // Serial 6: stages 1-3 done, 4 pending
-    mkLog("sn1f","ALF-PCB-0006","s1","w1","2026-02-01T07:30:00",17,"o1");
-    mkLog("sn1f","ALF-PCB-0006","s2","w5","2026-02-02T08:00:00",46,"o1");
-    mkLog("sn1f","ALF-PCB-0006","s3","w2","2026-02-03T08:00:00",33,"o1");
-    // Serial 7: stages 1-2 done
-    mkLog("sn1g","ALF-PCB-0007","s1","w1","2026-02-05T07:30:00",21,"o1");
-    mkLog("sn1g","ALF-PCB-0007","s2","w1","2026-02-06T08:00:00",52,"o1");
-    // Serial 8: stage 1 done
-    mkLog("sn1h","ALF-PCB-0008","s1","w4","2026-03-01T07:30:00",20,"o1");
+    if(lo)setOrders(lo);if(lp)setProjects(lp);if(ls)setStages(ls);if(lw)setWorkLogs(lw);
+    const lct=LS.get("customTasks");if(lct)setCustomTasks(lct);
 
-    // WO-2602 (6 serials, stages s1,s2,s3,s5,s6) — first 3 fully done
-    mkLog("sn2a","BET-SNS-0001","s1","w1","2026-01-12T07:30:00",15,"o2");
-    mkLog("sn2a","BET-SNS-0001","s2","w5","2026-01-13T08:00:00",38,"o2");
-    mkLog("sn2a","BET-SNS-0001","s3","w5","2026-01-14T08:00:00",30,"o2");
-    mkLog("sn2a","BET-SNS-0001","s5","w3","2026-01-15T08:00:00",24,"o2");
-    mkLog("sn2a","BET-SNS-0001","s6","w4","2026-01-16T07:30:00",10,"o2");
-    mkLog("sn2b","BET-SNS-0002","s1","w4","2026-01-13T07:30:00",14,"o2");
-    mkLog("sn2b","BET-SNS-0002","s2","w2","2026-01-14T08:00:00",40,"o2");
-    mkLog("sn2b","BET-SNS-0002","s3","w2","2026-01-15T08:00:00",28,"o2");
-    mkLog("sn2b","BET-SNS-0002","s5","w3","2026-01-16T08:00:00",20,"o2");
-    mkLog("sn2b","BET-SNS-0002","s6","w3","2026-01-17T07:30:00",12,"o2");
-    mkLog("sn2c","BET-SNS-0003","s1","w1","2026-01-14T07:30:00",16,"o2");
-    mkLog("sn2c","BET-SNS-0003","s2","w5","2026-01-15T08:00:00",42,"o2");
-    mkLog("sn2c","BET-SNS-0003","s3","w5","2026-01-16T08:00:00",34,"o2");
-    mkLog("sn2c","BET-SNS-0003","s5","w4","2026-01-17T08:00:00",22,"o2");
-    mkLog("sn2c","BET-SNS-0003","s6","w4","2026-01-18T07:30:00",11,"o2");
-    // Serial 4: stages 1-2 done
-    mkLog("sn2d","BET-SNS-0004","s1","w1","2026-02-10T07:30:00",18,"o2");
-    mkLog("sn2d","BET-SNS-0004","s2","w2","2026-02-11T08:00:00",45,"o2");
-    // Serial 5: stage 1 done
-    mkLog("sn2e","BET-SNS-0005","s1","w4","2026-02-15T07:30:00",17,"o2");
-    // Serial 6: nothing done yet
-
-    // WO-2603 (5 serials, stages s1,s2,s3,s4,s5) — serial 1 fully done, 2 partially
-    mkLog("sn3a","GAM-MOT-0001","s1","w1","2026-02-03T07:30:00",25,"o3");
-    mkLog("sn3a","GAM-MOT-0001","s2","w5","2026-02-04T08:00:00",65,"o3");
-    mkLog("sn3a","GAM-MOT-0001","s3","w5","2026-02-05T08:00:00",55,"o3");
-    mkLog("sn3a","GAM-MOT-0001","s4","w3","2026-02-06T08:00:00",40,"o3");
-    mkLog("sn3a","GAM-MOT-0001","s5","w3","2026-02-07T08:00:00",30,"o3");
-    mkLog("sn3b","GAM-MOT-0002","s1","w4","2026-02-05T07:30:00",22,"o3");
-    mkLog("sn3b","GAM-MOT-0002","s2","w2","2026-02-06T08:00:00",58,"o3");
-    mkLog("sn3b","GAM-MOT-0002","s3","w2","2026-02-07T08:00:00",48,"o3");
-    // Serial 3: stage 1 done
-    mkLog("sn3c","GAM-MOT-0003","s1","w1","2026-02-10T07:30:00",24,"o3");
-    // Serials 4-5: nothing
-
-    // WO-2604 (4 serials, all 6 stages) — serial 1: stages 1-4 done, serial 2: stage 1
-    mkLog("sn4a","ALF-PWR-0001","s1","w1","2026-02-18T07:30:00",14,"o4");
-    mkLog("sn4a","ALF-PWR-0001","s2","w2","2026-02-19T08:00:00",35,"o4");
-    mkLog("sn4a","ALF-PWR-0001","s3","w2","2026-02-20T08:00:00",28,"o4");
-    mkLog("sn4a","ALF-PWR-0001","s4","w3","2026-02-21T08:00:00",22,"o4");
-    mkLog("sn4b","ALF-PWR-0002","s1","w4","2026-03-01T07:30:00",16,"o4");
-
-    // WO-2605 (3 serials, all 6 stages) — serial 1: stage 1 done only
-    mkLog("sn5a","BET-CTL-0001","s1","w1","2026-03-05T07:30:00",20,"o3");
-
-    setOrders(demoOrders);
-    setWorkLogs(demoLogs);
-    // Save users to LS so login works
-    LS.set("users",FALLBACK_USERS);
-    setLoading(false);
+    // Then sync from Google Sheets (overrides localStorage if available)
+    Promise.all([gsLoad(),gsLoadUsers()]).then(([data,users])=>{
+      if(data){
+        if(data.orders)setOrders(data.orders);
+        if(data.projects)setProjects(data.projects);
+        if(data.stages)setStages(data.stages);
+        if(data.workLogs)setWorkLogs(data.workLogs);
+        if(data.orders)LS.set("orders",data.orders);
+        if(data.projects)LS.set("projects",data.projects);
+        if(data.stages)LS.set("stages",data.stages);
+        if(data.workLogs)LS.set("workLogs",data.workLogs);
+      }
+      if(users)LS.set("users",users);
+      // If no data from GS and no local data, seed demo
+      if(!data&&!lo){
+        // Demo data seed code follows
+        const demoSerials1=[{id:"sn1a",sn:"ALF-PCB-0001",createdAt:"2026-01-05T08:00:00Z"},{id:"sn1b",sn:"ALF-PCB-0002",createdAt:"2026-01-05T08:00:00Z"},{id:"sn1c",sn:"ALF-PCB-0003",createdAt:"2026-01-05T08:00:00Z"},{id:"sn1d",sn:"ALF-PCB-0004",createdAt:"2026-01-06T08:00:00Z"},{id:"sn1e",sn:"ALF-PCB-0005",createdAt:"2026-01-06T08:00:00Z"},{id:"sn1f",sn:"ALF-PCB-0006",createdAt:"2026-01-07T08:00:00Z"},{id:"sn1g",sn:"ALF-PCB-0007",createdAt:"2026-01-07T08:00:00Z"},{id:"sn1h",sn:"ALF-PCB-0008",createdAt:"2026-01-08T08:00:00Z"}];
+        const demoSerials2=[{id:"sn2a",sn:"BET-SNS-0001",createdAt:"2026-01-10T08:00:00Z"},{id:"sn2b",sn:"BET-SNS-0002",createdAt:"2026-01-10T08:00:00Z"},{id:"sn2c",sn:"BET-SNS-0003",createdAt:"2026-01-10T08:00:00Z"},{id:"sn2d",sn:"BET-SNS-0004",createdAt:"2026-01-11T08:00:00Z"},{id:"sn2e",sn:"BET-SNS-0005",createdAt:"2026-01-11T08:00:00Z"},{id:"sn2f",sn:"BET-SNS-0006",createdAt:"2026-01-12T08:00:00Z"}];
+        const demoSerials3=[{id:"sn3a",sn:"GAM-MOT-0001",createdAt:"2026-02-01T08:00:00Z"},{id:"sn3b",sn:"GAM-MOT-0002",createdAt:"2026-02-01T08:00:00Z"},{id:"sn3c",sn:"GAM-MOT-0003",createdAt:"2026-02-02T08:00:00Z"},{id:"sn3d",sn:"GAM-MOT-0004",createdAt:"2026-02-02T08:00:00Z"},{id:"sn3e",sn:"GAM-MOT-0005",createdAt:"2026-02-03T08:00:00Z"}];
+        const demoSerials4=[{id:"sn4a",sn:"ALF-PWR-0001",createdAt:"2026-02-15T08:00:00Z"},{id:"sn4b",sn:"ALF-PWR-0002",createdAt:"2026-02-15T08:00:00Z"},{id:"sn4c",sn:"ALF-PWR-0003",createdAt:"2026-02-16T08:00:00Z"},{id:"sn4d",sn:"ALF-PWR-0004",createdAt:"2026-02-16T08:00:00Z"}];
+        const demoSerials5=[{id:"sn5a",sn:"BET-CTL-0001",createdAt:"2026-03-01T08:00:00Z"},{id:"sn5b",sn:"BET-CTL-0002",createdAt:"2026-03-01T08:00:00Z"},{id:"sn5c",sn:"BET-CTL-0003",createdAt:"2026-03-02T08:00:00Z"}];
+        const demoOrders=[
+          {id:"o1",woNumber:"WO-2601",pn:"ALF-PCB-100",description:"לוח PCB ראשי — בקר תעשייתי",qty:8,unitPrice:1200,projectId:"p1",receivedDate:"2026-01-05",targetDate:"2026-02-28",stageIds:["s1","s2","s3","s4","s5","s6"],serials:demoSerials1,shortages:[],defects:[{id:"d1",title:"הלחמה קרה ברכיב U3",serialId:"sn1c",type:"quality",severity:"high",description:"הלחמה קרה ב-IC U3",responsible:"יוסי כהן",discoveredDate:"2026-01-20",status:"closed",closedDate:"2026-01-22"},{id:"d2",title:"שריטה על PCB",serialId:"sn1f",type:"material",severity:"medium",description:"שריטה על שכבת הנחושת",responsible:"דנה לוי",discoveredDate:"2026-02-05",status:"open"},{id:"d3",title:"קצר ב-connector J4",serialId:"sn1h",type:"quality",severity:"critical",description:"קצר בין פין 3-4",responsible:"משה אברהם",discoveredDate:"2026-03-10",status:"open"}]},
+          {id:"o2",woNumber:"WO-2602",pn:"BET-SNS-200",description:"חיישן תעשייתי",qty:6,unitPrice:850,projectId:"p2",receivedDate:"2026-01-10",targetDate:"2026-03-15",stageIds:["s1","s2","s3","s5","s6"],serials:demoSerials2,shortages:[],defects:[{id:"d4",title:"סטיית כיול 2.3%",serialId:"sn2b",type:"process",severity:"medium",description:"סטייה מהספק",responsible:"רונית שרון",discoveredDate:"2026-02-12",status:"closed",closedDate:"2026-02-14"}]},
+          {id:"o3",woNumber:"WO-2603",pn:"GAM-MOT-300",description:"בקר מנוע סרוו — 3 צירים",qty:5,unitPrice:2200,projectId:"p3",receivedDate:"2026-02-01",targetDate:"2026-04-30",stageIds:["s1","s2","s3","s4","s5"],serials:demoSerials3,shortages:[],defects:[{id:"d5",title:"רעש חריג במנוע",serialId:"sn3a",type:"equipment",severity:"high",description:"רעש מכני 2kHz",responsible:"אבי מזרחי",discoveredDate:"2026-02-20",status:"open"},{id:"d6",title:"פלט PWM לא יציב",serialId:"sn3c",type:"process",severity:"medium",description:"תנודות PWM",responsible:"דנה לוי",discoveredDate:"2026-03-01",status:"open"}]},
+          {id:"o4",woNumber:"WO-2604",pn:"ALF-PWR-150",description:"ספק כוח תעשייתי 48V/10A",qty:4,unitPrice:680,projectId:"p1",receivedDate:"2026-02-15",targetDate:"2026-03-31",stageIds:["s1","s2","s3","s4","s5","s6"],serials:demoSerials4,shortages:[],defects:[]},
+          {id:"o5",woNumber:"WO-2605",pn:"BET-CTL-250",description:"בקר PLC מודולרי",qty:3,unitPrice:3500,projectId:"p2",receivedDate:"2026-03-01",targetDate:"2026-05-15",stageIds:["s1","s2","s3","s4","s5","s6"],serials:demoSerials5,shortages:[],defects:[{id:"d7",title:"תקלת Modbus RTU",serialId:"sn5a",type:"process",severity:"high",description:"תקשורת נופלת אחרי 30 דק",responsible:"אבי מזרחי",discoveredDate:"2026-03-14",status:"open"}]}
+        ];
+        const wN={"w1":"יוסי כהן","w2":"דנה לוי","w3":"משה אברהם","w4":"רונית שרון","w5":"אבי מזרחי"};
+        const dl=[];const mk=(sId,sn,stId,uId,dt,dur,oId)=>{const s2=new Date(dt);dl.push({id:"wl"+dl.length,userId:uId,userName:wN[uId],serialId:sId,serialSn:sn,stageId:stId,orderId:oId,startTime:s2.toISOString(),endTime:new Date(s2.getTime()+dur*60000).toISOString(),completed:true,durationMin:dur})};
+        // Demo work logs (abbreviated — same data as before)
+        mk("sn1a","ALF-PCB-0001","s1","w1","2026-01-06T07:30:00",18,"o1");mk("sn1a","ALF-PCB-0001","s2","w1","2026-01-07T08:00:00",42,"o1");mk("sn1a","ALF-PCB-0001","s3","w2","2026-01-08T07:45:00",35,"o1");mk("sn1a","ALF-PCB-0001","s4","w3","2026-01-09T08:15:00",28,"o1");mk("sn1a","ALF-PCB-0001","s5","w4","2026-01-10T07:30:00",22,"o1");mk("sn1a","ALF-PCB-0001","s6","w4","2026-01-10T14:00:00",15,"o1");
+        mk("sn1b","ALF-PCB-0002","s1","w1","2026-01-06T09:00:00",20,"o1");mk("sn1b","ALF-PCB-0002","s2","w2","2026-01-07T10:00:00",48,"o1");mk("sn1b","ALF-PCB-0002","s3","w2","2026-01-08T10:00:00",32,"o1");mk("sn1b","ALF-PCB-0002","s4","w3","2026-01-09T10:30:00",30,"o1");mk("sn1b","ALF-PCB-0002","s5","w3","2026-01-10T09:00:00",25,"o1");mk("sn1b","ALF-PCB-0002","s6","w4","2026-01-11T07:30:00",12,"o1");
+        mk("sn1c","ALF-PCB-0003","s1","w4","2026-01-07T07:30:00",16,"o1");mk("sn1c","ALF-PCB-0003","s2","w1","2026-01-08T08:00:00",55,"o1");mk("sn1c","ALF-PCB-0003","s3","w2","2026-01-09T08:00:00",40,"o1");mk("sn1c","ALF-PCB-0003","s4","w3","2026-01-10T08:00:00",26,"o1");mk("sn1c","ALF-PCB-0003","s5","w4","2026-01-11T10:00:00",20,"o1");mk("sn1c","ALF-PCB-0003","s6","w3","2026-01-12T07:30:00",14,"o1");
+        mk("sn1d","ALF-PCB-0004","s1","w1","2026-01-08T07:30:00",22,"o1");mk("sn1d","ALF-PCB-0004","s2","w5","2026-01-09T08:00:00",50,"o1");mk("sn1d","ALF-PCB-0004","s3","w5","2026-01-10T08:00:00",38,"o1");mk("sn1d","ALF-PCB-0004","s4","w3","2026-01-11T08:00:00",32,"o1");mk("sn1d","ALF-PCB-0004","s5","w4","2026-01-12T09:00:00",24,"o1");mk("sn1d","ALF-PCB-0004","s6","w4","2026-01-13T07:30:00",13,"o1");
+        mk("sn1e","ALF-PCB-0005","s1","w4","2026-01-09T07:30:00",19,"o1");mk("sn1e","ALF-PCB-0005","s2","w2","2026-01-10T08:00:00",44,"o1");mk("sn1e","ALF-PCB-0005","s3","w2","2026-01-11T08:00:00",36,"o1");mk("sn1e","ALF-PCB-0005","s4","w3","2026-01-12T08:00:00",29,"o1");mk("sn1e","ALF-PCB-0005","s5","w3","2026-01-13T08:00:00",21,"o1");mk("sn1e","ALF-PCB-0005","s6","w4","2026-01-14T07:30:00",11,"o1");
+        mk("sn1f","ALF-PCB-0006","s1","w1","2026-02-01T07:30:00",17,"o1");mk("sn1f","ALF-PCB-0006","s2","w5","2026-02-02T08:00:00",46,"o1");mk("sn1f","ALF-PCB-0006","s3","w2","2026-02-03T08:00:00",33,"o1");
+        mk("sn1g","ALF-PCB-0007","s1","w1","2026-02-05T07:30:00",21,"o1");mk("sn1g","ALF-PCB-0007","s2","w1","2026-02-06T08:00:00",52,"o1");
+        mk("sn1h","ALF-PCB-0008","s1","w4","2026-03-01T07:30:00",20,"o1");
+        mk("sn2a","BET-SNS-0001","s1","w1","2026-01-12T07:30:00",15,"o2");mk("sn2a","BET-SNS-0001","s2","w5","2026-01-13T08:00:00",38,"o2");mk("sn2a","BET-SNS-0001","s3","w5","2026-01-14T08:00:00",30,"o2");mk("sn2a","BET-SNS-0001","s5","w3","2026-01-15T08:00:00",24,"o2");mk("sn2a","BET-SNS-0001","s6","w4","2026-01-16T07:30:00",10,"o2");
+        mk("sn2b","BET-SNS-0002","s1","w4","2026-01-13T07:30:00",14,"o2");mk("sn2b","BET-SNS-0002","s2","w2","2026-01-14T08:00:00",40,"o2");mk("sn2b","BET-SNS-0002","s3","w2","2026-01-15T08:00:00",28,"o2");mk("sn2b","BET-SNS-0002","s5","w3","2026-01-16T08:00:00",20,"o2");mk("sn2b","BET-SNS-0002","s6","w3","2026-01-17T07:30:00",12,"o2");
+        mk("sn2c","BET-SNS-0003","s1","w1","2026-01-14T07:30:00",16,"o2");mk("sn2c","BET-SNS-0003","s2","w5","2026-01-15T08:00:00",42,"o2");mk("sn2c","BET-SNS-0003","s3","w5","2026-01-16T08:00:00",34,"o2");mk("sn2c","BET-SNS-0003","s5","w4","2026-01-17T08:00:00",22,"o2");mk("sn2c","BET-SNS-0003","s6","w4","2026-01-18T07:30:00",11,"o2");
+        mk("sn2d","BET-SNS-0004","s1","w1","2026-02-10T07:30:00",18,"o2");mk("sn2d","BET-SNS-0004","s2","w2","2026-02-11T08:00:00",45,"o2");
+        mk("sn2e","BET-SNS-0005","s1","w4","2026-02-15T07:30:00",17,"o2");
+        mk("sn3a","GAM-MOT-0001","s1","w1","2026-02-03T07:30:00",25,"o3");mk("sn3a","GAM-MOT-0001","s2","w5","2026-02-04T08:00:00",65,"o3");mk("sn3a","GAM-MOT-0001","s3","w5","2026-02-05T08:00:00",55,"o3");mk("sn3a","GAM-MOT-0001","s4","w3","2026-02-06T08:00:00",40,"o3");mk("sn3a","GAM-MOT-0001","s5","w3","2026-02-07T08:00:00",30,"o3");
+        mk("sn3b","GAM-MOT-0002","s1","w4","2026-02-05T07:30:00",22,"o3");mk("sn3b","GAM-MOT-0002","s2","w2","2026-02-06T08:00:00",58,"o3");mk("sn3b","GAM-MOT-0002","s3","w2","2026-02-07T08:00:00",48,"o3");
+        mk("sn3c","GAM-MOT-0003","s1","w1","2026-02-10T07:30:00",24,"o3");
+        mk("sn4a","ALF-PWR-0001","s1","w1","2026-02-18T07:30:00",14,"o4");mk("sn4a","ALF-PWR-0001","s2","w2","2026-02-19T08:00:00",35,"o4");mk("sn4a","ALF-PWR-0001","s3","w2","2026-02-20T08:00:00",28,"o4");mk("sn4a","ALF-PWR-0001","s4","w3","2026-02-21T08:00:00",22,"o4");
+        mk("sn4b","ALF-PWR-0002","s1","w4","2026-03-01T07:30:00",16,"o4");
+        mk("sn5a","BET-CTL-0001","s1","w1","2026-03-05T07:30:00",20,"o5");
+        setOrders(demoOrders);setWorkLogs(dl);LS.set("users",FALLBACK_USERS);
+      }
+      // Restore session
+      try{const saved=localStorage.getItem(LS_PREFIX+"session");if(saved){const s3=JSON.parse(saved);const freshUsers=users||getUsers();const found=freshUsers.find(u=>u.id===s3.id&&u.username===s3.username&&u.active!==false);if(found)setCurrentUser(found);else localStorage.removeItem(LS_PREFIX+"session")}}catch{}
+      setLoading(false);
+    });
   },[]);
 
   useEffect(()=>{oRef.current=orders},[orders]);
@@ -1751,6 +1793,18 @@ function App(){
     const log=workLogs.find(w=>w.id===logId);
     if(log)addAuditEntry({userId:currentUser.id,username:currentUser.username,name:currentUser.name,action:"סיום עבודה",target:log.serialSn,details:`${fmtTime(duration)} — ${stages.find(s=>s.id===log.stageId)?.name||""}`});
   };
+  const handlePauseWork=(logId)=>{
+    setWorkLogs(prev=>{const next=prev.map(w=>w.id===logId?{...w,paused:true,pauseStart:nowISO(),pauseLog:[...(w.pauseLog||[]),{start:nowISO()}]}:w);persist(null,null,null,next);return next});
+    addAuditEntry({userId:currentUser.id,username:currentUser.username,name:currentUser.name,action:"הפסקה",target:"",details:""});
+  };
+  const handleResumeWork=(logId)=>{
+    setWorkLogs(prev=>{const next=prev.map(w=>{if(w.id!==logId)return w;const pauseMin=w.pauseStart?Math.round((Date.now()-new Date(w.pauseStart).getTime())/60000):0;const pl=[...(w.pauseLog||[])];if(pl.length>0&&!pl[pl.length-1].end)pl[pl.length-1].end=nowISO();return{...w,paused:false,pauseStart:null,totalPauseMin:(w.totalPauseMin||0)+pauseMin,pauseLog:pl}});persist(null,null,null,next);return next});
+    addAuditEntry({userId:currentUser.id,username:currentUser.username,name:currentUser.name,action:"חזרה מהפסקה",target:"",details:""});
+  };
+  // Custom tasks
+  const handleAddTask=(task)=>{setCustomTasks(prev=>{const next=[...prev,task];LS.set("customTasks",next);return next})};
+  const handleStartTask=(taskId)=>{setCustomTasks(prev=>{const next=prev.map(t=>t.id===taskId?{...t,active:true,startTime:nowISO()}:t);LS.set("customTasks",next);return next})};
+  const handleEndTask=(taskId)=>{setCustomTasks(prev=>{const next=prev.map(t=>{if(t.id!==taskId)return t;const dur=t.startTime?Math.round((Date.now()-new Date(t.startTime).getTime())/60000)-(t.totalPauseMin||0):0;return{...t,active:false,completed:true,endTime:nowISO(),durationMin:Math.max(0,dur)}});LS.set("customTasks",next);return next})};
 
   const isAdmin=currentUser?.role==="admin";
   const isWorker=currentUser?.role==="worker";
@@ -1758,6 +1812,7 @@ function App(){
   const TABS=isAdmin?[
     {id:"dashboard",label:"📊 דאשבורד"},
     {id:"orders",label:'📋 פק"ע'},
+    {id:"shortages",label:"⚠️ חוסרים"},
     {id:"mywork",label:"🔨 עבודה"},
     {id:"workers",label:"👥 עובדים"},
     {id:"yield",label:"📉 Yield"},
@@ -1770,6 +1825,7 @@ function App(){
   ]:[
     {id:"dashboard",label:"📊 דאשבורד"},
     {id:"orders",label:'📋 פק"ע'},
+    {id:"shortages",label:"⚠️ חוסרים"},
     {id:"mywork",label:"🔨 עבודה"},
     {id:"projects",label:"🏗️ פרויקטים"},
   ];
@@ -1780,7 +1836,7 @@ function App(){
   // PWA Install
   useEffect(()=>{const isi=window.matchMedia("(display-mode:standalone)").matches||window.navigator.standalone;if(isi)return;const h=e=>{e.preventDefault();setInstallPrompt(e);setShowInstall(true)};window.addEventListener("beforeinstallprompt",h);window.addEventListener("appinstalled",()=>{setShowInstall(false);setInstallPrompt(null)});return()=>window.removeEventListener("beforeinstallprompt",h)},[]);
   // Service Worker
-  useEffect(()=>{if(!("serviceWorker" in navigator))return;navigator.serviceWorker.register("./sw.js?v=2").then(reg=>{swRegRef.current=reg;if(reg.waiting)setShowUpdate(true);reg.addEventListener("updatefound",()=>{const nw=reg.installing;if(!nw)return;nw.addEventListener("statechange",()=>{if(nw.state==="installed"&&navigator.serviceWorker.controller)setShowUpdate(true)})});setInterval(()=>reg.update(),30*60*1000)}).catch(()=>{});navigator.serviceWorker.addEventListener("controllerchange",()=>window.location.reload())},[]);
+  useEffect(()=>{if(!("serviceWorker" in navigator))return;navigator.serviceWorker.register("./sw.js?v=3").then(reg=>{swRegRef.current=reg;if(reg.waiting)setShowUpdate(true);reg.addEventListener("updatefound",()=>{const nw=reg.installing;if(!nw)return;nw.addEventListener("statechange",()=>{if(nw.state==="installed"&&navigator.serviceWorker.controller)setShowUpdate(true)})});setInterval(()=>reg.update(),30*60*1000)}).catch(()=>{});navigator.serviceWorker.addEventListener("controllerchange",()=>window.location.reload())},[]);
   const handleInstall=async()=>{if(!installPrompt)return;installPrompt.prompt();setInstallPrompt(null);setShowInstall(false)};
   const handleUpdate=()=>{const r=swRegRef.current;if(r?.waiting)r.waiting.postMessage({type:"SKIP_WAITING"});else window.location.reload();setShowUpdate(false)};
 
@@ -1798,7 +1854,8 @@ function App(){
       <main className="main-content" style={{maxWidth:1440,margin:"0 auto",padding:"16px 14px",paddingBottom:showInstall?"100px":"calc(16px + env(safe-area-inset-bottom,0px))"}}>
         {tab==="dashboard"&&<Dashboard orders={filteredOrders} projects={filteredProjects} stages={stages} users={getUsers()} workLogs={filteredWorkLogs}/>}
         {tab==="orders"&&<Orders orders={filteredOrders} projects={filteredProjects} stages={stages} updO={updO} workLogs={filteredWorkLogs}/>}
-        {tab==="mywork"&&<MyWork orders={filteredOrders} stages={stages} workLogs={filteredWorkLogs} onStartWork={handleStartWork} onEndWork={handleEndWork}/>}
+        {tab==="shortages"&&<Shortages orders={filteredOrders} updO={updO} projects={filteredProjects}/>}
+        {tab==="mywork"&&<MyWork orders={filteredOrders} stages={stages} workLogs={filteredWorkLogs} onStartWork={handleStartWork} onEndWork={handleEndWork} onPauseWork={handlePauseWork} onResumeWork={handleResumeWork} customTasks={customTasks} onAddTask={handleAddTask} onStartTask={handleStartTask} onEndTask={handleEndTask}/>}
         {tab==="workers"&&isAdmin&&<WorkersDashboard users={getUsers()} workLogs={filteredWorkLogs} orders={filteredOrders} stages={stages}/>}
         {tab==="yield"&&<YieldDashboard orders={filteredOrders} projects={filteredProjects} stages={stages} workLogs={filteredWorkLogs}/>}
         {tab==="stages"&&isAdmin&&<StagesManagement stages={stages} setStages={setStages} persist={persist}/>}
