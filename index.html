@@ -988,6 +988,126 @@ function MyWork({orders,stages,workLogs,onStartWork,onEndWork,onPauseWork,onResu
 
   return(
     <div className="fade-in">
+      {currentUser.role==="admin"?(
+        <div>
+          <h2 style={{margin:"0 0 14px"}}>📡 מצב עבודה בזמן אמת</h2>
+
+          {/* Active workers */}
+          {(()=>{
+            const activeWork=workLogs.filter(w=>!w.completed);
+            const onBreak=activeWork.filter(w=>w.paused);
+            const working=activeWork.filter(w=>!w.paused);
+            // Pending work: serials not started yet
+            const pendingCount=orders.reduce((s,o)=>{
+              const oSt=o.stageIds||[];
+              return s+(o.serials||[]).filter(sr=>oSt.some(sid=>!workLogs.some(w=>w.serialId===sr.id&&w.stageId===sid&&(w.completed||!w.completed)))).length;
+            },0);
+            const totalPending=orders.reduce((s,o)=>{
+              const oSt=o.stageIds||[];
+              return s+(o.serials||[]).filter(sr=>!oSt.every(sid=>workLogs.some(w=>w.serialId===sr.id&&w.stageId===sid&&w.completed))).length;
+            },0);
+
+            return(<>
+              {/* KPI boxes */}
+              <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(130px,1fr))",gap:9,marginBottom:14}}>
+                <KpiBox i="🔄" v={working.length} label="עובדים כרגע" c="#f59e0b"/>
+                <KpiBox i="⏸️" v={onBreak.length} label="בהפסקה" c="#8b95a8"/>
+                <KpiBox i="📋" v={totalPending} label="יחידות ממתינות" c="#3b82f6"/>
+                <KpiBox i="📦" v={orders.filter(o=>(o.serials||[]).length>0&&(o.serials||[]).some(sr=>!(o.stageIds||[]).every(sid=>workLogs.some(w=>w.serialId===sr.id&&w.stageId===sid&&w.completed)))).length} label='פק"ע בתהליך' c="#06b6d4"/>
+              </div>
+
+              {/* Workers currently active */}
+              {working.length>0&&(
+                <Card style={{marginBottom:12,border:"2px solid #f59e0b33"}}>
+                  <div style={{fontWeight:700,fontSize:15,color:"#f59e0b",marginBottom:10}}>🔄 עובדים כרגע</div>
+                  <div style={{display:"flex",flexDirection:"column",gap:8}}>
+                    {working.map(w=>{
+                      const stage=stages.find(s2=>s2.id===w.stageId);
+                      const order=orders.find(o=>o.id===w.orderId);
+                      return(
+                        <div key={w.id} style={{background:"var(--c-deep)",borderRadius:10,padding:"10px 14px",border:"1px solid #f59e0b22",display:"flex",justifyContent:"space-between",alignItems:"center",flexWrap:"wrap",gap:8}}>
+                          <div>
+                            <span style={{fontWeight:700,fontSize:14}}>{w.userName}</span>
+                            <span style={{fontSize:12,color:"#60a5fa",marginRight:8}}>← {order?.woNumber||""}</span>
+                            <span style={{fontSize:12,color:"#7eb8ff"}}>{w.serialSn}</span>
+                            <span style={{fontSize:11,color:stage?.color||"var(--c-muted)",marginRight:6}}>/ {stage?.name||""}</span>
+                            {w.bulkCount>1&&<span style={{fontSize:10,background:"#3b82f622",color:"#60a5fa",padding:"2px 6px",borderRadius:10}}>×{w.bulkCount}</span>}
+                          </div>
+                          <ActiveTimer startTime={w.startTime} pauseMin={w.totalPauseMin||0}/>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </Card>
+              )}
+
+              {/* Workers on break */}
+              {onBreak.length>0&&(
+                <Card style={{marginBottom:12,border:"1px solid #8b95a833"}}>
+                  <div style={{fontWeight:700,fontSize:15,color:"#8b95a8",marginBottom:10}}>⏸️ בהפסקה</div>
+                  <div style={{display:"flex",flexDirection:"column",gap:6}}>
+                    {onBreak.map(w=>{
+                      const stage=stages.find(s2=>s2.id===w.stageId);
+                      return(
+                        <div key={w.id} style={{background:"var(--c-deep)",borderRadius:8,padding:"8px 12px",display:"flex",justifyContent:"space-between",alignItems:"center",opacity:.7}}>
+                          <div><span style={{fontWeight:600}}>{w.userName}</span><span style={{fontSize:12,color:"var(--c-dim)",marginRight:8}}>{w.serialSn} / {stage?.name||""}</span></div>
+                          <span style={{fontSize:12,color:"#8b95a8"}}>⏸️ {w.pauseStart?fmtTime(Math.round((Date.now()-new Date(w.pauseStart).getTime())/60000)):""}</span>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </Card>
+              )}
+
+              {working.length===0&&onBreak.length===0&&(
+                <Card style={{marginBottom:12,textAlign:"center",padding:30,color:"var(--c-dim)"}}><div style={{fontSize:36,marginBottom:8}}>😴</div>אין עבודה פעילה כרגע</Card>
+              )}
+
+              {/* Remaining work summary */}
+              <Card style={{marginBottom:12}}>
+                <div style={{fontWeight:700,fontSize:15,marginBottom:10}}>📋 עבודה שנותרה</div>
+                <div style={{overflowX:"auto"}}><table><thead><tr><th>פק"ע</th><th>P/N</th><th>יחידות</th><th>הושלמו</th><th>בתהליך</th><th>נותרו</th><th>התקדמות</th></tr></thead><tbody>
+                  {orders.filter(o=>(o.serials||[]).length>0).map(o=>{
+                    const sers=o.serials||[];const oSt=o.stageIds||[];
+                    const done=sers.filter(sr=>oSt.every(sid=>workLogs.some(w=>w.serialId===sr.id&&w.stageId===sid&&w.completed))).length;
+                    const inProg=sers.filter(sr=>workLogs.some(w=>w.serialId===sr.id&&!w.completed)).length;
+                    const remain=sers.length-done;
+                    const pct=sers.length?Math.round(done/sers.length*100):0;
+                    if(done===sers.length)return null;
+                    return(<tr key={o.id}><td style={{fontWeight:600,color:"#60a5fa"}}>{o.woNumber}</td><td style={{fontSize:12,color:"#a78bfa"}}>{o.pn||"—"}</td><td>{sers.length}</td><td style={{color:"#10b981"}}>{done}</td><td style={{color:"#f59e0b"}}>{inProg}</td><td style={{fontWeight:700}}>{remain}</td><td style={{minWidth:80}}><PBar pct={pct} h={6}/><span style={{fontSize:10,color:"var(--c-dim)"}}>{pct}%</span></td></tr>);
+                  })}
+                </tbody></table></div>
+              </Card>
+            </>);
+          })()}
+
+          {/* Admin tasks section */}
+          <Card style={{marginBottom:14,border:"1px solid #a78bfa33"}}>
+            <div style={{fontWeight:700,fontSize:15,color:"#a78bfa",marginBottom:10}}>📌 משימות שהקצתי</div>
+            {(customTasks||[]).filter(t=>!t.completed).length===0?<div style={{color:"var(--c-dim)",fontSize:12,textAlign:"center",padding:10}}>אין משימות פתוחות</div>:(
+              <div style={{display:"flex",flexDirection:"column",gap:6}}>
+                {(customTasks||[]).filter(t=>!t.completed).map(t=>(
+                  <div key={t.id} style={{background:"var(--c-deep)",borderRadius:8,padding:"10px 12px",border:t.active?"1px solid #a78bfa":"1px solid var(--c-border)"}}>
+                    <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",flexWrap:"wrap",gap:6}}>
+                      <div><span style={{fontWeight:600}}>{t.name}</span><span style={{fontSize:11,color:"#60a5fa",marginRight:8}}>→ {t.userName}</span>{t.price>0&&<span style={{fontSize:11,color:"#a78bfa"}}>₪{t.price}</span>}{t.active&&<span style={{fontSize:11,background:"#a78bfa22",color:"#a78bfa",padding:"2px 6px",borderRadius:10,marginRight:6}}>🔄 בביצוע</span>}</div>
+                      <span style={{fontSize:11,color:"var(--c-dim)"}}>{fmt(t.createdAt?.slice(0,10))}</span>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+            {(customTasks||[]).filter(t=>t.completed).length>0&&(
+              <div style={{marginTop:8,borderTop:"1px solid var(--c-border)",paddingTop:8}}>
+                <div style={{fontSize:11,color:"var(--c-dim)",marginBottom:4}}>הושלמו:</div>
+                {(customTasks||[]).filter(t=>t.completed).slice(0,5).map(t=>(
+                  <div key={t.id} style={{fontSize:12,color:"var(--c-muted)",padding:"2px 0",display:"flex",gap:8}}><span>✅ {t.name}</span><span style={{color:"#60a5fa"}}>{t.userName}</span><span style={{color:"#a78bfa"}}>{fmtTime(t.durationMin)}</span></div>
+                ))}
+              </div>
+            )}
+          </Card>
+        </div>
+      ):(
+      <div>
       <h2 style={{margin:"0 0 14px"}}>🔨 העבודה שלי</h2>
 
       {/* Active Work */}
@@ -1143,6 +1263,8 @@ function MyWork({orders,stages,workLogs,onStartWork,onEndWork,onPauseWork,onResu
         const oSt=(o.stageIds||[]).filter(sid=>myAccess.includes(sid));
         return(o.serials||[]).every(s=>oSt.every(st=>workLogs.some(w=>w.serialId===s.id&&w.stageId===st.id&&w.completed)));
       })&&<div style={{textAlign:"center",padding:40,color:"var(--c-dim)"}}>🎉 אין עבודה ממתינה!</div>}
+    </div>
+      )}
     </div>
   );
 }
@@ -1994,10 +2116,12 @@ function App(){
         if(data.projects)setProjects(data.projects);
         if(data.stages)setStages(data.stages);
         if(data.workLogs)setWorkLogs(data.workLogs);
+        if(data.customTasks)setCustomTasks(data.customTasks);
         if(data.orders)LS.set("orders",data.orders);
         if(data.projects)LS.set("projects",data.projects);
         if(data.stages)LS.set("stages",data.stages);
         if(data.workLogs)LS.set("workLogs",data.workLogs);
+        if(data.customTasks)LS.set("customTasks",data.customTasks);
       }
       if(users)LS.set("users",users);
       // If no data from GS and no local data, seed demo
@@ -2063,6 +2187,7 @@ function App(){
         if(data.projects)setProjects(data.projects);
         if(data.stages)setStages(data.stages);
         if(data.workLogs)setWorkLogs(data.workLogs);
+        if(data.customTasks)setCustomTasks(data.customTasks);
       }
       if(users)LS.set("users",users);
       setSync("ok");
@@ -2082,10 +2207,13 @@ function App(){
     return()=>clearInterval(interval);
   },[refreshFromGS]);
 
-  const persist=(no,np,ns,nw)=>{
-    const o=no??oRef.current,p=np??pRef.current,s=ns??sRef.current,w=nw??wRef.current;
-    LS.set("orders",o);LS.set("projects",p);LS.set("stages",s);LS.set("workLogs",w);
-    setSync("saving");clearTimeout(saveTimer);saveTimer=setTimeout(async()=>{try{await fetch(GS_URL,{method:"POST",body:JSON.stringify({action:"save",payload:{orders:o,projects:p,stages:s,workLogs:w}})});setSync("ok")}catch{setSync("error")}},800);
+  const ctRef=useRef(customTasks);
+  useEffect(()=>{ctRef.current=customTasks},[customTasks]);
+
+  const persist=(no,np,ns,nw,nct)=>{
+    const o=no??oRef.current,p=np??pRef.current,s=ns??sRef.current,w=nw??wRef.current,ct=nct??ctRef.current;
+    LS.set("orders",o);LS.set("projects",p);LS.set("stages",s);LS.set("workLogs",w);LS.set("customTasks",ct);
+    setSync("saving");clearTimeout(saveTimer);saveTimer=setTimeout(async()=>{try{await fetch(GS_URL,{method:"POST",body:JSON.stringify({action:"save",payload:{orders:o,projects:p,stages:s,workLogs:w,customTasks:ct}})});setSync("ok")}catch{setSync("error")}},800);
   };
 
   const handleLogin=u=>{setCurrentUser(u);try{localStorage.setItem(LS_PREFIX+"session",JSON.stringify({id:u.id,username:u.username}))}catch{}};
@@ -2126,9 +2254,9 @@ function App(){
     addAuditEntry({userId:currentUser.id,username:currentUser.username,name:currentUser.name,action:"חזרה מהפסקה",target:"",details:""});
   };
   // Custom tasks
-  const handleAddTask=(task)=>{setCustomTasks(prev=>{const next=[...prev,task];LS.set("customTasks",next);return next})};
-  const handleStartTask=(taskId)=>{setCustomTasks(prev=>{const next=prev.map(t=>t.id===taskId?{...t,active:true,startTime:nowISO()}:t);LS.set("customTasks",next);return next})};
-  const handleEndTask=(taskId)=>{setCustomTasks(prev=>{const next=prev.map(t=>{if(t.id!==taskId)return t;const dur=t.startTime?Math.round((Date.now()-new Date(t.startTime).getTime())/60000)-(t.totalPauseMin||0):0;return{...t,active:false,completed:true,endTime:nowISO(),durationMin:Math.max(0,dur)}});LS.set("customTasks",next);return next})};
+  const handleAddTask=(task)=>{setCustomTasks(prev=>{const next=[...prev,task];persist(null,null,null,null,next);return next})};
+  const handleStartTask=(taskId)=>{setCustomTasks(prev=>{const next=prev.map(t=>t.id===taskId?{...t,active:true,startTime:nowISO()}:t);persist(null,null,null,null,next);return next})};
+  const handleEndTask=(taskId)=>{setCustomTasks(prev=>{const next=prev.map(t=>{if(t.id!==taskId)return t;const dur=t.startTime?Math.round((Date.now()-new Date(t.startTime).getTime())/60000)-(t.totalPauseMin||0):0;return{...t,active:false,completed:true,endTime:nowISO(),durationMin:Math.max(0,dur)}});persist(null,null,null,null,next);return next})};
 
   const isAdmin=currentUser?.role==="admin";
   const isWorker=currentUser?.role==="worker";
