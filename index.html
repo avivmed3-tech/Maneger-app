@@ -968,21 +968,12 @@ function MyWork({orders,stages,workLogs,onStartWork,onEndWork,onPauseWork,onResu
         </Card>
       )}
 
-      {/* Custom Tasks Section */}
+      {/* Custom Tasks Section — workers see assigned tasks, only admin can add */}
       <Card style={{marginBottom:14,border:"1px solid #a78bfa33"}}>
         <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:10}}>
-          <h3 style={{margin:0,fontSize:15,color:"#a78bfa"}}>📌 משימות מותאמות</h3>
-          <Btn color="#a78bfa" small onClick={()=>setShowTaskForm(p=>!p)}>+ חדשה</Btn>
+          <h3 style={{margin:0,fontSize:15,color:"#a78bfa"}}>📌 משימות שהוקצו לי</h3>
         </div>
-        {showTaskForm&&(
-          <div style={{background:"var(--c-deep)",borderRadius:8,padding:12,marginBottom:10,display:"flex",gap:10,flexWrap:"wrap",alignItems:"flex-end"}}>
-            <Field label="שם משימה *" value={taskName} onChange={setTaskName} style={{minWidth:160}}/>
-            <Field label="תיאור" value={taskDesc} onChange={setTaskDesc} style={{minWidth:200}}/>
-            <Btn color="#a78bfa" onClick={addTask} small>הוסף</Btn>
-            <Btn onClick={()=>setShowTaskForm(false)} small>ביטול</Btn>
-          </div>
-        )}
-        {myTasks.filter(t=>!t.completed).length===0&&!showTaskForm?<div style={{color:"var(--c-dim)",fontSize:12,textAlign:"center",padding:10}}>אין משימות פתוחות</div>:(
+        {myTasks.filter(t=>!t.completed).length===0?<div style={{color:"var(--c-dim)",fontSize:12,textAlign:"center",padding:10}}>אין משימות</div>:(
           <div style={{display:"flex",flexDirection:"column",gap:6}}>
             {myTasks.filter(t=>!t.completed).map(t=>(
               <div key={t.id} style={{display:"flex",justifyContent:"space-between",alignItems:"center",background:"var(--c-deep)",borderRadius:8,padding:"8px 12px",border:t.active?"1px solid #a78bfa":"1px solid var(--c-border)"}}>
@@ -1069,77 +1060,133 @@ function ActiveTimer({startTime,pauseMin=0}){
 // ══════════════════════════════════════════════════════════════════════════
 // ═══ WORKERS DASHBOARD ══════════════════════════════════════════════════
 // ══════════════════════════════════════════════════════════════════════════
-function WorkersDashboard({users,workLogs,orders,stages}){
-  const [selWorker,setSelWorker]=useState("all");
+function WorkersDashboard({users,workLogs,orders,stages,customTasks}){
+  const [search,setSearch]=useState("");
+  const [period,setPeriod]=useState("all");
   const workers=users.filter(u=>u.role!=="admin"&&u.active!==false);
-  const filtered=selWorker==="all"?workLogs:workLogs.filter(w=>w.userId===selWorker);
-  const completedLogs=filtered.filter(w=>w.completed&&w.durationMin);
+  const filtered=workers.filter(w=>!search||w.name.includes(search));
+  // Task management
+  const [showTaskForm,setShowTaskForm]=useState(false);
+  const [taskName,setTaskName]=useState("");
+  const [taskDesc,setTaskDesc]=useState("");
+  const [taskWorker,setTaskWorker]=useState("");
 
-  const workerData=workers.map(u=>{
-    const logs=workLogs.filter(w=>w.userId===u.id&&w.completed&&w.durationMin);
+  // Period filter for logs
+  const filterByPeriod=(dateStr)=>{
+    if(period==="all"||!dateStr)return true;
+    const d=new Date(dateStr);const now=new Date();
+    if(period==="today")return d.toDateString()===now.toDateString();
+    if(period==="week"){const week=7*864e5;return(now-d)<week}
+    if(period==="month")return d.getMonth()===now.getMonth()&&d.getFullYear()===now.getFullYear();
+    if(period==="quarter"){const q=Math.floor(now.getMonth()/3);return Math.floor(d.getMonth()/3)===q&&d.getFullYear()===now.getFullYear()}
+    if(period==="year")return d.getFullYear()===now.getFullYear();
+    return true;
+  };
+
+  const workerData=filtered.map(u=>{
+    const logs=workLogs.filter(w=>w.userId===u.id&&w.completed&&w.durationMin&&filterByPeriod(w.endTime));
     const totalMin=logs.reduce((s,w)=>s+w.durationMin,0);
     const units=logs.length;
     const rate=Number(u.hourlyRate||0);
     const cost=totalMin*(rate/60);
-    const revenue=logs.reduce((s,w)=>{
-      const o=orders.find(o=>(o.serials||[]).some(sr=>sr.id===w.serialId));
-      return s+Number(o?.unitPrice||0);
-    },0);
+    const revenue=logs.reduce((s,w)=>{const o=orders.find(o2=>(o2.serials||[]).some(sr=>sr.id===w.serialId));return s+Number(o?.unitPrice||0)},0);
+    const totalBreaks=logs.reduce((s,w)=>s+((w.pauseLog||[]).length),0);
+    const totalBreakMin=logs.reduce((s,w)=>s+(w.totalPauseMin||0),0);
     const active=workLogs.find(w=>w.userId===u.id&&!w.completed);
-    return{...u,totalMin,units,cost,revenue,profit:revenue-cost,unitsPerHour:totalMin>0?(units/(totalMin/60)):0,active};
+    const myTasks=(customTasks||[]).filter(t=>t.userId===u.id);
+    const completedTasks=myTasks.filter(t=>t.completed&&filterByPeriod(t.endTime));
+    const taskMin=completedTasks.reduce((s,t)=>s+(t.durationMin||0),0);
+    return{...u,totalMin,units,cost,revenue,profit:revenue-cost,uph:totalMin>0?(units/(totalMin/60)):0,active,totalBreaks,totalBreakMin,completedTasks:completedTasks.length,taskMin};
   });
+
+  const addTask=()=>{
+    if(!taskName.trim()||!taskWorker)return alert("יש לבחור עובד ושם משימה");
+    const u=users.find(u2=>u2.id===taskWorker);
+    // Use the onAddTask from App (passed via customTasks handler)
+    const task={id:uid(),userId:taskWorker,userName:u?.name||"",name:taskName.trim(),description:taskDesc.trim(),createdAt:nowISO(),active:false,completed:false,startTime:null,endTime:null,durationMin:0,paused:false,pauseStart:null,totalPauseMin:0,pauseLog:[]};
+    const next=[...(customTasks||[]),task];
+    LS.set("customTasks",next);
+    // We need to trigger parent state update — use window event
+    window.dispatchEvent(new CustomEvent("taskAdded",{detail:task}));
+    setTaskName("");setTaskDesc("");setTaskWorker("");setShowTaskForm(false);
+  };
 
   return(
     <div className="fade-in">
       <h2 style={{margin:"0 0 14px"}}>👥 ביצועי עובדים</h2>
       <Card style={{padding:"12px 14px",marginBottom:12,display:"flex",gap:10,flexWrap:"wrap",alignItems:"flex-end"}}>
-        <div style={{display:"flex",flexDirection:"column",gap:3,minWidth:160}}>
-          <label style={{fontSize:11,color:"var(--c-dim)"}}>עובד</label>
-          <select value={selWorker} onChange={e=>setSelWorker(e.target.value)}>
-            <option value="all">כל העובדים</option>
-            {workers.map(w=><option key={w.id} value={w.id}>{w.name}</option>)}
-          </select>
+        <div style={{display:"flex",flexDirection:"column",gap:3,flex:"1 1 160px"}}>
+          <label style={{fontSize:11,color:"var(--c-dim)"}}>חיפוש עובד</label>
+          <input value={search} onChange={e=>setSearch(e.target.value)} placeholder="הקלד שם..."/>
+        </div>
+        <div style={{display:"flex",flexDirection:"column",gap:3}}>
+          <label style={{fontSize:11,color:"var(--c-dim)"}}>תקופה</label>
+          <SegBtn options={[["all","הכל"],["today","היום"],["week","שבוע"],["month","חודש"],["quarter","רבעון"],["year","שנה"]]} value={period} onChange={setPeriod}/>
         </div>
       </Card>
 
-      {/* Worker cards */}
-      <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(280px,1fr))",gap:10,marginBottom:14}}>
-        {workerData.filter(w=>selWorker==="all"||w.id===selWorker).map(w=>(
+      {/* Add Task for worker (admin only) */}
+      <Card style={{marginBottom:14,border:"1px solid #a78bfa33"}}>
+        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:10}}>
+          <h3 style={{margin:0,fontSize:15,color:"#a78bfa"}}>📌 הקצאת משימה לעובד</h3>
+          <Btn color="#a78bfa" small onClick={()=>setShowTaskForm(p=>!p)}>+ משימה חדשה</Btn>
+        </div>
+        {showTaskForm&&(
+          <div style={{background:"var(--c-deep)",borderRadius:8,padding:12,marginBottom:10,display:"flex",gap:10,flexWrap:"wrap",alignItems:"flex-end"}}>
+            <div style={{display:"flex",flexDirection:"column",gap:4,minWidth:140}}>
+              <label style={{fontSize:11,color:"var(--c-dim)",fontWeight:600}}>עובד *</label>
+              <select value={taskWorker} onChange={e=>setTaskWorker(e.target.value)}>
+                <option value="">-- בחר עובד --</option>
+                {workers.map(w=><option key={w.id} value={w.id}>{w.name}</option>)}
+              </select>
+            </div>
+            <Field label="שם משימה *" value={taskName} onChange={setTaskName} style={{minWidth:160}}/>
+            <Field label="תיאור" value={taskDesc} onChange={setTaskDesc} style={{minWidth:200}}/>
+            <Btn color="#a78bfa" onClick={addTask} small>הקצה</Btn>
+            <Btn onClick={()=>setShowTaskForm(false)} small>ביטול</Btn>
+          </div>
+        )}
+      </Card>
+
+      {/* Worker cards with detailed stats */}
+      <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(300px,1fr))",gap:10,marginBottom:14}}>
+        {workerData.map(w=>(
           <Card key={w.id} style={{border:w.active?`2px solid #f59e0b`:"1px solid var(--c-border)"}}>
             <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:10}}>
               <div style={{fontWeight:700,fontSize:15}}>{w.name}</div>
               {w.active&&<span style={{fontSize:11,background:"#f59e0b22",color:"#f59e0b",padding:"3px 8px",borderRadius:12,animation:"pulse 1.5s infinite"}}>🔄 עובד</span>}
             </div>
-            <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:6}}>
+            <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:6}}>
               <div style={{background:"var(--c-deep)",borderRadius:6,padding:"6px 8px"}}><div style={{fontSize:10,color:"var(--c-dim)"}}>יחידות</div><div style={{fontWeight:700,color:"#60a5fa"}}>{w.units}</div></div>
-              <div style={{background:"var(--c-deep)",borderRadius:6,padding:"6px 8px"}}><div style={{fontSize:10,color:"var(--c-dim)"}}>יח'/שעה</div><div style={{fontWeight:700,color:"#06b6d4"}}>{w.unitsPerHour.toFixed(1)}</div></div>
+              <div style={{background:"var(--c-deep)",borderRadius:6,padding:"6px 8px"}}><div style={{fontSize:10,color:"var(--c-dim)"}}>יח'/שעה</div><div style={{fontWeight:700,color:"#06b6d4"}}>{w.uph.toFixed(1)}</div></div>
               <div style={{background:"var(--c-deep)",borderRadius:6,padding:"6px 8px"}}><div style={{fontSize:10,color:"var(--c-dim)"}}>שעות</div><div style={{fontWeight:700}}>{fmtTime(w.totalMin)}</div></div>
+              <div style={{background:"var(--c-deep)",borderRadius:6,padding:"6px 8px"}}><div style={{fontSize:10,color:"var(--c-dim)"}}>הפסקות</div><div style={{fontWeight:700,color:"#f97316"}}>{w.totalBreaks} ({fmtTime(w.totalBreakMin)})</div></div>
+              <div style={{background:"var(--c-deep)",borderRadius:6,padding:"6px 8px"}}><div style={{fontSize:10,color:"var(--c-dim)"}}>משימות</div><div style={{fontWeight:700,color:"#a78bfa"}}>{w.completedTasks}</div></div>
               <div style={{background:"var(--c-deep)",borderRadius:6,padding:"6px 8px"}}><div style={{fontSize:10,color:"var(--c-dim)"}}>רווח</div><div style={{fontWeight:700,color:w.profit>=0?"#10b981":"#ef4444"}}>{fmtMoney(w.profit)}</div></div>
             </div>
-            {w.hourlyRate>0&&<div style={{fontSize:11,color:"var(--c-dim)",marginTop:6}}>תעריף: {fmtMoney(w.hourlyRate)}/שעה | עלות: {fmtMoney(w.cost)}</div>}
+            {w.hourlyRate>0&&<div style={{fontSize:11,color:"var(--c-dim)",marginTop:6}}>תעריף: {fmtMoney(w.hourlyRate)}/שעה | עלות: {fmtMoney(w.cost)} | הכנסה: {fmtMoney(w.revenue)}</div>}
           </Card>
         ))}
       </div>
 
-      {/* Recent activity */}
+      {/* Recent activity table */}
       <Card>
         <div style={{fontWeight:700,fontSize:14,marginBottom:10}}>📋 פעילות אחרונה</div>
-        {completedLogs.length===0?<div style={{color:"var(--c-dim)",textAlign:"center",padding:20}}>אין פעילות</div>:(
-          <div style={{overflowX:"auto"}}><table><thead><tr><th>עובד</th><th>S/N</th><th>שלב</th><th>זמן</th><th>סיום</th></tr></thead><tbody>
-            {completedLogs.sort((a,b)=>(b.endTime||"").localeCompare(a.endTime||"")).slice(0,30).map(w=>{
-              const stage=stages.find(s=>s.id===w.stageId);
-              return(
-                <tr key={w.id}>
-                  <td style={{fontWeight:600}}>{w.userName}</td>
-                  <td style={{color:"#7eb8ff",fontSize:12}}>{w.serialSn}</td>
-                  <td><span style={{color:stage?.color||"var(--c-muted)"}}>{stage?.name||"—"}</span></td>
-                  <td>{fmtTime(w.durationMin)}</td>
-                  <td style={{fontSize:11,color:"var(--c-dim)"}}>{w.endTime?new Date(w.endTime).toLocaleString("he-IL",{day:"2-digit",month:"2-digit",hour:"2-digit",minute:"2-digit"}):""}</td>
-                </tr>
-              );
-            })}
-          </tbody></table></div>
-        )}
+        <div style={{overflowX:"auto"}}><table><thead><tr><th>עובד</th><th>S/N</th><th>שלב</th><th>עבודה נטו</th><th>הפסקות</th><th>סיום</th></tr></thead><tbody>
+          {workLogs.filter(w=>w.completed&&filterByPeriod(w.endTime)).sort((a,b)=>(b.endTime||"").localeCompare(a.endTime||"")).slice(0,50).map(w=>{
+            const stage=stages.find(s=>s.id===w.stageId);
+            return(
+              <tr key={w.id}>
+                <td style={{fontWeight:600}}>{w.userName}</td>
+                <td style={{color:"#7eb8ff",fontSize:12}}>{w.serialSn}</td>
+                <td><span style={{color:stage?.color||"var(--c-muted)"}}>{stage?.name||"—"}</span></td>
+                <td>{fmtTime(w.durationMin)}</td>
+                <td style={{color:"#f97316"}}>{(w.pauseLog||[]).length>0?`${(w.pauseLog||[]).length} (${fmtTime(w.totalPauseMin||0)})`:"—"}</td>
+                <td style={{fontSize:11,color:"var(--c-dim)"}}>{w.endTime?new Date(w.endTime).toLocaleString("he-IL",{day:"2-digit",month:"2-digit",hour:"2-digit",minute:"2-digit"}):""}</td>
+              </tr>
+            );
+          })}
+        </tbody></table></div>
       </Card>
     </div>
   );
@@ -1869,6 +1916,8 @@ function App(){
   };
   // Custom tasks
   const handleAddTask=(task)=>{setCustomTasks(prev=>{const next=[...prev,task];LS.set("customTasks",next);return next})};
+  // Listen for tasks added from WorkersDashboard
+  useEffect(()=>{const h=(e)=>{setCustomTasks(prev=>{const next=[...prev,e.detail];LS.set("customTasks",next);return next})};window.addEventListener("taskAdded",h);return()=>window.removeEventListener("taskAdded",h)},[]);
   const handleStartTask=(taskId)=>{setCustomTasks(prev=>{const next=prev.map(t=>t.id===taskId?{...t,active:true,startTime:nowISO()}:t);LS.set("customTasks",next);return next})};
   const handleEndTask=(taskId)=>{setCustomTasks(prev=>{const next=prev.map(t=>{if(t.id!==taskId)return t;const dur=t.startTime?Math.round((Date.now()-new Date(t.startTime).getTime())/60000)-(t.totalPauseMin||0):0;return{...t,active:false,completed:true,endTime:nowISO(),durationMin:Math.max(0,dur)}});LS.set("customTasks",next);return next})};
 
@@ -1922,7 +1971,7 @@ function App(){
         {tab==="orders"&&<Orders orders={filteredOrders} projects={filteredProjects} stages={stages} updO={updO} workLogs={filteredWorkLogs}/>}
         {tab==="shortages"&&<Shortages orders={filteredOrders} updO={updO} projects={filteredProjects}/>}
         {tab==="mywork"&&<MyWork orders={filteredOrders} stages={stages} workLogs={filteredWorkLogs} onStartWork={handleStartWork} onEndWork={handleEndWork} onPauseWork={handlePauseWork} onResumeWork={handleResumeWork} customTasks={customTasks} onAddTask={handleAddTask} onStartTask={handleStartTask} onEndTask={handleEndTask}/>}
-        {tab==="workers"&&isAdmin&&<WorkersDashboard users={getUsers()} workLogs={filteredWorkLogs} orders={filteredOrders} stages={stages}/>}
+        {tab==="workers"&&isAdmin&&<WorkersDashboard users={getUsers()} workLogs={filteredWorkLogs} orders={filteredOrders} stages={stages} customTasks={customTasks}/>}
         {tab==="yield"&&<YieldDashboard orders={filteredOrders} projects={filteredProjects} stages={stages} workLogs={filteredWorkLogs}/>}
         {tab==="stages"&&isAdmin&&<StagesManagement stages={stages} setStages={setStages} persist={persist}/>}
         {tab==="projects"&&<Projects projects={filteredProjects} orders={filteredOrders} updP={updP} stages={stages} workLogs={filteredWorkLogs}/>}
