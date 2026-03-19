@@ -345,10 +345,24 @@ function Dashboard({orders,projects,stages,users,workLogs}){
     donutData=stages.map(st=>({label:st.name,value:fLogs.filter(w=>w.stageId===st.id).length,color:st.color})).filter(d=>d.value>0);
   }
 
-  // Worker stats
+  // Worker stats — revenue by stage price, units = serials fully done by worker
   const workerStats=users.filter(u=>u.role!=="admin"&&u.active!==false).map(u=>{
-    const logs=fLogs.filter(w=>w.userId===u.id&&w.durationMin);const totalMin=logs.reduce((s,w)=>s+w.durationMin,0);const units=logs.length;
-    const cost=totalMin*(Number(u.hourlyRate||0)/60);const rev=logs.reduce((s,w)=>{const o2=orders.find(o3=>(o3.serials||[]).some(sr=>sr.id===w.serialId));return s+Number(o2?.unitPrice||0)},0);
+    const logs=fLogs.filter(w=>w.userId===u.id&&w.durationMin);
+    const totalMin=logs.reduce((s,w)=>s+w.durationMin,0);
+    const cost=totalMin*(Number(u.hourlyRate||0)/60);
+    // Revenue: sum stage prices for each completed log
+    const rev=logs.reduce((s,w)=>{const st=stages.find(s2=>s2.id===w.stageId);return s+Number(st?.price||0)},0);
+    // Units: count serials where this worker completed ALL stages assigned to them
+    const workerStageAccess=u.stageAccess==="all"?stages.map(s2=>s2.id):(Array.isArray(u.stageAccess)?u.stageAccess:[]);
+    const serialsDone=new Set();
+    logs.forEach(w=>{
+      const o=fOrders.find(o2=>(o2.serials||[]).some(sr=>sr.id===w.serialId));
+      if(!o)return;
+      const myStagesInOrder=(o.stageIds||[]).filter(sid=>workerStageAccess.includes(sid));
+      const allMyDone=myStagesInOrder.every(sid=>fLogs.some(l=>l.userId===u.id&&l.serialId===w.serialId&&l.stageId===sid&&l.completed));
+      if(allMyDone)serialsDone.add(w.serialId);
+    });
+    const units=serialsDone.size;
     return{...u,totalMin,units,cost,revenue:rev,profit:rev-cost,uph:totalMin>0?(units/(totalMin/60)):0};
   }).sort((a,b)=>b.uph-a.uph);
 
@@ -1348,17 +1362,29 @@ function WorkersDashboard({users,workLogs,orders,stages,customTasks,onAddTask,on
   const workerData=filtered.map(u=>{
     const logs=workLogs.filter(w=>w.userId===u.id&&w.completed&&w.durationMin&&filterByPeriod(w.endTime));
     const totalMin=logs.reduce((s,w)=>s+w.durationMin,0);
-    const units=logs.length;
     const rate=Number(u.hourlyRate||0);
     const cost=totalMin*(rate/60);
-    const revenue=logs.reduce((s,w)=>{const o=orders.find(o2=>(o2.serials||[]).some(sr=>sr.id===w.serialId));return s+Number(o?.unitPrice||0)},0);
+    // Revenue: sum stage prices per completed log
+    const revenue=logs.reduce((s,w)=>{const st=stages.find(s2=>s2.id===w.stageId);return s+Number(st?.price||0)},0);
+    // Units: serials where worker completed ALL their assigned stages
+    const workerStageAccess=u.stageAccess==="all"?stages.map(s2=>s2.id):(Array.isArray(u.stageAccess)?u.stageAccess:[]);
+    const serialsDone=new Set();
+    logs.forEach(w=>{
+      const o=orders.find(o2=>(o2.serials||[]).some(sr=>sr.id===w.serialId));
+      if(!o)return;
+      const myStagesInOrder=(o.stageIds||[]).filter(sid=>workerStageAccess.includes(sid));
+      const allMyDone=myStagesInOrder.every(sid=>workLogs.some(l=>l.userId===u.id&&l.serialId===w.serialId&&l.stageId===sid&&l.completed));
+      if(allMyDone)serialsDone.add(w.serialId);
+    });
+    const units=serialsDone.size;
     const totalBreaks=logs.reduce((s,w)=>s+((w.pauseLog||[]).length),0);
     const totalBreakMin=logs.reduce((s,w)=>s+(w.totalPauseMin||0),0);
     const active=workLogs.find(w=>w.userId===u.id&&!w.completed);
     const myTasks=(customTasks||[]).filter(t=>t.userId===u.id);
     const completedTasks=myTasks.filter(t=>t.completed&&filterByPeriod(t.endTime));
     const taskMin=completedTasks.reduce((s,t)=>s+(t.durationMin||0),0);
-    return{...u,totalMin,units,cost,revenue,profit:revenue-cost,uph:totalMin>0?(units/(totalMin/60)):0,active,totalBreaks,totalBreakMin,completedTasks:completedTasks.length,taskMin};
+    const taskRev=completedTasks.reduce((s,t)=>s+Number(t.price||0),0);
+    return{...u,totalMin,units,cost,revenue:revenue+taskRev,profit:(revenue+taskRev)-cost,uph:totalMin>0?(units/(totalMin/60)):0,active,totalBreaks,totalBreakMin,completedTasks:completedTasks.length,taskMin};
   });
 
   const addTask=()=>{
@@ -2012,7 +2038,7 @@ function doExport(orders,projects,stages,workLogs,users){
   XLSX.utils.book_append_sheet(wb,mkSheet(h4,r4.length?r4:[["","","","","","",0]],[14,14,18,14,18,18,10]),"לוג עבודה");
   // 5: ביצועי עובדים
   const h5=['עובד','תעריף שעתי','יחידות','שעות עבודה','יח/שעה','עלות','הכנסה','רווח'];
-  const r5=users.filter(u=>u.role!=="admin"&&u.active!==false).map(u=>{const logs=workLogs.filter(w=>w.userId===u.id&&w.completed&&w.durationMin);const mins=logs.reduce((s,w)=>s+w.durationMin,0);const cost=mins*(Number(u.hourlyRate||0)/60);const rev=logs.reduce((s,w)=>{const o2=orders.find(o3=>(o3.serials||[]).some(sr=>sr.id===w.serialId));return s+Number(o2?.unitPrice||0)},0);return[u.name,Number(u.hourlyRate||0),logs.length,Math.round(mins/60*10)/10,mins>0?Math.round(logs.length/(mins/60)*10)/10:0,Math.round(cost),Math.round(rev),Math.round(rev-cost)]});
+  const r5=users.filter(u=>u.role!=="admin"&&u.active!==false).map(u=>{const logs=workLogs.filter(w=>w.userId===u.id&&w.completed&&w.durationMin);const mins=logs.reduce((s,w)=>s+w.durationMin,0);const cost=mins*(Number(u.hourlyRate||0)/60);const rev=logs.reduce((s,w)=>{const st=stages.find(s2=>s2.id===w.stageId);return s+Number(st?.price||0)},0);const wa=u.stageAccess==="all"?stages.map(s2=>s2.id):(Array.isArray(u.stageAccess)?u.stageAccess:[]);const done=new Set();logs.forEach(w=>{const o2=orders.find(o3=>(o3.serials||[]).some(sr=>sr.id===w.serialId));if(!o2)return;const ms=(o2.stageIds||[]).filter(sid=>wa.includes(sid));if(ms.every(sid=>logs.some(l=>l.serialId===w.serialId&&l.stageId===sid)))done.add(w.serialId)});return[u.name,Number(u.hourlyRate||0),done.size,Math.round(mins/60*10)/10,mins>0?Math.round(done.size/(mins/60)*10)/10:0,Math.round(cost),Math.round(rev),Math.round(rev-cost)]});
   XLSX.utils.book_append_sheet(wb,mkSheet(h5,r5.length?r5:[["",0,0,0,0,0,0,0]],[16,12,10,12,10,12,12,12]),"ביצועי עובדים");
   XLSX.writeFile(wb,"דוח_קו_ייצור_"+todays()+".xlsx");
 }
