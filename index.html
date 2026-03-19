@@ -541,8 +541,9 @@ function OrderForm({initial,projects,stages,stageBlocks,onSave,onClose}){
   );
 }
 
-function SerialsManager({order,stages,onUpdate,workLogs}){
-  const {canEdit}=useAuth();
+function SerialsManager({order,stages,onUpdate,workLogs,onSignOff}){
+  const {canEdit,currentUser}=useAuth();
+  const isAdmin=currentUser?.role==="admin";
   const [addCount,setAddCount]=useState(1);
   const [prefix,setPrefix]=useState(order.pn||order.woNumber);
   const [startNum,setStartNum]=useState((order.serials||[]).length+1);
@@ -568,6 +569,14 @@ function SerialsManager({order,stages,onUpdate,workLogs}){
     const active=workLogs.find(w=>w.serialId===serialId&&w.stageId===stageId&&!w.completed);
     if(active)return{active:true,user:active.userName,startTime:active.startTime};
     return{pending:true};
+  };
+
+  const adminSignOff=(serialId,stageId)=>{
+    if(!isAdmin)return;
+    const serial=serials.find(s=>s.id===serialId);
+    if(!serial)return;
+    const stage=stages.find(s=>s.id===stageId);
+    if(onSignOff)onSignOff({id:uid(),userId:currentUser.id,userName:currentUser.name,serialId,serialSn:serial.sn,stageId,orderId:order.id,startTime:nowISO(),endTime:nowISO(),completed:true,durationMin:0,paused:false,pauseStart:null,totalPauseMin:0,pauseLog:[]});
   };
 
   const oStages=(order.stageIds||[]).map(sid=>stages.find(s=>s.id===sid)).filter(Boolean).sort((a,b)=>a.order-b.order);
@@ -600,9 +609,9 @@ function SerialsManager({order,stages,onUpdate,workLogs}){
                       const status=getStageStatus(s.id,st.id);
                       if(status.done)return<td key={st.id} style={{textAlign:"center"}}><span title={`${status.user} — ${fmtTime(status.duration)}`} style={{color:"#10b981",fontSize:16}}>✅</span></td>;
                       if(status.active)return<td key={st.id} style={{textAlign:"center"}}><span style={{animation:"pulse 1.5s infinite",color:"#f59e0b",fontSize:13}}>🔄 {status.user}</span></td>;
-                      return<td key={st.id} style={{textAlign:"center",color:"var(--c-dim)"}}>—</td>;
+                      return<td key={st.id} style={{textAlign:"center"}}>{isAdmin?<button onClick={()=>adminSignOff(s.id,st.id)} style={{background:"none",border:"1px dashed var(--c-border2)",borderRadius:6,padding:"2px 8px",fontSize:11,color:"var(--c-dim)",cursor:"pointer",fontFamily:"inherit"}} title="חתום כמנהל">✍️</button>:<span style={{color:"var(--c-dim)"}}>—</span>}</td>;
                     })}
-                    <td style={{textAlign:"center"}}>{allDone?<span style={{color:"#10b981",fontWeight:700,fontSize:12}}>✅ הושלם</span>:anyActive?<span style={{color:"#f59e0b",fontSize:12}}>🔄 בתהליך</span>:<span style={{color:"var(--c-dim)",fontSize:12}}>ממתין</span>}</td>
+                    <td style={{textAlign:"center"}}>{allDone?<span style={{color:"#10b981",fontWeight:700,fontSize:12}}>📦 סופק</span>:anyActive?<span style={{color:"#f59e0b",fontSize:12}}>🔄 בתהליך</span>:<span style={{color:"var(--c-dim)",fontSize:12}}>ממתין</span>}</td>
                     {canEdit&&<td><IBtn onClick={()=>removeSn(s.id)}>🗑️</IBtn></td>}
                   </tr>
                 );
@@ -742,11 +751,17 @@ function ShortagesInOrder({order,onUpdate}){
 
 function OrderDetail({order,projects,stages,onClose,onUpdate,workLogs,onWorkLog}){
   const {canEdit,currentUser}=useAuth();
+  const isAdmin=currentUser?.role==="admin";
   const proj=projects.find(p=>p.id===order.projectId);
   const serials=order.serials||[];
   const oStages=(order.stageIds||[]).map(sid=>stages.find(s=>s.id===sid)).filter(Boolean).sort((a,b)=>a.order-b.order);
   const totalCompleted=serials.filter(s=>oStages.every(st=>workLogs.some(w=>w.serialId===s.id&&w.stageId===st.id&&w.completed))).length;
   const pct=serials.length?Math.round(totalCompleted/serials.length*100):0;
+  const [editDates,setEditDates]=useState(false);
+  const [dates,setDates]=useState({receivedDate:order.receivedDate||"",targetDate:order.targetDate||"",deliveryDate:order.deliveryDate||"",deliveryStatus:order.deliveryStatus||"pending",deliveryNotes:order.deliveryNotes||""});
+  const saveDates=()=>{onUpdate({...order,...dates});setEditDates(false)};
+  const deliveredCount=Number(order.deliveredQty||0);
+
   return(
     <div className="fade-in">
       <Btn onClick={onClose} style={{marginBottom:12}}>← חזרה</Btn>
@@ -763,7 +778,7 @@ function OrderDetail({order,projects,stages,onClose,onUpdate,workLogs,onWorkLog}
           </div>
         </div>
         <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(110px,1fr))",gap:8,marginTop:10}}>
-          {(()=>{const {currentUser:cu}=useAuth();const isW=cu?.role==="worker";const items=[["כמות",serials.length],["הושלמו",totalCompleted],["תאריך קבלה",fmt(order.receivedDate)],["יעד אספקה",fmt(order.targetDate)]];if(!isW){items.splice(2,0,["מחיר ליחידה",fmtMoney(order.unitPrice)],["הכנסה ממומשת",fmtMoney(totalCompleted*Number(order.unitPrice||0))]);} return items.map(([l,v])=>(
+          {(()=>{const isW=currentUser?.role==="worker";const items=[["כמות",serials.length],["הושלמו",totalCompleted],["תאריך קבלה",fmt(order.receivedDate)],["יעד אספקה",fmt(order.targetDate)]];if(!isW){items.splice(2,0,["מחיר ליחידה",fmtMoney(order.unitPrice)],["הכנסה ממומשת",fmtMoney(totalCompleted*Number(order.unitPrice||0))]);} return items.map(([l,v])=>(
             <div key={l} style={{background:"var(--c-deep)",borderRadius:8,padding:"8px 10px"}}><div style={{fontSize:10,color:"var(--c-dim)",marginBottom:2}}>{l}</div><div style={{fontWeight:700,fontSize:12,wordBreak:"break-word"}}>{v}</div></div>
           ))})()}
         </div>
@@ -773,9 +788,44 @@ function OrderDetail({order,projects,stages,onClose,onUpdate,workLogs,onWorkLog}
         </div>
       </Card>
 
+      {/* Delivery & Dates Management (admin only) */}
+      {isAdmin&&(
+        <Card style={{marginBottom:14,border:"1px solid #06b6d433"}}>
+          <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:10}}>
+            <h3 style={{margin:0,fontSize:15,color:"#06b6d4"}}>📦 אספקה ותאריכים</h3>
+            <Btn color="#06b6d4" small onClick={()=>setEditDates(p=>!p)}>{editDates?"סגור":"✏️ ערוך"}</Btn>
+          </div>
+          <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(130px,1fr))",gap:8,marginBottom:editDates?12:0}}>
+            <div style={{background:"var(--c-deep)",borderRadius:8,padding:"8px 10px"}}><div style={{fontSize:10,color:"var(--c-dim)"}}>סטטוס אספקה</div><div style={{fontWeight:700,fontSize:12,color:order.deliveryStatus==="delivered"?"#10b981":order.deliveryStatus==="partial"?"#f59e0b":"var(--c-muted)"}}>{order.deliveryStatus==="delivered"?"✅ סופק":order.deliveryStatus==="partial"?`📦 חלקי (${deliveredCount}/${serials.length})`:"⏳ ממתין"}</div></div>
+            <div style={{background:"var(--c-deep)",borderRadius:8,padding:"8px 10px"}}><div style={{fontSize:10,color:"var(--c-dim)"}}>תאריך אספקה</div><div style={{fontWeight:700,fontSize:12}}>{order.deliveryDate?fmt(order.deliveryDate):"—"}</div></div>
+            <div style={{background:"var(--c-deep)",borderRadius:8,padding:"8px 10px"}}><div style={{fontSize:10,color:"var(--c-dim)"}}>תאריך קבלה</div><div style={{fontWeight:700,fontSize:12}}>{fmt(order.receivedDate)}</div></div>
+            <div style={{background:"var(--c-deep)",borderRadius:8,padding:"8px 10px"}}><div style={{fontSize:10,color:"var(--c-dim)"}}>יעד</div><div style={{fontWeight:700,fontSize:12,color:order.targetDate&&new Date(order.targetDate)<new Date()?"#ef4444":"var(--c-text)"}}>{fmt(order.targetDate)}</div></div>
+          </div>
+          {order.deliveryNotes&&<div style={{fontSize:12,color:"var(--c-muted)",marginTop:6}}>📝 {order.deliveryNotes}</div>}
+          {editDates&&(
+            <div style={{background:"var(--c-deep)",borderRadius:8,padding:12,display:"flex",gap:10,flexWrap:"wrap",alignItems:"flex-end"}}>
+              <div style={{display:"flex",flexDirection:"column",gap:4,minWidth:120}}>
+                <label style={{fontSize:11,color:"var(--c-dim)",fontWeight:600}}>סטטוס אספקה</label>
+                <select value={dates.deliveryStatus} onChange={e=>setDates(p=>({...p,deliveryStatus:e.target.value}))}>
+                  <option value="pending">⏳ ממתין</option>
+                  <option value="partial">📦 חלקי</option>
+                  <option value="delivered">✅ סופק</option>
+                </select>
+              </div>
+              {dates.deliveryStatus==="partial"&&<Field label="כמות שסופקה" type="number" value={order.deliveredQty||""} onChange={v=>onUpdate({...order,deliveredQty:Number(v)})} style={{minWidth:80}}/>}
+              <Field label="תאריך קבלה" type="date" value={dates.receivedDate} onChange={v=>setDates(p=>({...p,receivedDate:v}))} style={{minWidth:120}}/>
+              <Field label="יעד אספקה" type="date" value={dates.targetDate} onChange={v=>setDates(p=>({...p,targetDate:v}))} style={{minWidth:120}}/>
+              <Field label="תאריך אספקה" type="date" value={dates.deliveryDate} onChange={v=>setDates(p=>({...p,deliveryDate:v}))} style={{minWidth:120}}/>
+              <Field label="הערות אספקה" value={dates.deliveryNotes} onChange={v=>setDates(p=>({...p,deliveryNotes:v}))} style={{minWidth:200}}/>
+              <Btn color="#06b6d4" onClick={saveDates} small>💾 שמור</Btn>
+            </div>
+          )}
+        </Card>
+      )}
+
       {/* Serials Manager */}
       <Card style={{marginBottom:14}}>
-        <SerialsManager order={order} stages={stages} onUpdate={onUpdate} workLogs={workLogs}/>
+        <SerialsManager order={order} stages={stages} onUpdate={onUpdate} workLogs={workLogs} onSignOff={onWorkLog}/>
       </Card>
 
       {/* Shortages inside order */}
@@ -789,7 +839,7 @@ function OrderDetail({order,projects,stages,onClose,onUpdate,workLogs,onWorkLog}
   );
 }
 
-function Orders({orders,projects,stages,stageBlocks,updO,workLogs}){
+function Orders({orders,projects,stages,stageBlocks,updO,workLogs,onWorkLog}){
   const {canEdit}=useAuth();
   const [showForm,setShowForm]=useState(false);
   const [editing,setEditing]=useState(null);
@@ -811,7 +861,7 @@ function Orders({orders,projects,stages,stageBlocks,updO,workLogs}){
   // Always get fresh order from state
   const detailOrder=detail?orders.find(o=>o.id===detail.id)||detail:null;
 
-  if(detailOrder)return<OrderDetail order={detailOrder} projects={projects} stages={stages} onClose={()=>setDetail(null)} onUpdate={handleUpd} workLogs={workLogs}/>;
+  if(detailOrder)return<OrderDetail order={detailOrder} projects={projects} stages={stages} onClose={()=>setDetail(null)} onUpdate={handleUpd} workLogs={workLogs} onWorkLog={onWorkLog}/>;
 
   return(
     <div className="fade-in">
@@ -2318,14 +2368,49 @@ function App(){
   const updO=useCallback((fn)=>{setOrders(prev=>{const next=typeof fn==="function"?fn(prev):fn;persist(next,null,null,null);return next})},[]);
   const updP=useCallback((fn)=>{setProjects(prev=>{const next=typeof fn==="function"?fn(prev):fn;persist(null,next,null,null);return next})},[]);
 
+  // Auto-delivery: per serial — when a serial finishes all stages, mark it as delivered
+  const checkAutoDelivery=(orderId,nextLogs)=>{
+    const order=oRef.current.find(o=>o.id===orderId);
+    if(!order)return;
+    const sers=order.serials||[];if(!sers.length)return;
+    const oSt=order.stageIds||[];if(!oSt.length)return;
+    const delivered=new Set(order.deliveredSerials||[]);
+    let changed=false;
+    sers.forEach(sr=>{
+      if(delivered.has(sr.id))return;
+      const allDone=oSt.every(sid=>nextLogs.some(w=>w.serialId===sr.id&&w.stageId===sid&&w.completed));
+      if(allDone){delivered.add(sr.id);changed=true}
+    });
+    if(changed){
+      const deliveredArr=[...delivered];
+      const allDelivered=deliveredArr.length===sers.length;
+      setOrders(prev=>{
+        const updated=prev.map(o=>o.id!==orderId?o:{...o,
+          deliveredSerials:deliveredArr,
+          deliveredQty:deliveredArr.length,
+          deliveryStatus:allDelivered?"delivered":deliveredArr.length>0?"partial":"pending",
+          deliveryDate:allDelivered?todays():(o.deliveryDate||"")
+        });
+        persist(updated,null,null,null);
+        return updated;
+      });
+    }
+  };
+
   const handleStartWork=(log)=>{
-    setWorkLogs(prev=>{const next=[...prev,log];persist(null,null,null,next);return next});
-    addAuditEntry({userId:currentUser.id,username:currentUser.username,name:currentUser.name,action:"התחלת עבודה",target:log.serialSn,details:stages.find(s=>s.id===log.stageId)?.name||""});
+    setWorkLogs(prev=>{const next=[...prev,log];persist(null,null,null,next);
+      // If admin sign-off (completed=true), check auto delivery
+      if(log.completed&&log.orderId)setTimeout(()=>checkAutoDelivery(log.orderId,next),100);
+      return next});
+    addAuditEntry({userId:currentUser.id,username:currentUser.username,name:currentUser.name,action:log.completed?"חתימת מנהל":"התחלת עבודה",target:log.serialSn,details:stages.find(s=>s.id===log.stageId)?.name||""});
   };
   const handleEndWork=(logId,duration)=>{
     setWorkLogs(prev=>{
       const next=prev.map(w=>w.id===logId?{...w,completed:true,endTime:nowISO(),durationMin:duration}:w);
       persist(null,null,null,next);
+      // Check auto delivery
+      const log=next.find(w=>w.id===logId);
+      if(log?.orderId)setTimeout(()=>checkAutoDelivery(log.orderId,next),100);
       return next;
     });
     const log=workLogs.find(w=>w.id===logId);
@@ -2397,7 +2482,7 @@ function App(){
       <Navbar tab={tab} setTab={setTab} tabs={TABS} lightMode={lightMode} toggleLight={()=>setLightMode(p=>!p)} sync={sync} onAdmin={()=>setShowAdmin(true)} onLogout={handleLogout} alertCount={alertCount} onAlerts={()=>setShowAlerts(true)} onRefresh={()=>refreshFromGS(true)}/>
       <main className="main-content" style={{maxWidth:1440,margin:"0 auto",padding:"16px 14px",paddingBottom:showInstall?"100px":"calc(16px + env(safe-area-inset-bottom,0px))"}}>
         {tab==="dashboard"&&<Dashboard orders={filteredOrders} projects={filteredProjects} stages={stages} users={getUsers()} workLogs={filteredWorkLogs}/>}
-        {tab==="orders"&&<Orders orders={filteredOrders} projects={filteredProjects} stages={stages} stageBlocks={stageBlocks} updO={updO} workLogs={filteredWorkLogs}/>}
+        {tab==="orders"&&<Orders orders={filteredOrders} projects={filteredProjects} stages={stages} stageBlocks={stageBlocks} updO={updO} workLogs={filteredWorkLogs} onWorkLog={handleStartWork}/>}
         {tab==="shortages"&&<Shortages orders={filteredOrders} updO={updO} projects={filteredProjects}/>}
         {tab==="mywork"&&<MyWork orders={filteredOrders} stages={stages} workLogs={filteredWorkLogs} onStartWork={handleStartWork} onEndWork={handleEndWork} onPauseWork={handlePauseWork} onResumeWork={handleResumeWork} customTasks={customTasks} onAddTask={handleAddTask} onStartTask={handleStartTask} onEndTask={handleEndTask} onPauseTask={handlePauseTask} onResumeTask={handleResumeTask} onDeleteTask={handleDeleteTask}/>}
         {tab==="workers"&&isAdmin&&<WorkersDashboard users={getUsers()} workLogs={filteredWorkLogs} orders={filteredOrders} stages={stages} customTasks={customTasks} onAddTask={handleAddTask} onDeleteLog={handleDeleteLog}/>}
