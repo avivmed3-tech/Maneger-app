@@ -91,12 +91,12 @@ const FALLBACK_USERS=[
 ];
 const DEF_PROJ=[{id:"p1",name:"פרויקט אלפא"},{id:"p2",name:"פרויקט בטא"},{id:"p3",name:"פרויקט גמא"}];
 const DEF_STAGES=[
-  {id:"s1",name:"קליטה וקלט",order:1,color:"#3b82f6"},
-  {id:"s2",name:"הרכבה",order:2,color:"#8b5cf6"},
-  {id:"s3",name:"בדיקת חשמל",order:3,color:"#06b6d4"},
-  {id:"s4",name:"בדיקת מכנית",order:4,color:"#f59e0b"},
-  {id:"s5",name:"QC סופי",order:5,color:"#10b981"},
-  {id:"s6",name:"אריזה ומשלוח",order:6,color:"#ec4899"}
+  {id:"s1",name:"קליטה וקלט",order:1,color:"#3b82f6",price:0},
+  {id:"s2",name:"הרכבה",order:2,color:"#8b5cf6",price:0},
+  {id:"s3",name:"בדיקת חשמל",order:3,color:"#06b6d4",price:0},
+  {id:"s4",name:"בדיקת מכנית",order:4,color:"#f59e0b",price:0},
+  {id:"s5",name:"QC סופי",order:5,color:"#10b981",price:0},
+  {id:"s6",name:"אריזה ומשלוח",order:6,color:"#ec4899",price:0}
 ];
 const SC={open:"#f59e0b",partial:"#3b82f6",complete:"#10b981",blocked:"#ef4444"};
 const SL={open:"פתוחה",partial:"חלקית",complete:"הושלמה",blocked:"תקועה"};
@@ -895,9 +895,10 @@ function MyWork({orders,stages,workLogs,onStartWork,onEndWork,onPauseWork,onResu
   const startBulk=(oId,stId)=>{
     if(myActiveLog&&!myActiveLog.paused){alert("יש עבודה פעילה");return}
     const order=orders.find(o=>o.id===oId);
+    const groupId=uid();
     bulkSelected.forEach(sId=>{
       const serial=(order?.serials||[]).find(s=>s.id===sId);
-      onStartWork({id:uid(),userId:currentUser.id,userName:currentUser.name,serialId:sId,stageId:stId,orderId:oId,serialSn:serial?.sn||"",startTime:nowISO(),endTime:null,completed:false,durationMin:0,paused:false,pauseStart:null,totalPauseMin:0,pauseLog:[],bulk:true});
+      onStartWork({id:uid(),userId:currentUser.id,userName:currentUser.name,serialId:sId,stageId:stId,orderId:oId,serialSn:serial?.sn||"",startTime:nowISO(),endTime:null,completed:false,durationMin:0,paused:false,pauseStart:null,totalPauseMin:0,pauseLog:[],bulk:true,bulkGroupId:groupId,bulkCount:bulkSelected.length});
     });
     setBulkSelected([]);setBulkMode(false);
   };
@@ -1070,6 +1071,7 @@ function WorkersDashboard({users,workLogs,orders,stages,customTasks}){
   const [taskName,setTaskName]=useState("");
   const [taskDesc,setTaskDesc]=useState("");
   const [taskWorker,setTaskWorker]=useState("");
+  const [taskPrice,setTaskPrice]=useState("");
 
   // Period filter for logs
   const filterByPeriod=(dateStr)=>{
@@ -1103,12 +1105,12 @@ function WorkersDashboard({users,workLogs,orders,stages,customTasks}){
     if(!taskName.trim()||!taskWorker)return alert("יש לבחור עובד ושם משימה");
     const u=users.find(u2=>u2.id===taskWorker);
     // Use the onAddTask from App (passed via customTasks handler)
-    const task={id:uid(),userId:taskWorker,userName:u?.name||"",name:taskName.trim(),description:taskDesc.trim(),createdAt:nowISO(),active:false,completed:false,startTime:null,endTime:null,durationMin:0,paused:false,pauseStart:null,totalPauseMin:0,pauseLog:[]};
+    const task={id:uid(),userId:taskWorker,userName:u?.name||"",name:taskName.trim(),description:taskDesc.trim(),price:Number(taskPrice)||0,createdAt:nowISO(),active:false,completed:false,startTime:null,endTime:null,durationMin:0,paused:false,pauseStart:null,totalPauseMin:0,pauseLog:[]};
     const next=[...(customTasks||[]),task];
     LS.set("customTasks",next);
     // We need to trigger parent state update — use window event
     window.dispatchEvent(new CustomEvent("taskAdded",{detail:task}));
-    setTaskName("");setTaskDesc("");setTaskWorker("");setShowTaskForm(false);
+    setTaskName("");setTaskDesc("");setTaskWorker("");setTaskPrice("");setShowTaskForm(false);
   };
 
   return(
@@ -1142,6 +1144,7 @@ function WorkersDashboard({users,workLogs,orders,stages,customTasks}){
             </div>
             <Field label="שם משימה *" value={taskName} onChange={setTaskName} style={{minWidth:160}}/>
             <Field label="תיאור" value={taskDesc} onChange={setTaskDesc} style={{minWidth:200}}/>
+            <Field label="תמחור ₪" type="number" value={taskPrice} onChange={setTaskPrice} style={{minWidth:80}}/>
             <Btn color="#a78bfa" onClick={addTask} small>הקצה</Btn>
             <Btn onClick={()=>setShowTaskForm(false)} small>ביטול</Btn>
           </div>
@@ -1169,18 +1172,23 @@ function WorkersDashboard({users,workLogs,orders,stages,customTasks}){
         ))}
       </div>
 
-      {/* Recent activity table */}
+      {/* Recent activity table — filtered by search */}
       <Card>
-        <div style={{fontWeight:700,fontSize:14,marginBottom:10}}>📋 פעילות אחרונה</div>
-        <div style={{overflowX:"auto"}}><table><thead><tr><th>עובד</th><th>S/N</th><th>שלב</th><th>עבודה נטו</th><th>הפסקות</th><th>סיום</th></tr></thead><tbody>
-          {workLogs.filter(w=>w.completed&&filterByPeriod(w.endTime)).sort((a,b)=>(b.endTime||"").localeCompare(a.endTime||"")).slice(0,50).map(w=>{
+        <div style={{fontWeight:700,fontSize:14,marginBottom:10}}>📋 פעילות אחרונה{search?` — ${search}`:""}</div>
+        <div style={{overflowX:"auto"}}><table><thead><tr><th>עובד</th><th>S/N</th><th>שלב</th><th>עבודה נטו</th><th>קבוצה</th><th>תמחור שלב</th><th>הפסקות</th><th>סיום</th></tr></thead><tbody>
+          {workLogs.filter(w=>w.completed&&filterByPeriod(w.endTime)&&(!search||w.userName.includes(search))).sort((a,b)=>(b.endTime||"").localeCompare(a.endTime||"")).slice(0,50).map(w=>{
             const stage=stages.find(s=>s.id===w.stageId);
+            const stagePrice=Number(stage?.price||0);
+            const groupSize=w.bulkCount||1;
+            const perUnitTime=w.durationMin?Math.round(w.durationMin/groupSize):0;
             return(
               <tr key={w.id}>
                 <td style={{fontWeight:600}}>{w.userName}</td>
                 <td style={{color:"#7eb8ff",fontSize:12}}>{w.serialSn}</td>
                 <td><span style={{color:stage?.color||"var(--c-muted)"}}>{stage?.name||"—"}</span></td>
-                <td>{fmtTime(w.durationMin)}</td>
+                <td>{fmtTime(w.durationMin)}{groupSize>1&&<span style={{fontSize:10,color:"var(--c-dim)"}}> ({fmtTime(perUnitTime)}/יח')</span>}</td>
+                <td style={{color:groupSize>1?"#60a5fa":"var(--c-dim)"}}>{groupSize>1?`×${groupSize}`:"—"}</td>
+                <td style={{color:stagePrice?"#a78bfa":"var(--c-dim)"}}>{stagePrice?fmtMoney(stagePrice):"—"}</td>
                 <td style={{color:"#f97316"}}>{(w.pauseLog||[]).length>0?`${(w.pauseLog||[]).length} (${fmtTime(w.totalPauseMin||0)})`:"—"}</td>
                 <td style={{fontSize:11,color:"var(--c-dim)"}}>{w.endTime?new Date(w.endTime).toLocaleString("he-IL",{day:"2-digit",month:"2-digit",hour:"2-digit",minute:"2-digit"}):""}</td>
               </tr>
@@ -1199,12 +1207,15 @@ function StagesManagement({stages,setStages,persist}){
   const [showForm,setShowForm]=useState(false);
   const [name,setName]=useState("");
   const [color,setColor]=useState("#3b82f6");
+  const [price,setPrice]=useState(0);
+  const [editId,setEditId]=useState(null);
+  const [editPrice,setEditPrice]=useState(0);
   const add=()=>{
     if(!name.trim())return;
     const maxOrder=stages.reduce((m,s)=>Math.max(m,s.order||0),0);
-    const newStages=[...stages,{id:uid(),name:name.trim(),order:maxOrder+1,color}];
+    const newStages=[...stages,{id:uid(),name:name.trim(),order:maxOrder+1,color,price:Number(price)||0}];
     setStages(newStages);persist(null,null,newStages);
-    setName("");setShowForm(false);
+    setName("");setPrice(0);setShowForm(false);
   };
   const del=id=>{
     if(!confirm("למחוק שלב זה?"))return;
@@ -1219,6 +1230,10 @@ function StagesManagement({stages,setStages,persist}){
     arr.forEach((s,i)=>s.order=i+1);
     setStages(arr);persist(null,null,arr);
   };
+  const savePrice=(id)=>{
+    const newStages=stages.map(s=>s.id===id?{...s,price:Number(editPrice)||0}:s);
+    setStages(newStages);persist(null,null,newStages);setEditId(null);
+  };
   return(
     <div className="fade-in">
       <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:14}}>
@@ -1228,6 +1243,7 @@ function StagesManagement({stages,setStages,persist}){
       {showForm&&(
         <Card style={{marginBottom:12,display:"flex",gap:10,alignItems:"flex-end",padding:12,flexWrap:"wrap"}}>
           <Field label="שם שלב" value={name} onChange={setName} style={{flex:1,minWidth:160}}/>
+          <Field label="תמחור ₪ ליחידה" type="number" value={price} onChange={setPrice} style={{minWidth:100}}/>
           <div style={{display:"flex",flexDirection:"column",gap:4}}>
             <label style={{fontSize:11,color:"var(--c-dim)",fontWeight:600}}>צבע</label>
             <input type="color" value={color} onChange={e=>setColor(e.target.value)} style={{width:40,height:36,padding:2,border:"1px solid var(--c-border)",borderRadius:6,background:"var(--c-input-bg)"}}/>
@@ -1238,11 +1254,14 @@ function StagesManagement({stages,setStages,persist}){
       )}
       <div style={{display:"flex",flexDirection:"column",gap:6}}>
         {stages.sort((a,b)=>a.order-b.order).map((s,i)=>(
-          <div key={s.id} style={{background:"var(--c-card)",borderRadius:10,padding:"12px 14px",border:`1px solid ${s.color}33`,display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+          <div key={s.id} style={{background:"var(--c-card)",borderRadius:10,padding:"12px 14px",border:`1px solid ${s.color}33`,display:"flex",justifyContent:"space-between",alignItems:"center",flexWrap:"wrap",gap:8}}>
             <div style={{display:"flex",alignItems:"center",gap:10}}>
               <span style={{fontSize:18,fontWeight:800,color:s.color,minWidth:28}}>{i+1}</span>
               <div style={{width:12,height:12,borderRadius:3,background:s.color}}/>
               <span style={{fontWeight:600}}>{s.name}</span>
+              {editId===s.id?(<div style={{display:"flex",gap:6,alignItems:"center"}}><input type="number" value={editPrice} onChange={e=>setEditPrice(e.target.value)} style={{width:80,padding:"4px 8px",fontSize:12}}/><span style={{fontSize:11,color:"var(--c-dim)"}}>₪</span><IBtn onClick={()=>savePrice(s.id)}>✅</IBtn><IBtn onClick={()=>setEditId(null)}>✕</IBtn></div>):(
+                <span style={{fontSize:12,color:s.price?"#a78bfa":"var(--c-dim)",cursor:"pointer",padding:"2px 8px",borderRadius:6,background:"var(--c-deep)"}} onClick={()=>{setEditId(s.id);setEditPrice(s.price||0)}}>{s.price?`₪${s.price} ליחידה`:"+ תמחור"}</span>
+              )}
             </div>
             <div style={{display:"flex",gap:4}}>
               <IBtn onClick={()=>move(s.id,-1)} title="הזז למעלה">⬆️</IBtn>
@@ -1710,7 +1729,7 @@ function UpdateBanner({onUpdate,onDismiss,lm}){return(
 // ══════════════════════════════════════════════════════════════════════════
 // ═══ NAVBAR ═════════════════════════════════════════════════════════════
 // ══════════════════════════════════════════════════════════════════════════
-function Navbar({tab,setTab,tabs,lightMode,toggleLight,sync,onAdmin,onLogout,alertCount,onAlerts}){
+function Navbar({tab,setTab,tabs,lightMode,toggleLight,sync,onAdmin,onLogout,alertCount,onAlerts,onRefresh}){
   const {currentUser}=useAuth();
   const [menuOpen,setMenuOpen]=useState(false);
   const lm=lightMode;
@@ -1732,7 +1751,7 @@ function Navbar({tab,setTab,tabs,lightMode,toggleLight,sync,onAdmin,onLogout,ale
           <button onClick={onAlerts} style={{background:alertCount>0?"#ef444422":"transparent",border:`1px solid ${alertCount>0?"#ef4444":navBorder}`,borderRadius:8,padding:"5px 10px",fontSize:14,color:alertCount>0?"#ef4444":navMuted,fontFamily:"inherit",position:"relative"}}>🔔{alertCount>0&&<span style={{position:"absolute",top:-4,right:-4,background:"#ef4444",color:"#fff",fontSize:9,fontWeight:700,borderRadius:10,padding:"1px 5px",minWidth:16,textAlign:"center"}}>{alertCount}</span>}</button>
           <button onClick={toggleLight} style={{background:lm?"#e2e8f0":"#0d1120",border:`1px solid ${navBorder}`,borderRadius:8,padding:"5px 12px",fontSize:13,color:navMuted,fontFamily:"inherit"}}>{lm?"🌙":"☀️"}</button>
           {currentUser?.role==="admin"&&<button onClick={onAdmin} style={{background:"#f59e0b22",border:"1px solid #f59e0b44",color:"#f59e0b",borderRadius:8,padding:"5px 12px",fontSize:12,fontWeight:700,fontFamily:"inherit"}}>🛡️</button>}
-          <div style={{fontSize:11,padding:"3px 9px",borderRadius:20,background:sync==="ok"?(lm?"#d1fae5":"#052e16"):sync==="saving"?(lm?"#dbeafe":"#1e3a5f"):(lm?"#fee2e2":"#450a0a"),color:sync==="ok"?(lm?"#059669":"#6ee7b7"):sync==="saving"?(lm?"#2563eb":"#93c5fd"):(lm?"#dc2626":"#fca5a5"),whiteSpace:"nowrap"}}>{sync==="ok"?"☁️ מסונכרן":sync==="saving"?"⏳ שומר...":"❌ שגיאה"}</div>
+          <div style={{fontSize:11,padding:"3px 9px",borderRadius:20,background:sync==="ok"?(lm?"#d1fae5":"#052e16"):sync==="saving"?(lm?"#dbeafe":"#1e3a5f"):(lm?"#fee2e2":"#450a0a"),color:sync==="ok"?(lm?"#059669":"#6ee7b7"):sync==="saving"?(lm?"#2563eb":"#93c5fd"):(lm?"#dc2626":"#fca5a5"),whiteSpace:"nowrap",cursor:"pointer"}} onClick={onRefresh} title="לחץ לרענון">{sync==="ok"?"☁️ מסונכרן":sync==="saving"?"⏳ שומר...":"❌ שגיאה"}</div>
           <div style={{display:"flex",alignItems:"center",gap:6,padding:"4px 10px",background:lm?"#e2e8f0":"#0d1120",borderRadius:8,border:`1px solid ${navBorder}`}}>
             <span style={{fontSize:12,color:navActive,fontWeight:700}}>{currentUser?.name}</span>
             <span style={{color:navMuted}}>·</span>
@@ -1740,6 +1759,7 @@ function Navbar({tab,setTab,tabs,lightMode,toggleLight,sync,onAdmin,onLogout,ale
           </div>
         </div>
         <div className="show-mobile-only" style={{display:"flex",gap:6,alignItems:"center",marginRight:"auto"}}>
+          <button onClick={onRefresh} style={{background:"none",border:`1px solid ${navBorder}`,borderRadius:8,padding:"5px 8px",fontSize:13,color:sync==="ok"?"#10b981":sync==="saving"?"#3b82f6":"#ef4444"}} title="רענן">{sync==="saving"?"⏳":"🔄"}</button>
           <button onClick={onAlerts} style={{background:"none",border:`1px solid ${navBorder}`,borderRadius:8,padding:"5px 8px",fontSize:14,color:alertCount>0?"#ef4444":navMuted,position:"relative"}}>🔔{alertCount>0&&<span style={{position:"absolute",top:-4,right:-4,background:"#ef4444",color:"#fff",fontSize:9,borderRadius:10,padding:"1px 4px"}}>{alertCount}</span>}</button>
           <button onClick={()=>setMenuOpen(p=>!p)} style={{background:"none",border:`1px solid ${navBorder}`,borderRadius:8,padding:"5px 10px",fontSize:18,color:navMuted,lineHeight:1}}>{menuOpen?"✕":"☰"}</button>
         </div>
@@ -1871,6 +1891,35 @@ function App(){
   useEffect(()=>{sRef.current=stages},[stages]);
   useEffect(()=>{wRef.current=workLogs},[workLogs]);
 
+  // ── Refresh from Google Sheets ──────────────────────────────────
+  const refreshFromGS=useCallback(async()=>{
+    setSync("saving");
+    try{
+      const [data,users]=await Promise.all([gsLoad(),gsLoadUsers()]);
+      if(data){
+        if(data.orders)setOrders(data.orders);
+        if(data.projects)setProjects(data.projects);
+        if(data.stages)setStages(data.stages);
+        if(data.workLogs)setWorkLogs(data.workLogs);
+      }
+      if(users)LS.set("users",users);
+      setSync("ok");
+    }catch{setSync("error")}
+  },[]);
+
+  // Auto-refresh when tab becomes visible (user switches back to app)
+  useEffect(()=>{
+    const handler=()=>{if(document.visibilityState==="visible")refreshFromGS()};
+    document.addEventListener("visibilitychange",handler);
+    return()=>document.removeEventListener("visibilitychange",handler);
+  },[refreshFromGS]);
+
+  // Polling every 30 seconds
+  useEffect(()=>{
+    const interval=setInterval(refreshFromGS,30000);
+    return()=>clearInterval(interval);
+  },[refreshFromGS]);
+
   const persist=(no,np,ns,nw)=>{
     const o=no??oRef.current,p=np??pRef.current,s=ns??sRef.current,w=nw??wRef.current;
     LS.set("orders",o);LS.set("projects",p);LS.set("stages",s);LS.set("workLogs",w);
@@ -1965,7 +2014,7 @@ function App(){
   return(
     <AuthCtx.Provider value={{currentUser,canEdit,canViewProject}}>
       {showUpdate&&<UpdateBanner onUpdate={handleUpdate} onDismiss={()=>setShowUpdate(false)} lm={lm}/>}
-      <Navbar tab={tab} setTab={setTab} tabs={TABS} lightMode={lightMode} toggleLight={()=>setLightMode(p=>!p)} sync={sync} onAdmin={()=>setShowAdmin(true)} onLogout={handleLogout} alertCount={alertCount} onAlerts={()=>setShowAlerts(true)}/>
+      <Navbar tab={tab} setTab={setTab} tabs={TABS} lightMode={lightMode} toggleLight={()=>setLightMode(p=>!p)} sync={sync} onAdmin={()=>setShowAdmin(true)} onLogout={handleLogout} alertCount={alertCount} onAlerts={()=>setShowAlerts(true)} onRefresh={refreshFromGS}/>
       <main className="main-content" style={{maxWidth:1440,margin:"0 auto",padding:"16px 14px",paddingBottom:showInstall?"100px":"calc(16px + env(safe-area-inset-bottom,0px))"}}>
         {tab==="dashboard"&&<Dashboard orders={filteredOrders} projects={filteredProjects} stages={stages} users={getUsers()} workLogs={filteredWorkLogs}/>}
         {tab==="orders"&&<Orders orders={filteredOrders} projects={filteredProjects} stages={stages} updO={updO} workLogs={filteredWorkLogs}/>}
