@@ -83,11 +83,11 @@ function doPost(e) {
    ```
 4. שמור
 
-## שלב 6: העלאה ל-Netlify
-1. היכנס ל-https://app.netlify.com
-2. גרור את תיקיית `app` לאזור ה-Deploy
-3. המתן לסיום ההעלאה
-4. קבל URL כמו: `https://random-name.netlify.app`
+## שלב 6: העלאה ל-GitHub Pages
+1. צור repository חדש ב-GitHub (Public)
+2. העלה את כל הקבצים מתיקיית `app` (index.html, sw.js, manifest.json, icon-192.png, icon-512.png)
+3. Settings → Pages → Branch: **main** → Folder: **/ (root)** → Save
+4. האפליקציה תהיה זמינה ב: `https://USERNAME.github.io/REPO-NAME`
 
 ## 🔑 פרטי כניסה
 | משתמש | סיסמה | תפקיד |

@@ -630,6 +630,60 @@ function DefectsSection({order,onUpdate}){
   );
 }
 
+// ── Shortages inside an Order (add/manage) ────────────────────────
+function ShortagesInOrder({order,onUpdate}){
+  const {canEdit}=useAuth();
+  const [show,setShow]=useState(false);
+  const [f,setF]=useState({item:"",sku:"",missing:"",reason:"",responsible:"",orderedDate:todays(),note:""});
+  const [partialModal,setPartialModal]=useState(null);
+  const [partialQty,setPartialQty]=useState("");
+  const shortages=order.shortages||[];
+  const addSh=()=>{if(!f.item)return;onUpdate({...order,shortages:[...shortages,{id:uid(),...f,received:false,receivedDate:null,receivedQty:0}]});setF({item:"",sku:"",missing:"",reason:"",responsible:"",orderedDate:todays(),note:""});setShow(false)};
+  const markRec=id=>onUpdate({...order,shortages:shortages.map(s=>s.id===id?{...s,received:true,receivedDate:todays(),receivedQty:Number(s.missing||0)}:s)});
+  const markRecPartial=(id,qty)=>{onUpdate({...order,shortages:shortages.map(s=>{if(s.id!==id)return s;const nq=Number(s.receivedQty||0)+Number(qty),tot=Number(s.missing||0);return{...s,receivedQty:nq,received:tot>0&&nq>=tot,receivedDate:todays()}})});setPartialModal(null);setPartialQty("")};
+  const remSh=id=>onUpdate({...order,shortages:shortages.filter(s=>s.id!==id)});
+  return(
+    <div>
+      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:10}}>
+        <h3 style={{margin:0,fontSize:15,color:"#f87171"}}>⚠️ חוסרים ({shortages.filter(s=>!s.received).length})</h3>
+        {canEdit&&<Btn color="#ef4444" small onClick={()=>setShow(p=>!p)}>+ הוסף חוסר</Btn>}
+      </div>
+      {show&&(
+        <div style={{background:"var(--c-deep)",borderRadius:8,padding:12,marginBottom:10,display:"flex",gap:10,flexWrap:"wrap",alignItems:"flex-end"}}>
+          <Field label="פריט חסר *" value={f.item} onChange={v=>setF(p=>({...p,item:v}))} style={{minWidth:160}}/>
+          <Field label='מק"ט' value={f.sku} onChange={v=>setF(p=>({...p,sku:v}))}/>
+          <Field label="כמות" type="number" value={f.missing} onChange={v=>setF(p=>({...p,missing:v}))}/>
+          <Field label="סיבה" value={f.reason} onChange={v=>setF(p=>({...p,reason:v}))}/>
+          <Field label="אחראי" value={f.responsible} onChange={v=>setF(p=>({...p,responsible:v}))}/>
+          <Field label="תאריך הזמנה" type="date" value={f.orderedDate} onChange={v=>setF(p=>({...p,orderedDate:v}))}/>
+          <Field label="הערה" value={f.note} onChange={v=>setF(p=>({...p,note:v}))}/>
+          <Btn color="#ef4444" onClick={addSh} small>שמור</Btn>
+          <Btn onClick={()=>setShow(false)} small>ביטול</Btn>
+        </div>
+      )}
+      {shortages.length===0?<div style={{color:"var(--c-dim)",textAlign:"center",padding:12,fontSize:13}}>אין חוסרים</div>:(
+        <div style={{overflowX:"auto"}}><table><thead><tr><th>פריט</th><th>מק"ט</th><th>כמות</th><th>התקבל</th><th>אחראי</th><th>סטטוס</th>{canEdit&&<th></th>}</tr></thead><tbody>
+          {shortages.map(s=>{const rq=Number(s.receivedQty||0),tot=Number(s.missing||0),isPar=rq>0&&!s.received;return(
+            <tr key={s.id} style={{opacity:s.received?.6:1}}>
+              <td style={{fontWeight:600}}>{s.item}</td>
+              <td style={{color:"#7eb8ff",fontSize:12}}>{s.sku||"—"}</td>
+              <td>{tot||"—"}</td>
+              <td style={{color:s.received?"#10b981":isPar?"#f59e0b":"var(--c-dim)",fontWeight:600}}>{s.received?tot:isPar?`${rq}/${tot}`:"—"}</td>
+              <td style={{color:"#a78bfa",fontSize:12}}>{s.responsible||"—"}</td>
+              <td>{s.received?<span style={{color:"#10b981",fontSize:12}}>✅</span>:isPar?<span style={{color:"#f59e0b",fontSize:12}}>📦</span>:<span style={{color:"#ef4444",fontSize:12}}>❌</span>}</td>
+              {canEdit&&<td><div style={{display:"flex",gap:2}}>
+                {!s.received&&<><IBtn onClick={()=>{setPartialModal(s.id);setPartialQty("")}} title="קבלה חלקית">📦</IBtn><IBtn onClick={()=>markRec(s.id)} title="התקבל">✅</IBtn></>}
+                <IBtn onClick={()=>remSh(s.id)}>🗑️</IBtn>
+              </div></td>}
+            </tr>
+          )})}
+        </tbody></table></div>
+      )}
+      {partialModal&&(<div onClick={()=>setPartialModal(null)} style={{position:"fixed",inset:0,background:"#000c",zIndex:200,display:"flex",alignItems:"center",justifyContent:"center",padding:16}}><div onClick={e=>e.stopPropagation()} style={{background:"var(--c-card)",borderRadius:12,padding:24,minWidth:280,border:"1px solid var(--c-border2)"}}><div style={{fontWeight:700,fontSize:16,marginBottom:12,color:"#f59e0b"}}>📦 קבלה חלקית</div><Field label="כמות שהתקבלה" type="number" value={partialQty} onChange={setPartialQty}/><div style={{display:"flex",gap:8,marginTop:14}}><Btn color="#f59e0b" onClick={()=>partialQty&&markRecPartial(partialModal,partialQty)}>שמור</Btn><Btn onClick={()=>setPartialModal(null)}>ביטול</Btn></div></div></div>)}
+    </div>
+  );
+}
+
 function OrderDetail({order,projects,stages,onClose,onUpdate,workLogs,onWorkLog}){
   const {canEdit,currentUser}=useAuth();
   const proj=projects.find(p=>p.id===order.projectId);
@@ -666,6 +720,11 @@ function OrderDetail({order,projects,stages,onClose,onUpdate,workLogs,onWorkLog}
       {/* Serials Manager */}
       <Card style={{marginBottom:14}}>
         <SerialsManager order={order} stages={stages} onUpdate={onUpdate} workLogs={workLogs}/>
+      </Card>
+
+      {/* Shortages inside order */}
+      <Card style={{marginBottom:14,border:"1px solid #ef444433"}}>
+        <ShortagesInOrder order={order} onUpdate={onUpdate}/>
       </Card>
 
       {/* Defects */}
@@ -1626,6 +1685,7 @@ function Navbar({tab,setTab,tabs,lightMode,toggleLight,sync,onAdmin,onLogout,ale
           <button onClick={onAlerts} style={{background:alertCount>0?"#ef444422":"transparent",border:`1px solid ${alertCount>0?"#ef4444":navBorder}`,borderRadius:8,padding:"5px 10px",fontSize:14,color:alertCount>0?"#ef4444":navMuted,fontFamily:"inherit",position:"relative"}}>🔔{alertCount>0&&<span style={{position:"absolute",top:-4,right:-4,background:"#ef4444",color:"#fff",fontSize:9,fontWeight:700,borderRadius:10,padding:"1px 5px",minWidth:16,textAlign:"center"}}>{alertCount}</span>}</button>
           <button onClick={toggleLight} style={{background:lm?"#e2e8f0":"#0d1120",border:`1px solid ${navBorder}`,borderRadius:8,padding:"5px 12px",fontSize:13,color:navMuted,fontFamily:"inherit"}}>{lm?"🌙":"☀️"}</button>
           {currentUser?.role==="admin"&&<button onClick={onAdmin} style={{background:"#f59e0b22",border:"1px solid #f59e0b44",color:"#f59e0b",borderRadius:8,padding:"5px 12px",fontSize:12,fontWeight:700,fontFamily:"inherit"}}>🛡️</button>}
+          <div style={{fontSize:11,padding:"3px 9px",borderRadius:20,background:sync==="ok"?(lm?"#d1fae5":"#052e16"):sync==="saving"?(lm?"#dbeafe":"#1e3a5f"):(lm?"#fee2e2":"#450a0a"),color:sync==="ok"?(lm?"#059669":"#6ee7b7"):sync==="saving"?(lm?"#2563eb":"#93c5fd"):(lm?"#dc2626":"#fca5a5"),whiteSpace:"nowrap"}}>{sync==="ok"?"☁️ מסונכרן":sync==="saving"?"⏳ שומר...":"❌ שגיאה"}</div>
           <div style={{display:"flex",alignItems:"center",gap:6,padding:"4px 10px",background:lm?"#e2e8f0":"#0d1120",borderRadius:8,border:`1px solid ${navBorder}`}}>
             <span style={{fontSize:12,color:navActive,fontWeight:700}}>{currentUser?.name}</span>
             <span style={{color:navMuted}}>·</span>
@@ -1746,6 +1806,9 @@ function App(){
         mk("sn4b","ALF-PWR-0002","s1","w4","2026-03-01T07:30:00",16,"o4");
         mk("sn5a","BET-CTL-0001","s1","w1","2026-03-05T07:30:00",20,"o5");
         setOrders(demoOrders);setWorkLogs(dl);LS.set("users",FALLBACK_USERS);
+        // Also save demo data to GS so other devices can sync
+        LS.set("orders",demoOrders);LS.set("projects",DEF_PROJ);LS.set("stages",DEF_STAGES);LS.set("workLogs",dl);
+        if(GS_URL){fetch(GS_URL,{method:"POST",body:JSON.stringify({action:"save",payload:{orders:demoOrders,projects:DEF_PROJ,stages:DEF_STAGES,workLogs:dl}})}).catch(()=>{});fetch(GS_URL,{method:"POST",body:JSON.stringify({action:"saveUsers",users:FALLBACK_USERS})}).catch(()=>{})}
       }
       // Restore session
       try{const saved=localStorage.getItem(LS_PREFIX+"session");if(saved){const s3=JSON.parse(saved);const freshUsers=users||getUsers();const found=freshUsers.find(u=>u.id===s3.id&&u.username===s3.username&&u.active!==false);if(found)setCurrentUser(found);else localStorage.removeItem(LS_PREFIX+"session")}}catch{}
