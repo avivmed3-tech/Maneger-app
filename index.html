@@ -121,10 +121,9 @@ const LS={
   set:(k,v)=>{try{localStorage.setItem(LS_PREFIX+k,JSON.stringify(v))}catch{}}
 };
 function getUsers(){try{const u=localStorage.getItem(LS_PREFIX+"users");return u?JSON.parse(u):FALLBACK_USERS}catch{return FALLBACK_USERS}}
-function saveUsers(u){LS.set("users",u);gsSave({action:"saveUsers",users:u})}
-async function gsLoad(){if(!GS_URL)return null;try{const r=await fetch(GS_URL+"?t="+Date.now(),{redirect:"follow"});if(!r.ok)return null;const t=await r.text();if(!t||t==="{}")return null;const d=JSON.parse(t);return d&&(d.orders||d.workLogs)?d:null}catch(e){console.warn("gsLoad error:",e);return null}}
-async function gsLoadUsers(){if(!GS_URL)return null;try{const r=await fetch(GS_URL+"?type=users&t="+Date.now(),{redirect:"follow"});if(!r.ok)return null;const t=await r.text();if(!t||t==="[]")return null;const d=JSON.parse(t);if(Array.isArray(d)&&d.length>0){LS.set("users",d);return d}return null}catch(e){console.warn("gsLoadUsers error:",e);return null}}
-async function gsSave(payload){if(!GS_URL)return;try{await fetch(GS_URL,{method:"POST",redirect:"follow",headers:{"Content-Type":"text/plain"},body:JSON.stringify(payload)})}catch(e){console.warn("gsSave error:",e)}}
+function saveUsers(u){LS.set("users",u);fetch(GS_URL,{method:"POST",body:JSON.stringify({action:"saveUsers",users:u})}).catch(()=>{})}
+async function gsLoad(){try{const r=await fetch(GS_URL+"?t="+Date.now());const t=await r.text();const d=JSON.parse(t);return d&&d.orders?d:null}catch{return null}}
+async function gsLoadUsers(){try{const r=await fetch(GS_URL+"?type=users&t="+Date.now());const t=await r.text();const d=JSON.parse(t);if(Array.isArray(d)&&d.length>0){LS.set("users",d);return d}return null}catch{return null}}
 function getAuditLog(){return LS.get("audit")||[]}
 function addAuditEntry(entry){try{const log=getAuditLog();log.unshift({...entry,id:uid(),timestamp:nowISO(),reverted:false});LS.set("audit",log.slice(0,1000))}catch{}}
 
@@ -1812,7 +1811,7 @@ function App(){
         setOrders(demoOrders);setWorkLogs(dl);LS.set("users",FALLBACK_USERS);
         // Also save demo data to GS so other devices can sync
         LS.set("orders",demoOrders);LS.set("projects",DEF_PROJ);LS.set("stages",DEF_STAGES);LS.set("workLogs",dl);
-        if(GS_URL){gsSave({action:"save",payload:{orders:demoOrders,projects:DEF_PROJ,stages:DEF_STAGES,workLogs:dl}});gsSave({action:"saveUsers",users:FALLBACK_USERS})}
+        if(GS_URL){fetch(GS_URL,{method:"POST",body:JSON.stringify({action:"save",payload:{orders:demoOrders,projects:DEF_PROJ,stages:DEF_STAGES,workLogs:dl}})}).catch(()=>{});fetch(GS_URL,{method:"POST",body:JSON.stringify({action:"saveUsers",users:FALLBACK_USERS})}).catch(()=>{})}
       }
       // Restore session
       try{const saved=localStorage.getItem(LS_PREFIX+"session");if(saved){const s3=JSON.parse(saved);const freshUsers=users||getUsers();const found=freshUsers.find(u=>u.id===s3.id&&u.username===s3.username&&u.active!==false);if(found)setCurrentUser(found);else localStorage.removeItem(LS_PREFIX+"session")}}catch{}
@@ -1828,7 +1827,7 @@ function App(){
   const persist=(no,np,ns,nw)=>{
     const o=no??oRef.current,p=np??pRef.current,s=ns??sRef.current,w=nw??wRef.current;
     LS.set("orders",o);LS.set("projects",p);LS.set("stages",s);LS.set("workLogs",w);
-    if(GS_URL){setSync("saving");clearTimeout(saveTimer);saveTimer=setTimeout(async()=>{try{await gsSave({action:"save",payload:{orders:o,projects:p,stages:s,workLogs:w}});setSync("ok")}catch{setSync("error")}},800)}
+    setSync("saving");clearTimeout(saveTimer);saveTimer=setTimeout(async()=>{try{await fetch(GS_URL,{method:"POST",body:JSON.stringify({action:"save",payload:{orders:o,projects:p,stages:s,workLogs:w}})});setSync("ok")}catch{setSync("error")}},800);
   };
 
   const handleLogin=u=>{setCurrentUser(u);try{localStorage.setItem(LS_PREFIX+"session",JSON.stringify({id:u.id,username:u.username}))}catch{}};
