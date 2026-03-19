@@ -451,8 +451,24 @@ function OrderForm({initial,projects,stages,onSave,onClose}){
     receivedDate:initial?.receivedDate||todays(),targetDate:initial?.targetDate||"",
     stageIds:initial?.stageIds||stages.map(s=>s.id)
   });
-  const s=(k,v)=>setF(p=>({...p,[k]:v}));
+  const [genSerials,setGenSerials]=useState(!initial);
+  const [snPrefix,setSnPrefix]=useState(initial?.pn||"");
+  const [snStart,setSnStart]=useState(1);
+  const s=(k,v)=>{setF(p=>({...p,[k]:v}));if(k==="pn"&&!initial)setSnPrefix(v)};
   const toggleStage=sid=>setF(p=>({...p,stageIds:p.stageIds.includes(sid)?p.stageIds.filter(i=>i!==sid):[...p.stageIds,sid]}));
+  const handleSave=()=>{
+    if(!f.woNumber||!f.qty)return alert('יש למלא מספר פק"ע וכמות');
+    let serials=initial?.serials||[];
+    if(genSerials&&!initial){
+      const prefix=snPrefix||f.pn||f.woNumber;
+      const count=Number(f.qty)||0;
+      serials=[];
+      for(let i=0;i<count;i++){
+        serials.push({id:uid(),sn:`${prefix}-${String(snStart+i).padStart(4,"0")}`,createdAt:nowISO()});
+      }
+    }
+    onSave({...f,_serials:serials});
+  };
   return(
     <div>
       <h3 style={{margin:"0 0 16px",fontSize:18}}>{initial?'עריכת פק"ע':'פק"ע חדשה'}</h3>
@@ -466,6 +482,24 @@ function OrderForm({initial,projects,stages,onSave,onClose}){
         <Field label="תאריך קבלה" type="date" value={f.receivedDate} onChange={v=>s("receivedDate",v)}/>
         <Field label="יעד אספקה" type="date" value={f.targetDate} onChange={v=>s("targetDate",v)}/>
       </div>
+      {/* Serial number generation */}
+      {!initial&&(
+        <div style={{marginTop:14,background:"var(--c-deep)",borderRadius:10,padding:14,border:"1px solid var(--c-border)"}}>
+          <label style={{display:"flex",alignItems:"center",gap:6,fontSize:13,fontWeight:600,cursor:"pointer",marginBottom:genSerials?10:0}}>
+            <input type="checkbox" checked={genSerials} onChange={e=>setGenSerials(e.target.checked)}/>
+            🔢 צור מספרים סידוריים אוטומטית
+          </label>
+          {genSerials&&(
+            <div style={{display:"flex",gap:10,flexWrap:"wrap",alignItems:"flex-end"}}>
+              <Field label="קידומת S/N" value={snPrefix} onChange={setSnPrefix} placeholder={f.pn||f.woNumber} style={{minWidth:120}}/>
+              <Field label="מספר התחלתי" type="number" value={snStart} onChange={v=>setSnStart(Number(v))} style={{minWidth:80}}/>
+              <div style={{fontSize:12,color:"var(--c-muted)",paddingBottom:8}}>
+                {f.qty?`ייווצרו ${f.qty} סידוריים: ${snPrefix||f.pn||f.woNumber}-${String(snStart).padStart(4,"0")} עד ${snPrefix||f.pn||f.woNumber}-${String(snStart+Number(f.qty)-1).padStart(4,"0")}`:"הזן כמות"}
+              </div>
+            </div>
+          )}
+        </div>
+      )}
       <div style={{marginTop:14}}>
         <label style={{fontSize:12,color:"var(--c-dim)",fontWeight:600,display:"block",marginBottom:6}}>שלבי עבודה לפק"ע זו:</label>
         <div style={{display:"flex",flexWrap:"wrap",gap:6}}>
@@ -479,7 +513,7 @@ function OrderForm({initial,projects,stages,onSave,onClose}){
       </div>
       <div style={{display:"flex",gap:10,justifyContent:"flex-end",marginTop:16}}>
         <Btn onClick={onClose}>ביטול</Btn>
-        <Btn color="#10b981" onClick={()=>{if(!f.woNumber||!f.qty)return alert('יש למלא מספר פק"ע וכמות');onSave(f)}}>שמור</Btn>
+        <Btn color="#10b981" onClick={handleSave}>שמור</Btn>
       </div>
     </div>
   );
@@ -807,10 +841,11 @@ function Orders({orders,projects,stages,updO,workLogs}){
         })}
       </div>
       {showForm&&(<Modal onClose={()=>setShowForm(false)}><OrderForm initial={editing} projects={projects} stages={stages} onSave={data=>{
+        const{_serials,...rest}=data;
         if(editing){
-          updO(prev=>prev.map(o=>o.id===editing.id?{...editing,...data}:o));
+          updO(prev=>prev.map(o=>o.id===editing.id?{...editing,...rest}:o));
         }else{
-          updO(prev=>[...prev,{...data,id:uid(),serials:[],defects:[]}]);
+          updO(prev=>[...prev,{...rest,id:uid(),serials:_serials||[],shortages:[],defects:[]}]);
         }
         setShowForm(false);
       }} onClose={()=>setShowForm(false)}/></Modal>)}
