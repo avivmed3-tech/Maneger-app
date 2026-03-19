@@ -2193,11 +2193,13 @@ function App(){
         if(data.stages)setStages(data.stages);
         if(data.workLogs)setWorkLogs(data.workLogs);
         if(data.customTasks)setCustomTasks(data.customTasks);
+        if(data.stageBlocks)setStageBlocks(data.stageBlocks);
         if(data.orders)LS.set("orders",data.orders);
         if(data.projects)LS.set("projects",data.projects);
         if(data.stages)LS.set("stages",data.stages);
         if(data.workLogs)LS.set("workLogs",data.workLogs);
         if(data.customTasks)LS.set("customTasks",data.customTasks);
+        if(data.stageBlocks)LS.set("stageBlocks",data.stageBlocks);
       }
       if(users)LS.set("users",users);
       // If no data from GS and no local data, seed demo
@@ -2267,6 +2269,7 @@ function App(){
         if(data.stages)setStages(data.stages);
         if(data.workLogs)setWorkLogs(data.workLogs);
         if(data.customTasks)setCustomTasks(data.customTasks);
+        if(data.stageBlocks)setStageBlocks(data.stageBlocks);
       }
       if(users)LS.set("users",users);
       setSync("ok");
@@ -2288,12 +2291,14 @@ function App(){
 
   const ctRef=useRef(customTasks);
   useEffect(()=>{ctRef.current=customTasks},[customTasks]);
+  const sbRef=useRef(stageBlocks);
+  useEffect(()=>{sbRef.current=stageBlocks},[stageBlocks]);
 
-  const persist=(no,np,ns,nw,nct)=>{
-    const o=no??oRef.current,p=np??pRef.current,s=ns??sRef.current,w=nw??wRef.current,ct=nct??ctRef.current;
-    LS.set("orders",o);LS.set("projects",p);LS.set("stages",s);LS.set("workLogs",w);LS.set("customTasks",ct);
+  const persist=(no,np,ns,nw,nct,nsb)=>{
+    const o=no??oRef.current,p=np??pRef.current,s=ns??sRef.current,w=nw??wRef.current,ct=nct??ctRef.current,sb=nsb??sbRef.current;
+    LS.set("orders",o);LS.set("projects",p);LS.set("stages",s);LS.set("workLogs",w);LS.set("customTasks",ct);LS.set("stageBlocks",sb);
     lastPersistRef.current=Date.now();
-    setSync("saving");clearTimeout(saveTimer);saveTimer=setTimeout(async()=>{try{await fetch(GS_URL,{method:"POST",body:JSON.stringify({action:"save",payload:{orders:o,projects:p,stages:s,workLogs:w,customTasks:ct}})});setSync("ok")}catch{setSync("error")}},800);
+    setSync("saving");clearTimeout(saveTimer);saveTimer=setTimeout(async()=>{try{await fetch(GS_URL,{method:"POST",body:JSON.stringify({action:"save",payload:{orders:o,projects:p,stages:s,workLogs:w,customTasks:ct,stageBlocks:sb}})});setSync("ok")}catch{setSync("error")}},800);
   };
 
   const handleLogin=u=>{setCurrentUser(u);try{localStorage.setItem(LS_PREFIX+"session",JSON.stringify({id:u.id,username:u.username}))}catch{}};
