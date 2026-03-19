@@ -1883,33 +1883,53 @@ function YieldDashboard({orders,projects,stages,workLogs}){
   const typeDonut=Object.entries(typL).map(([k,l])=>({label:l,value:orders.flatMap(o=>(o.defects||[]).filter(d=>d.type===k&&d.status!=="closed")).length})).filter(d=>d.value>0);
   return(
     <div className="fade-in">
-      <h2 style={{margin:"0 0 14px"}}>📉 Yield — ניתוח תקלות</h2>
-      <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(140px,1fr))",gap:9,marginBottom:14}}>
+      <h2 style={{margin:"0 0 14px",fontSize:18}}>📉 Yield — ניתוח תקלות</h2>
+      <div style={{display:"grid",gridTemplateColumns:"repeat(2,1fr)",gap:8,marginBottom:14}}>
         <Tile icon="📊" label="Yield ממוצע" value={avg.toFixed(1)+"%"} color={yC(avg)} warn={avg<70}/>
         <Tile icon="🔧" label="תקלות פתוחות" value={orders.flatMap(o=>(o.defects||[]).filter(d=>d.status!=="closed")).length} color="#ef4444"/>
         <Tile icon="✅" label="נסגרו" value={orders.flatMap(o=>(o.defects||[]).filter(d=>d.status==="closed")).length} color="#10b981"/>
         <Tile icon="📋" label='פק"ע עם תקלות' value={orders.filter(o=>(o.defects||[]).some(d=>d.status!=="closed")).length} color="#f59e0b"/>
       </div>
-      <div style={{display:"grid",gridTemplateColumns:"minmax(0,1.6fr) minmax(0,1fr)",gap:12,marginBottom:14}} className="chart-grid">
-        <Card>
-          <div style={{fontWeight:700,marginBottom:12}}>Yield לפי פק"ע</div>
-          {oY.length===0?<div style={{color:"var(--c-dim)",textAlign:"center",padding:20}}>אין נתונים</div>:(
-            <div style={{overflowX:"auto"}}><table><thead><tr><th>פק"ע</th><th>P/N</th><th>יחידות</th><th>תקלות</th><th>Yield</th><th>דרגה</th></tr></thead><tbody>
-              {oY.map(o=>(<tr key={o.id}><td style={{fontWeight:600,color:"#60a5fa"}}>{o.woNumber}</td><td style={{color:"#a78bfa",fontSize:12}}>{o.pn||"—"}</td><td>{o.sn}</td><td style={{color:"#ef4444",fontWeight:600}}>{o.df}</td>
-                <td><div style={{display:"flex",alignItems:"center",gap:6}}><div style={{flex:1,height:6,background:"var(--c-border)",borderRadius:3,overflow:"hidden",minWidth:50}}><div style={{width:o.yP+"%",height:"100%",background:yC(o.yP),borderRadius:3}}/></div><span style={{fontWeight:700,color:yC(o.yP),minWidth:44}}>{o.yP.toFixed(1)}%</span></div></td>
-                <td><span style={{background:yC(o.yP)+"22",color:yC(o.yP),padding:"2px 8px",borderRadius:12,fontSize:11,fontWeight:600}}>{yL(o.yP)}</span></td></tr>))}
-            </tbody></table></div>)}
-        </Card>
-        <Card><div style={{fontWeight:700,marginBottom:10}}>תקלות לפי סוג</div><DonutChart data={typeDonut} size={170}/></Card>
-      </div>
+
+      {/* Table - mobile friendly */}
+      <Card style={{marginBottom:14}}>
+        <div style={{fontWeight:700,marginBottom:12,fontSize:14}}>Yield לפי פק"ע</div>
+        {oY.length===0?<div style={{color:"var(--c-dim)",textAlign:"center",padding:20}}>אין נתונים</div>:(
+          <div style={{display:"flex",flexDirection:"column",gap:6}}>
+            {oY.map(o=>(
+              <div key={o.id} style={{background:"var(--c-deep)",borderRadius:8,padding:"10px 12px",border:`1px solid ${yC(o.yP)}22`}}>
+                <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:6,flexWrap:"wrap",gap:4}}>
+                  <div><span style={{fontWeight:700,color:"#60a5fa",fontSize:13}}>{o.woNumber}</span><span style={{fontSize:11,color:"#a78bfa",marginRight:6}}> {o.pn||""}</span></div>
+                  <span style={{background:yC(o.yP)+"22",color:yC(o.yP),padding:"2px 8px",borderRadius:12,fontSize:11,fontWeight:700}}>{yL(o.yP)}</span>
+                </div>
+                <div style={{display:"flex",alignItems:"center",gap:8}}>
+                  <div style={{flex:1,height:8,background:"var(--c-border)",borderRadius:4,overflow:"hidden"}}><div style={{width:o.yP+"%",height:"100%",background:yC(o.yP),borderRadius:4}}/></div>
+                  <span style={{fontWeight:800,color:yC(o.yP),fontSize:14,minWidth:50,textAlign:"left"}}>{o.yP.toFixed(1)}%</span>
+                </div>
+                <div style={{display:"flex",gap:12,fontSize:11,color:"var(--c-muted)",marginTop:4}}>
+                  <span>{o.sn} יחידות</span>
+                  <span style={{color:o.df>0?"#ef4444":"#10b981"}}>{o.df} תקלות</span>
+                  {o.proj&&<span style={{color:"var(--c-tag-blue)"}}>{o.proj.name}</span>}
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+      </Card>
+
+      {/* Donut */}
+      <Card style={{marginBottom:14}}>
+        <div style={{fontWeight:700,marginBottom:10,fontSize:14}}>תקלות לפי סוג</div>
+        <DonutChart data={typeDonut} size={160}/>
+      </Card>
+
       {worst.length>0&&(<Card style={{border:"1px solid #ef444433"}}>
-        <div style={{fontWeight:700,fontSize:15,color:"#ef4444",marginBottom:12}}>🚨 Yield נמוך ביותר</div>
-        <div style={{display:"flex",flexDirection:"column",gap:8}}>
-          {worst.map(o=>(<div key={o.id} style={{background:"var(--c-deep)",borderRadius:9,padding:"12px 14px",border:`1px solid ${yC(o.yP)}33`}}>
-            <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
-              <div><span style={{fontWeight:700,color:"#60a5fa"}}>{o.woNumber}</span>{o.proj&&<span style={{fontSize:11,color:"var(--c-tag-blue)",marginRight:8}}> {o.proj.name}</span>}<span style={{fontSize:11,background:yC(o.yP)+"22",color:yC(o.yP),padding:"2px 8px",borderRadius:12,fontWeight:600,marginRight:6}}>Yield {o.yP.toFixed(1)}%</span></div>
-              <div style={{fontSize:28,fontWeight:800,color:yC(o.yP)}}>{o.yP.toFixed(0)}%</div>
-            </div></div>))}
+        <div style={{fontWeight:700,fontSize:14,color:"#ef4444",marginBottom:10}}>🚨 Yield נמוך ביותר</div>
+        <div style={{display:"flex",flexDirection:"column",gap:6}}>
+          {worst.map(o=>(<div key={o.id} style={{background:"var(--c-deep)",borderRadius:8,padding:"10px 12px",border:`1px solid ${yC(o.yP)}33`,display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+            <div><span style={{fontWeight:700,color:"#60a5fa",fontSize:13}}>{o.woNumber}</span>{o.proj&&<span style={{fontSize:11,color:"var(--c-tag-blue)",marginRight:6}}> {o.proj.name}</span>}</div>
+            <div style={{display:"flex",alignItems:"center",gap:6}}><span style={{fontSize:11,background:yC(o.yP)+"22",color:yC(o.yP),padding:"2px 8px",borderRadius:12,fontWeight:600}}>{o.yP.toFixed(1)}%</span><span style={{fontSize:22,fontWeight:800,color:yC(o.yP)}}>{o.yP.toFixed(0)}%</span></div>
+          </div>))}
         </div>
       </Card>)}
     </div>
@@ -1965,7 +1985,7 @@ function doImport(file,projects,stages,cb){
     const wsO=wb.Sheets[sn[0]];if(!wsO){cb(null,"גיליון ריק");return}
     const rowsO=XLSX.utils.sheet_to_json(wsO,{defval:""});const oMap={};
     rowsO.forEach(r=>{const wo=String(r['מספר פק"ע']||r["WO"]||"").trim();if(!wo)return;const pn2=String(r["פרויקט"]||"").trim();
-      oMap[wo]={id:uid(),woNumber:wo,pn:String(r["P/N"]||r["PN"]||"").trim(),description:String(r["תיאור"]||"").trim(),qty:Number(r["כמות"]||0),unitPrice:Number(r["מחיר ליחידה"]||r["מחיר"]||0),projectId:projects.find(p=>p.name===pn2)?.id||"",receivedDate:r["תאריך קבלה"]||"",targetDate:r["יעד אספקה"]||r["יעד"]||"",stageIds:stages.map(s=>s.id),serials:[],defects:[]}});
+      oMap[wo]={id:uid(),woNumber:wo,pn:String(r["P/N"]||r["PN"]||"").trim(),description:String(r["תיאור"]||"").trim(),qty:Number(r["כמות"]||0),unitPrice:Number(r["מחיר ליחידה"]||r["מחיר"]||0),projectId:projects.find(p=>p.name===pn2)?.id||"",receivedDate:r["תאריך קבלה"]||"",targetDate:r["יעד אספקה"]||r["יעד"]||"",stageIds:stages.map(s=>s.id),serials:[],shortages:[],defects:[]}});
     // Sheet 2: serials
     const wsS=wb.Sheets[sn[1]];
     if(wsS)XLSX.utils.sheet_to_json(wsS,{defval:""}).forEach(r=>{const wo=String(r['פק"ע']||r['מספר פק"ע']||"").trim();if(!wo||!oMap[wo])return;const snV=String(r["S/N"]||r["SN"]||"").trim();if(!snV)return;oMap[wo].serials.push({id:uid(),sn:snV,createdAt:nowISO()})});
@@ -1973,6 +1993,11 @@ function doImport(file,projects,stages,cb){
     const wsD=wb.Sheets[sn[2]];const sMap={"קריטית":"critical","גבוהה":"high","בינונית":"medium","נמוכה":"low"};const tMap={"איכות":"quality","תהליך":"process","חומר גלם":"material","ציוד":"equipment","גורם אנושי":"human","אחר":"other"};
     if(wsD)XLSX.utils.sheet_to_json(wsD,{defval:""}).forEach(r=>{const wo=String(r['פק"ע']||r['מספר פק"ע']||"").trim();if(!wo||!oMap[wo])return;const title=String(r["כותרת"]||r["תקלה"]||"").trim();if(!title)return;const snV2=String(r["S/N"]||"").trim();const ms=oMap[wo].serials.find(s=>s.sn===snV2);
       oMap[wo].defects.push({id:uid(),title,serialId:ms?.id||"",type:tMap[String(r["סוג"]||"")]||"other",severity:sMap[String(r["חומרה"]||"")]||"medium",description:String(r["תיאור"]||"").trim(),responsible:String(r["אחראי"]||"").trim(),discoveredDate:r["תאריך גילוי"]||todays(),status:String(r["סטטוס"]||"").includes("סגור")?"closed":"open"})});
+    // Sheet 4: shortages
+    const wsH=wb.Sheets[sn[3]];
+    if(wsH)XLSX.utils.sheet_to_json(wsH,{defval:""}).forEach(r=>{const wo=String(r['פק"ע']||r['מספר פק"ע']||"").trim();if(!wo||!oMap[wo])return;const item=String(r["פריט"]||"").trim();if(!item)return;
+      if(!oMap[wo].shortages)oMap[wo].shortages=[];
+      oMap[wo].shortages.push({id:uid(),item,sku:String(r['מק"ט']||r["מקט"]||"").trim(),missing:Number(r["כמות"]||0),reason:String(r["סיבה"]||"").trim(),responsible:String(r["אחראי"]||"").trim(),orderedDate:r["תאריך הזמנה"]||todays(),note:String(r["הערה"]||"").trim(),received:false,receivedDate:null,receivedQty:0})});
     cb(Object.values(oMap),null);
   }catch(err){cb(null,"שגיאה: "+err.message)}};
   fr.readAsArrayBuffer(file);
