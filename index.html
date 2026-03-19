@@ -444,18 +444,27 @@ function Dashboard({orders,projects,stages,users,workLogs}){
 // ══════════════════════════════════════════════════════════════════════════
 // ═══ ORDERS (Work Orders / פקעות) ════════════════════════════════════════
 // ══════════════════════════════════════════════════════════════════════════
-function OrderForm({initial,projects,stages,onSave,onClose}){
+function OrderForm({initial,projects,stages,stageBlocks,onSave,onClose}){
   const [f,setF]=useState({
     woNumber:initial?.woNumber||"",description:initial?.description||"",pn:initial?.pn||"",
     qty:initial?.qty||"",unitPrice:initial?.unitPrice||"",projectId:initial?.projectId||"",
     receivedDate:initial?.receivedDate||todays(),targetDate:initial?.targetDate||"",
-    stageIds:initial?.stageIds||stages.map(s=>s.id)
+    stageIds:initial?.stageIds||stages.map(s=>s.id),
+    blockId:initial?.blockId||""
   });
   const [genSerials,setGenSerials]=useState(!initial);
   const [snPrefix,setSnPrefix]=useState(initial?.pn||"");
   const [snStart,setSnStart]=useState(1);
   const s=(k,v)=>{setF(p=>({...p,[k]:v}));if(k==="pn"&&!initial)setSnPrefix(v)};
-  const toggleStage=sid=>setF(p=>({...p,stageIds:p.stageIds.includes(sid)?p.stageIds.filter(i=>i!==sid):[...p.stageIds,sid]}));
+  const toggleStage=sid=>setF(p=>({...p,stageIds:p.stageIds.includes(sid)?p.stageIds.filter(i=>i!==sid):[...p.stageIds,sid],blockId:""}));
+  const selectBlock=blockId=>{
+    if(!blockId){setF(p=>({...p,blockId:"",stageIds:stages.map(s2=>s2.id)}));return}
+    const block=(stageBlocks||[]).find(b=>b.id===blockId);
+    if(!block)return;
+    // Map block stages to global stage IDs by name match
+    const ids=block.stages.map(bs=>{const match=stages.find(s2=>s2.name===bs.name);return match?.id}).filter(Boolean);
+    setF(p=>({...p,blockId,stageIds:ids}));
+  };
   const handleSave=()=>{
     if(!f.woNumber||!f.qty)return alert('יש למלא מספר פק"ע וכמות');
     let serials=initial?.serials||[];
@@ -502,6 +511,19 @@ function OrderForm({initial,projects,stages,onSave,onClose}){
       )}
       <div style={{marginTop:14}}>
         <label style={{fontSize:12,color:"var(--c-dim)",fontWeight:600,display:"block",marginBottom:6}}>שלבי עבודה לפק"ע זו:</label>
+        {(stageBlocks||[]).length>0&&(
+          <div style={{marginBottom:10}}>
+            <label style={{fontSize:11,color:"#8b5cf6",fontWeight:600,display:"block",marginBottom:4}}>📦 בחר בלוק מוכן:</label>
+            <div style={{display:"flex",gap:6,flexWrap:"wrap"}}>
+              <button onClick={()=>selectBlock("")} style={{background:!f.blockId?"var(--c-accent)22":"var(--c-deep)",border:`1px solid ${!f.blockId?"var(--c-accent)":"var(--c-border)"}`,borderRadius:8,padding:"5px 10px",fontSize:12,color:!f.blockId?"var(--c-accent)":"var(--c-muted)",fontFamily:"inherit",cursor:"pointer"}}>ללא בלוק</button>
+              {(stageBlocks||[]).map(b=>(
+                <button key={b.id} onClick={()=>selectBlock(b.id)} style={{background:f.blockId===b.id?"#8b5cf622":"var(--c-deep)",border:`1px solid ${f.blockId===b.id?"#8b5cf6":"var(--c-border)"}`,borderRadius:8,padding:"5px 10px",fontSize:12,color:f.blockId===b.id?"#8b5cf6":"var(--c-muted)",fontFamily:"inherit",cursor:"pointer"}}>
+                  📦 {b.name} <span style={{fontSize:10,color:"var(--c-dim)"}}>({b.stages.length} שלבים, ₪{b.stages.reduce((s2,st)=>s2+(st.price||0),0)})</span>
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
         <div style={{display:"flex",flexWrap:"wrap",gap:6}}>
           {stages.map(st=>(
             <label key={st.id} style={{display:"flex",alignItems:"center",gap:5,fontSize:12,cursor:"pointer",background:f.stageIds.includes(st.id)?st.color+"22":"var(--c-deep)",border:`1px solid ${f.stageIds.includes(st.id)?st.color+"66":"var(--c-border)"}`,borderRadius:8,padding:"6px 10px",color:f.stageIds.includes(st.id)?st.color:"var(--c-muted)"}}>
@@ -767,7 +789,7 @@ function OrderDetail({order,projects,stages,onClose,onUpdate,workLogs,onWorkLog}
   );
 }
 
-function Orders({orders,projects,stages,updO,workLogs}){
+function Orders({orders,projects,stages,stageBlocks,updO,workLogs}){
   const {canEdit}=useAuth();
   const [showForm,setShowForm]=useState(false);
   const [editing,setEditing]=useState(null);
@@ -840,7 +862,7 @@ function Orders({orders,projects,stages,updO,workLogs}){
           );
         })}
       </div>
-      {showForm&&(<Modal onClose={()=>setShowForm(false)}><OrderForm initial={editing} projects={projects} stages={stages} onSave={data=>{
+      {showForm&&(<Modal onClose={()=>setShowForm(false)}><OrderForm initial={editing} projects={projects} stages={stages} stageBlocks={stageBlocks} onSave={data=>{
         const{_serials,...rest}=data;
         if(editing){
           updO(prev=>prev.map(o=>o.id===editing.id?{...editing,...rest}:o));
@@ -1004,29 +1026,68 @@ function MyWork({orders,stages,workLogs,onStartWork,onEndWork,onPauseWork,onResu
         </Card>
       )}
 
-      {/* Custom Tasks Section — workers see assigned tasks, only admin can add */}
+      {/* Custom Tasks Section — different view for admin vs worker */}
       <Card style={{marginBottom:14,border:"1px solid #a78bfa33"}}>
-        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:10}}>
-          <h3 style={{margin:0,fontSize:15,color:"#a78bfa"}}>📌 משימות שהוקצו לי</h3>
-        </div>
-        {myTasks.filter(t=>!t.completed).length===0?<div style={{color:"var(--c-dim)",fontSize:12,textAlign:"center",padding:10}}>אין משימות</div>:(
-          <div style={{display:"flex",flexDirection:"column",gap:6}}>
-            {myTasks.filter(t=>!t.completed).map(t=>(
-              <div key={t.id} style={{display:"flex",justifyContent:"space-between",alignItems:"center",background:"var(--c-deep)",borderRadius:8,padding:"8px 12px",border:t.active?"1px solid #a78bfa":"1px solid var(--c-border)"}}>
-                <div><span style={{fontWeight:600,fontSize:13}}>{t.name}</span>{t.description&&<span style={{fontSize:11,color:"var(--c-dim)",marginRight:6}}> — {t.description}</span>}{t.active&&<span style={{fontSize:11,color:"#a78bfa",marginRight:6}}>🔄 פעיל</span>}</div>
-                {!t.active?<Btn color="#a78bfa" small onClick={()=>onStartTask(t.id)} disabled={!!activeTask||!!myActiveLog}>▶️ התחל</Btn>:<Btn color="#10b981" small onClick={()=>onEndTask(t.id)}>✅ סיים</Btn>}
+        {currentUser.role==="admin"?(
+          <div>
+            <div style={{fontWeight:700,fontSize:15,color:"#a78bfa",marginBottom:10}}>📌 משימות שהקצתי</div>
+            {(customTasks||[]).filter(t=>!t.completed).length===0?<div style={{color:"var(--c-dim)",fontSize:12,textAlign:"center",padding:10}}>אין משימות פתוחות</div>:(
+              <div style={{display:"flex",flexDirection:"column",gap:6}}>
+                {(customTasks||[]).filter(t=>!t.completed).map(t=>(
+                  <div key={t.id} style={{background:"var(--c-deep)",borderRadius:8,padding:"10px 12px",border:t.active?"1px solid #a78bfa":"1px solid var(--c-border)"}}>
+                    <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",flexWrap:"wrap",gap:6}}>
+                      <div>
+                        <span style={{fontWeight:600,fontSize:13}}>{t.name}</span>
+                        <span style={{fontSize:11,color:"#60a5fa",marginRight:8}}>→ {t.userName}</span>
+                        {t.price>0&&<span style={{fontSize:11,color:"#a78bfa",marginRight:6}}>₪{t.price}</span>}
+                        {t.active&&<span style={{fontSize:11,background:"#a78bfa22",color:"#a78bfa",padding:"2px 6px",borderRadius:10}}>🔄 בביצוע</span>}
+                      </div>
+                      <span style={{fontSize:11,color:"var(--c-dim)"}}>{fmt(t.createdAt?.slice(0,10))}</span>
+                    </div>
+                    {t.description&&<div style={{fontSize:11,color:"var(--c-muted)",marginTop:4}}>{t.description}</div>}
+                  </div>
+                ))}
               </div>
-            ))}
+            )}
+            {(customTasks||[]).filter(t=>t.completed).length>0&&(
+              <div style={{marginTop:10,borderTop:"1px solid var(--c-border)",paddingTop:8}}>
+                <div style={{fontSize:11,color:"var(--c-dim)",marginBottom:6}}>הושלמו:</div>
+                {(customTasks||[]).filter(t=>t.completed).slice(0,8).map(t=>(
+                  <div key={t.id} style={{fontSize:12,color:"var(--c-muted)",padding:"3px 0",display:"flex",gap:10,flexWrap:"wrap"}}>
+                    <span>✅ {t.name}</span><span style={{color:"#60a5fa"}}>{t.userName}</span><span style={{color:"#a78bfa"}}>{fmtTime(t.durationMin)}</span>{t.price>0&&<span style={{color:"#10b981"}}>₪{t.price}</span>}
+                  </div>
+                ))}
+              </div>
+            )}
           </div>
-        )}
-        {myTasks.filter(t=>t.completed).length>0&&(
-          <div style={{marginTop:10,borderTop:"1px solid var(--c-border)",paddingTop:8}}>
-            <div style={{fontSize:11,color:"var(--c-dim)",marginBottom:6}}>הושלמו:</div>
-            {myTasks.filter(t=>t.completed).slice(0,5).map(t=>(
-              <div key={t.id} style={{fontSize:12,color:"var(--c-muted)",padding:"3px 0",display:"flex",gap:10}}>
-                <span>✅ {t.name}</span><span style={{color:"#a78bfa"}}>{fmtTime(t.durationMin)}</span>
+        ):(
+          <div>
+            <div style={{fontWeight:700,fontSize:15,color:"#a78bfa",marginBottom:10}}>📌 משימות שהוקצו לי</div>
+            {myTasks.filter(t=>!t.completed).length===0?<div style={{color:"var(--c-dim)",fontSize:12,textAlign:"center",padding:10}}>אין משימות</div>:(
+              <div style={{display:"flex",flexDirection:"column",gap:6}}>
+                {myTasks.filter(t=>!t.completed).map(t=>(
+                  <div key={t.id} style={{display:"flex",justifyContent:"space-between",alignItems:"center",background:"var(--c-deep)",borderRadius:8,padding:"8px 12px",border:t.active?"1px solid #a78bfa":"1px solid var(--c-border)"}}>
+                    <div>
+                      <span style={{fontWeight:600,fontSize:13}}>{t.name}</span>
+                      {t.description&&<span style={{fontSize:11,color:"var(--c-dim)",marginRight:6}}> — {t.description}</span>}
+                      {t.price>0&&<span style={{fontSize:11,color:"#a78bfa",marginRight:6}}>₪{t.price}</span>}
+                      {t.active&&<span style={{fontSize:11,color:"#a78bfa",marginRight:6}}>🔄 פעיל</span>}
+                    </div>
+                    {!t.active?<Btn color="#a78bfa" small onClick={()=>onStartTask(t.id)} disabled={!!activeTask||!!myActiveLog}>▶️ התחל</Btn>:<Btn color="#10b981" small onClick={()=>onEndTask(t.id)}>✅ סיים</Btn>}
+                  </div>
+                ))}
               </div>
-            ))}
+            )}
+            {myTasks.filter(t=>t.completed).length>0&&(
+              <div style={{marginTop:10,borderTop:"1px solid var(--c-border)",paddingTop:8}}>
+                <div style={{fontSize:11,color:"var(--c-dim)",marginBottom:6}}>הושלמו:</div>
+                {myTasks.filter(t=>t.completed).slice(0,5).map(t=>(
+                  <div key={t.id} style={{fontSize:12,color:"var(--c-muted)",padding:"3px 0",display:"flex",gap:10}}>
+                    <span>✅ {t.name}</span><span style={{color:"#a78bfa"}}>{fmtTime(t.durationMin)}</span>
+                  </div>
+                ))}
+              </div>
+            )}
           </div>
         )}
       </Card>
@@ -1096,7 +1157,7 @@ function ActiveTimer({startTime,pauseMin=0}){
 // ══════════════════════════════════════════════════════════════════════════
 // ═══ WORKERS DASHBOARD ══════════════════════════════════════════════════
 // ══════════════════════════════════════════════════════════════════════════
-function WorkersDashboard({users,workLogs,orders,stages,customTasks}){
+function WorkersDashboard({users,workLogs,orders,stages,customTasks,onAddTask}){
   const [search,setSearch]=useState("");
   const [period,setPeriod]=useState("all");
   const workers=users.filter(u=>u.role!=="admin"&&u.active!==false);
@@ -1141,10 +1202,7 @@ function WorkersDashboard({users,workLogs,orders,stages,customTasks}){
     const u=users.find(u2=>u2.id===taskWorker);
     // Use the onAddTask from App (passed via customTasks handler)
     const task={id:uid(),userId:taskWorker,userName:u?.name||"",name:taskName.trim(),description:taskDesc.trim(),price:Number(taskPrice)||0,createdAt:nowISO(),active:false,completed:false,startTime:null,endTime:null,durationMin:0,paused:false,pauseStart:null,totalPauseMin:0,pauseLog:[]};
-    const next=[...(customTasks||[]),task];
-    LS.set("customTasks",next);
-    // We need to trigger parent state update — use window event
-    window.dispatchEvent(new CustomEvent("taskAdded",{detail:task}));
+    onAddTask(task);
     setTaskName("");setTaskDesc("");setTaskWorker("");setTaskPrice("");setShowTaskForm(false);
   };
 
@@ -1238,74 +1296,141 @@ function WorkersDashboard({users,workLogs,orders,stages,customTasks}){
 // ══════════════════════════════════════════════════════════════════════════
 // ═══ STAGES MANAGEMENT ══════════════════════════════════════════════════
 // ══════════════════════════════════════════════════════════════════════════
-function StagesManagement({stages,setStages,persist}){
+function StagesManagement({stages,setStages,stageBlocks,setStageBlocks,persist}){
   const [showForm,setShowForm]=useState(false);
   const [name,setName]=useState("");
   const [color,setColor]=useState("#3b82f6");
   const [price,setPrice]=useState(0);
   const [editId,setEditId]=useState(null);
   const [editPrice,setEditPrice]=useState(0);
+  // Block management
+  const [showBlockForm,setShowBlockForm]=useState(false);
+  const [blockName,setBlockName]=useState("");
+  const [blockStages,setBlockStages]=useState([]);
+  const [editBlockId,setEditBlockId]=useState(null);
+
   const add=()=>{
     if(!name.trim())return;
     const maxOrder=stages.reduce((m,s)=>Math.max(m,s.order||0),0);
-    const newStages=[...stages,{id:uid(),name:name.trim(),order:maxOrder+1,color,price:Number(price)||0}];
-    setStages(newStages);persist(null,null,newStages);
-    setName("");setPrice(0);setShowForm(false);
+    const ns=[...stages,{id:uid(),name:name.trim(),order:maxOrder+1,color,price:Number(price)||0}];
+    setStages(ns);persist(null,null,ns);setName("");setPrice(0);setShowForm(false);
   };
-  const del=id=>{
-    if(!confirm("למחוק שלב זה?"))return;
-    const newStages=stages.filter(s=>s.id!==id);
-    setStages(newStages);persist(null,null,newStages);
+  const del=id=>{if(!confirm("למחוק?"))return;const ns=stages.filter(s=>s.id!==id);setStages(ns);persist(null,null,ns)};
+  const move=(id,dir)=>{const idx=stages.findIndex(s=>s.id===id);if((dir===-1&&idx===0)||(dir===1&&idx===stages.length-1))return;const arr=[...stages];[arr[idx],arr[idx+dir]]=[arr[idx+dir],arr[idx]];arr.forEach((s,i)=>s.order=i+1);setStages(arr);persist(null,null,arr)};
+  const savePrice=(id)=>{const ns=stages.map(s=>s.id===id?{...s,price:Number(editPrice)||0}:s);setStages(ns);persist(null,null,ns);setEditId(null)};
+
+  // Block functions
+  const addBlock=()=>{
+    if(!blockName.trim()||blockStages.length===0)return alert("יש לתת שם ולבחור לפחות שלב אחד");
+    const block={id:uid(),name:blockName.trim(),stages:blockStages.map((bs,i)=>({...bs,id:uid(),order:i+1}))};
+    const nb=[...(stageBlocks||[]),block];
+    setStageBlocks(nb);LS.set("stageBlocks",nb);persist(null,null,null,null,nb);
+    setBlockName("");setBlockStages([]);setShowBlockForm(false);
   };
-  const move=(id,dir)=>{
-    const idx=stages.findIndex(s=>s.id===id);
-    if((dir===-1&&idx===0)||(dir===1&&idx===stages.length-1))return;
-    const arr=[...stages];
-    [arr[idx],arr[idx+dir]]=[arr[idx+dir],arr[idx]];
-    arr.forEach((s,i)=>s.order=i+1);
-    setStages(arr);persist(null,null,arr);
+  const delBlock=id=>{const nb=(stageBlocks||[]).filter(b=>b.id!==id);setStageBlocks(nb);LS.set("stageBlocks",nb);persist(null,null,null,null,nb)};
+  const addStageToBlock=stageId=>{
+    const st=stages.find(s=>s.id===stageId);if(!st)return;
+    if(blockStages.some(bs=>bs.sourceId===stageId))return;
+    setBlockStages(p=>[...p,{sourceId:stageId,name:st.name,color:st.color,price:st.price||0}]);
   };
-  const savePrice=(id)=>{
-    const newStages=stages.map(s=>s.id===id?{...s,price:Number(editPrice)||0}:s);
-    setStages(newStages);persist(null,null,newStages);setEditId(null);
-  };
+  const updateBlockStagePrice=(idx,pr)=>{setBlockStages(p=>p.map((bs,i)=>i===idx?{...bs,price:Number(pr)||0}:bs))};
+  const removeFromBlock=idx=>{setBlockStages(p=>p.filter((_,i)=>i!==idx))};
+
   return(
     <div className="fade-in">
-      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:14}}>
-        <h2 style={{margin:0}}>🔧 שלבי עבודה</h2>
-        <Btn color="var(--c-accent)" onClick={()=>setShowForm(p=>!p)}>+ שלב חדש</Btn>
-      </div>
-      {showForm&&(
-        <Card style={{marginBottom:12,display:"flex",gap:10,alignItems:"flex-end",padding:12,flexWrap:"wrap"}}>
-          <Field label="שם שלב" value={name} onChange={setName} style={{flex:1,minWidth:160}}/>
-          <Field label="תמחור ₪ ליחידה" type="number" value={price} onChange={setPrice} style={{minWidth:100}}/>
-          <div style={{display:"flex",flexDirection:"column",gap:4}}>
-            <label style={{fontSize:11,color:"var(--c-dim)",fontWeight:600}}>צבע</label>
-            <input type="color" value={color} onChange={e=>setColor(e.target.value)} style={{width:40,height:36,padding:2,border:"1px solid var(--c-border)",borderRadius:6,background:"var(--c-input-bg)"}}/>
-          </div>
-          <Btn color="#10b981" onClick={add}>הוסף</Btn>
-          <Btn onClick={()=>setShowForm(false)}>ביטול</Btn>
-        </Card>
-      )}
-      <div style={{display:"flex",flexDirection:"column",gap:6}}>
-        {stages.sort((a,b)=>a.order-b.order).map((s,i)=>(
-          <div key={s.id} style={{background:"var(--c-card)",borderRadius:10,padding:"12px 14px",border:`1px solid ${s.color}33`,display:"flex",justifyContent:"space-between",alignItems:"center",flexWrap:"wrap",gap:8}}>
-            <div style={{display:"flex",alignItems:"center",gap:10}}>
-              <span style={{fontSize:18,fontWeight:800,color:s.color,minWidth:28}}>{i+1}</span>
-              <div style={{width:12,height:12,borderRadius:3,background:s.color}}/>
-              <span style={{fontWeight:600}}>{s.name}</span>
-              {editId===s.id?(<div style={{display:"flex",gap:6,alignItems:"center"}}><input type="number" value={editPrice} onChange={e=>setEditPrice(e.target.value)} style={{width:80,padding:"4px 8px",fontSize:12}}/><span style={{fontSize:11,color:"var(--c-dim)"}}>₪</span><IBtn onClick={()=>savePrice(s.id)}>✅</IBtn><IBtn onClick={()=>setEditId(null)}>✕</IBtn></div>):(
-                <span style={{fontSize:12,color:s.price?"#a78bfa":"var(--c-dim)",cursor:"pointer",padding:"2px 8px",borderRadius:6,background:"var(--c-deep)"}} onClick={()=>{setEditId(s.id);setEditPrice(s.price||0)}}>{s.price?`₪${s.price} ליחידה`:"+ תמחור"}</span>
-              )}
+      <h2 style={{margin:"0 0 14px"}}>🔧 שלבי עבודה ובלוקים</h2>
+
+      {/* Stage Blocks */}
+      <Card style={{marginBottom:14,border:"1px solid #8b5cf633"}}>
+        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:12}}>
+          <h3 style={{margin:0,fontSize:15,color:"#8b5cf6"}}>📦 בלוקים (תבניות שלבים)</h3>
+          <Btn color="#8b5cf6" small onClick={()=>{setShowBlockForm(p=>!p);setBlockStages([]);setBlockName("")}}>+ בלוק חדש</Btn>
+        </div>
+        {showBlockForm&&(
+          <div style={{background:"var(--c-deep)",borderRadius:10,padding:14,marginBottom:12,border:"1px solid #8b5cf633"}}>
+            <Field label="שם הבלוק *" value={blockName} onChange={setBlockName} style={{marginBottom:10,maxWidth:300}}/>
+            <div style={{fontSize:12,color:"var(--c-dim)",fontWeight:600,marginBottom:6}}>בחר שלבים והגדר תמחור לכל שלב:</div>
+            <div style={{display:"flex",flexWrap:"wrap",gap:6,marginBottom:10}}>
+              {stages.sort((a,b)=>a.order-b.order).map(st=>{
+                const inBlock=blockStages.some(bs=>bs.sourceId===st.id);
+                return(<button key={st.id} onClick={()=>!inBlock&&addStageToBlock(st.id)} style={{background:inBlock?st.color+"22":"var(--c-card)",border:`1px solid ${inBlock?st.color:  "var(--c-border)"}`,borderRadius:8,padding:"5px 10px",fontSize:12,color:inBlock?st.color:"var(--c-muted)",cursor:inBlock?"default":"pointer",fontFamily:"inherit",opacity:inBlock?.6:1}}>{inBlock?"✓ ":""}{st.name}</button>);
+              })}
             </div>
-            <div style={{display:"flex",gap:4}}>
-              <IBtn onClick={()=>move(s.id,-1)} title="הזז למעלה">⬆️</IBtn>
-              <IBtn onClick={()=>move(s.id,1)} title="הזז למטה">⬇️</IBtn>
-              <IBtn onClick={()=>del(s.id)}>🗑️</IBtn>
+            {blockStages.length>0&&(
+              <div style={{display:"flex",flexDirection:"column",gap:6,marginBottom:10}}>
+                {blockStages.map((bs,i)=>(
+                  <div key={i} style={{display:"flex",alignItems:"center",gap:8,background:"var(--c-card)",borderRadius:8,padding:"6px 10px",border:`1px solid ${bs.color}33`}}>
+                    <span style={{fontWeight:700,color:bs.color,minWidth:20}}>{i+1}</span>
+                    <span style={{fontWeight:600,flex:1}}>{bs.name}</span>
+                    <div style={{display:"flex",alignItems:"center",gap:4}}>
+                      <input type="number" value={bs.price} onChange={e=>updateBlockStagePrice(i,e.target.value)} style={{width:70,padding:"3px 6px",fontSize:12}} placeholder="₪"/>
+                      <span style={{fontSize:11,color:"var(--c-dim)"}}>₪</span>
+                    </div>
+                    <IBtn onClick={()=>removeFromBlock(i)}>✕</IBtn>
+                  </div>
+                ))}
+              </div>
+            )}
+            <div style={{display:"flex",gap:8}}>
+              <Btn color="#8b5cf6" onClick={addBlock} small>צור בלוק ({blockStages.length} שלבים)</Btn>
+              <Btn onClick={()=>setShowBlockForm(false)} small>ביטול</Btn>
             </div>
           </div>
-        ))}
-      </div>
+        )}
+        {(stageBlocks||[]).length===0&&!showBlockForm?<div style={{color:"var(--c-dim)",fontSize:12,textAlign:"center",padding:10}}>אין בלוקים — צור בלוק חדש כדי להגדיר תבנית שלבים לפקעות</div>:(
+          <div style={{display:"flex",flexDirection:"column",gap:8}}>
+            {(stageBlocks||[]).map(b=>(
+              <div key={b.id} style={{background:"var(--c-deep)",borderRadius:10,padding:"12px 14px",border:"1px solid var(--c-border)"}}>
+                <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8}}>
+                  <span style={{fontWeight:700,fontSize:14}}>{b.name}</span>
+                  <div style={{display:"flex",gap:4,alignItems:"center"}}>
+                    <span style={{fontSize:11,color:"var(--c-dim)"}}>{b.stages.length} שלבים</span>
+                    <span style={{fontSize:11,color:"#a78bfa"}}>סה"כ: ₪{b.stages.reduce((s,st)=>s+(st.price||0),0)}</span>
+                    <IBtn onClick={()=>delBlock(b.id)}>🗑️</IBtn>
+                  </div>
+                </div>
+                <div style={{display:"flex",flexWrap:"wrap",gap:4}}>
+                  {b.stages.sort((a,b2)=>a.order-b2.order).map((st,i)=>(
+                    <span key={i} style={{fontSize:11,background:st.color+"22",color:st.color,padding:"3px 8px",borderRadius:6,border:`1px solid ${st.color}33`}}>{st.name}{st.price?` ₪${st.price}`:""}</span>
+                  ))}
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+      </Card>
+
+      {/* Individual Stages */}
+      <Card>
+        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:14}}>
+          <h3 style={{margin:0,fontSize:15}}>🔧 שלבים בודדים</h3>
+          <Btn color="var(--c-accent)" small onClick={()=>setShowForm(p=>!p)}>+ שלב</Btn>
+        </div>
+        {showForm&&(
+          <div style={{display:"flex",gap:10,alignItems:"flex-end",marginBottom:12,flexWrap:"wrap"}}>
+            <Field label="שם" value={name} onChange={setName} style={{flex:1,minWidth:140}}/>
+            <Field label="₪ ליחידה" type="number" value={price} onChange={setPrice} style={{minWidth:80}}/>
+            <div style={{display:"flex",flexDirection:"column",gap:4}}><label style={{fontSize:11,color:"var(--c-dim)",fontWeight:600}}>צבע</label><input type="color" value={color} onChange={e=>setColor(e.target.value)} style={{width:36,height:34,padding:2,border:"1px solid var(--c-border)",borderRadius:6}}/></div>
+            <Btn color="#10b981" onClick={add} small>הוסף</Btn>
+            <Btn onClick={()=>setShowForm(false)} small>ביטול</Btn>
+          </div>
+        )}
+        <div style={{display:"flex",flexDirection:"column",gap:6}}>
+          {stages.sort((a,b)=>a.order-b.order).map((s,i)=>(
+            <div key={s.id} style={{background:"var(--c-card)",borderRadius:10,padding:"10px 14px",border:`1px solid ${s.color}33`,display:"flex",justifyContent:"space-between",alignItems:"center",flexWrap:"wrap",gap:6}}>
+              <div style={{display:"flex",alignItems:"center",gap:8}}>
+                <span style={{fontSize:16,fontWeight:800,color:s.color,minWidth:24}}>{i+1}</span>
+                <div style={{width:10,height:10,borderRadius:3,background:s.color}}/>
+                <span style={{fontWeight:600}}>{s.name}</span>
+                {editId===s.id?(<div style={{display:"flex",gap:4,alignItems:"center"}}><input type="number" value={editPrice} onChange={e=>setEditPrice(e.target.value)} style={{width:70,padding:"3px 6px",fontSize:12}}/><span style={{fontSize:11,color:"var(--c-dim)"}}>₪</span><IBtn onClick={()=>savePrice(s.id)}>✅</IBtn><IBtn onClick={()=>setEditId(null)}>✕</IBtn></div>):(
+                  <span style={{fontSize:11,color:s.price?"#a78bfa":"var(--c-dim)",cursor:"pointer",padding:"2px 6px",borderRadius:6,background:"var(--c-deep)"}} onClick={()=>{setEditId(s.id);setEditPrice(s.price||0)}}>{s.price?`₪${s.price}`:"+₪"}</span>
+                )}
+              </div>
+              <div style={{display:"flex",gap:3}}><IBtn onClick={()=>move(s.id,-1)}>⬆️</IBtn><IBtn onClick={()=>move(s.id,1)}>⬇️</IBtn><IBtn onClick={()=>del(s.id)}>🗑️</IBtn></div>
+            </div>
+          ))}
+        </div>
+      </Card>
     </div>
   );
 }
@@ -1833,6 +1958,7 @@ function App(){
   const [orders,setOrders]=useState([]);
   const [projects,setProjects]=useState(DEF_PROJ);
   const [stages,setStages]=useState(DEF_STAGES);
+  const [stageBlocks,setStageBlocks]=useState([]);
   const [workLogs,setWorkLogs]=useState([]);
   const [customTasks,setCustomTasks]=useState([]);
   const [loading,setLoading]=useState(true);
@@ -1856,6 +1982,7 @@ function App(){
     const lo=LS.get("orders"),lp=LS.get("projects"),ls=LS.get("stages"),lw=LS.get("workLogs");
     if(lo)setOrders(lo);if(lp)setProjects(lp);if(ls)setStages(ls);if(lw)setWorkLogs(lw);
     const lct=LS.get("customTasks");if(lct)setCustomTasks(lct);
+    const lsb=LS.get("stageBlocks");if(lsb)setStageBlocks(lsb);
 
     // Then sync from Google Sheets (overrides localStorage if available)
     console.log("[SYNC] Starting gsLoad from:",GS_URL?"GS":"local only");
@@ -2000,8 +2127,6 @@ function App(){
   };
   // Custom tasks
   const handleAddTask=(task)=>{setCustomTasks(prev=>{const next=[...prev,task];LS.set("customTasks",next);return next})};
-  // Listen for tasks added from WorkersDashboard
-  useEffect(()=>{const h=(e)=>{setCustomTasks(prev=>{const next=[...prev,e.detail];LS.set("customTasks",next);return next})};window.addEventListener("taskAdded",h);return()=>window.removeEventListener("taskAdded",h)},[]);
   const handleStartTask=(taskId)=>{setCustomTasks(prev=>{const next=prev.map(t=>t.id===taskId?{...t,active:true,startTime:nowISO()}:t);LS.set("customTasks",next);return next})};
   const handleEndTask=(taskId)=>{setCustomTasks(prev=>{const next=prev.map(t=>{if(t.id!==taskId)return t;const dur=t.startTime?Math.round((Date.now()-new Date(t.startTime).getTime())/60000)-(t.totalPauseMin||0):0;return{...t,active:false,completed:true,endTime:nowISO(),durationMin:Math.max(0,dur)}});LS.set("customTasks",next);return next})};
 
@@ -2052,12 +2177,12 @@ function App(){
       <Navbar tab={tab} setTab={setTab} tabs={TABS} lightMode={lightMode} toggleLight={()=>setLightMode(p=>!p)} sync={sync} onAdmin={()=>setShowAdmin(true)} onLogout={handleLogout} alertCount={alertCount} onAlerts={()=>setShowAlerts(true)} onRefresh={refreshFromGS}/>
       <main className="main-content" style={{maxWidth:1440,margin:"0 auto",padding:"16px 14px",paddingBottom:showInstall?"100px":"calc(16px + env(safe-area-inset-bottom,0px))"}}>
         {tab==="dashboard"&&<Dashboard orders={filteredOrders} projects={filteredProjects} stages={stages} users={getUsers()} workLogs={filteredWorkLogs}/>}
-        {tab==="orders"&&<Orders orders={filteredOrders} projects={filteredProjects} stages={stages} updO={updO} workLogs={filteredWorkLogs}/>}
+        {tab==="orders"&&<Orders orders={filteredOrders} projects={filteredProjects} stages={stages} stageBlocks={stageBlocks} updO={updO} workLogs={filteredWorkLogs}/>}
         {tab==="shortages"&&<Shortages orders={filteredOrders} updO={updO} projects={filteredProjects}/>}
         {tab==="mywork"&&<MyWork orders={filteredOrders} stages={stages} workLogs={filteredWorkLogs} onStartWork={handleStartWork} onEndWork={handleEndWork} onPauseWork={handlePauseWork} onResumeWork={handleResumeWork} customTasks={customTasks} onAddTask={handleAddTask} onStartTask={handleStartTask} onEndTask={handleEndTask}/>}
-        {tab==="workers"&&isAdmin&&<WorkersDashboard users={getUsers()} workLogs={filteredWorkLogs} orders={filteredOrders} stages={stages} customTasks={customTasks}/>}
+        {tab==="workers"&&isAdmin&&<WorkersDashboard users={getUsers()} workLogs={filteredWorkLogs} orders={filteredOrders} stages={stages} customTasks={customTasks} onAddTask={handleAddTask}/>}
         {tab==="yield"&&<YieldDashboard orders={filteredOrders} projects={filteredProjects} stages={stages} workLogs={filteredWorkLogs}/>}
-        {tab==="stages"&&isAdmin&&<StagesManagement stages={stages} setStages={setStages} persist={persist}/>}
+        {tab==="stages"&&isAdmin&&<StagesManagement stages={stages} setStages={setStages} stageBlocks={stageBlocks} setStageBlocks={setStageBlocks} persist={persist}/>}
         {tab==="projects"&&<Projects projects={filteredProjects} orders={filteredOrders} updP={updP} stages={stages} workLogs={filteredWorkLogs}/>}
         {tab==="excel"&&isAdmin&&<ExcelTab orders={filteredOrders} projects={filteredProjects} stages={stages} workLogs={filteredWorkLogs} users={getUsers()} updO={updO}/>}
       </main>
