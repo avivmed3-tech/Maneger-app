@@ -1013,13 +1013,17 @@ function MyWork({orders,stages,workLogs,onStartWork,onEndWork,onPauseWork,onResu
     onStartWork({id:uid(),userId:currentUser.id,userName:currentUser.name,serialId,stageId,orderId,serialSn:serial?.sn||"",startTime:nowISO(),endTime:null,completed:false,durationMin:0,paused:false,pauseStart:null,totalPauseMin:0,pauseLog:[]});
   };
 
-  const startBulk=(oId,stId)=>{
+  const startBulk=(oId)=>{
     if(myActiveLog&&!myActiveLog.paused){alert("יש עבודה פעילה");return}
     const order=orders.find(o=>o.id===oId);
+    const allStagesOrdered=(order?.stageIds||[]).map(sid=>stages.find(s2=>s2.id===sid)).filter(Boolean).sort((a,b)=>a.order-b.order);
     const groupId=uid();
     bulkSelected.forEach(sId=>{
       const serial=(order?.serials||[]).find(s=>s.id===sId);
-      onStartWork({id:uid(),userId:currentUser.id,userName:currentUser.name,serialId:sId,stageId:stId,orderId:oId,serialSn:serial?.sn||"",startTime:nowISO(),endTime:null,completed:false,durationMin:0,paused:false,pauseStart:null,totalPauseMin:0,pauseLog:[],bulk:true,bulkGroupId:groupId,bulkCount:bulkSelected.length});
+      // Find THIS serial's correct next stage
+      const nextSt=allStagesOrdered.find(st=>!workLogs.some(w=>w.serialId===sId&&w.stageId===st.id&&w.completed));
+      if(!nextSt||!myAccess.includes(nextSt.id))return;
+      onStartWork({id:uid(),userId:currentUser.id,userName:currentUser.name,serialId:sId,stageId:nextSt.id,orderId:oId,serialSn:serial?.sn||"",startTime:nowISO(),endTime:null,completed:false,durationMin:0,paused:false,pauseStart:null,totalPauseMin:0,pauseLog:[],bulk:true,bulkGroupId:groupId,bulkCount:bulkSelected.length});
     });
     setBulkSelected([]);setBulkMode(false);
   };
@@ -1284,15 +1288,13 @@ function MyWork({orders,stages,workLogs,onStartWork,onEndWork,onPauseWork,onResu
           return myAccess.includes(nextSt.id)&&!workLogs.some(w=>w.serialId===s.id&&w.stageId===nextSt.id&&!w.completed);
         });
         if(pendingSerials.length===0)return null;
-        // For bulk: find common next stage
-        const commonStage=allStagesOrdered.find(st=>myAccess.includes(st.id)&&pendingSerials.some(s=>{const ns=allStagesOrdered.find(st2=>!workLogs.some(w=>w.serialId===s.id&&w.stageId===st2.id&&w.completed));return ns?.id===st.id}));
         return(
           <Card key={o.id} style={{marginBottom:10}}>
             <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:10,flexWrap:"wrap"}}>
               <span style={{fontWeight:700,color:"#60a5fa"}}>{o.woNumber}</span>
               {o.pn&&<span style={{fontSize:12,color:"#a78bfa"}}>P/N: {o.pn}</span>}
               <span style={{fontSize:11,color:"var(--c-dim)"}}>({pendingSerials.length} ממתינות)</span>
-              {bulkMode&&commonStage&&bulkSelected.length>0&&<Btn color={commonStage.color} small onClick={()=>startBulk(o.id,commonStage.id)}>▶️ התחל {bulkSelected.length} יחידות — {commonStage.name}</Btn>}
+              {bulkMode&&bulkSelected.length>0&&<Btn color="var(--c-accent)" small onClick={()=>startBulk(o.id)}>▶️ התחל {bulkSelected.length} יחידות</Btn>}
             </div>
             <div style={{display:"flex",flexDirection:"column",gap:6}}>
               {pendingSerials.slice(0,15).map(s=>{
