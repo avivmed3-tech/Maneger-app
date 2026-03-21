@@ -327,10 +327,14 @@ function Dashboard({orders,projects,stages,users,workLogs}){
   const counted=new Set();
   fLogs.forEach(w=>{
     const k=keyFn(w.endTime);if(!k)return;
+    if(!revByPeriod[k])revByPeriod[k]={rev:0,qty:0,cost:0};
+    // Cost: always add worker cost per log
+    const u2=users.find(u3=>u3.id===w.userId);
+    revByPeriod[k].cost+=(w.durationMin||0)*(Number(u2?.hourlyRate||0)/60);
+    // Revenue: only when serial is fully done
     const o=fOrders.find(o2=>(o2.serials||[]).some(s=>s.id===w.serialId));if(!o)return;
     if(!isSerDone(o,{id:w.serialId}))return;
     const ck=w.serialId+"|"+k;if(counted.has(ck))return;counted.add(ck);
-    if(!revByPeriod[k])revByPeriod[k]={rev:0,qty:0};
     revByPeriod[k].rev+=Number(o.unitPrice||0);revByPeriod[k].qty+=1;
   });
   const pKeys=Object.keys(revByPeriod).sort().slice(-10);
@@ -430,10 +434,66 @@ function Dashboard({orders,projects,stages,users,workLogs}){
         </Card>
       </div>
 
-      {/* Quantities bar */}
+      {/* Revenue vs Expenses Trend */}
       <Card style={{marginBottom:12}}>
-        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:12}}><div style={{fontWeight:700,fontSize:14}}>📦 כמויות שהושלמו</div><div style={{fontSize:12,color:"var(--c-muted)"}}>סה"כ: <b style={{color:"#3b82f6"}}>{pKeys.reduce((s,k)=>s+revByPeriod[k].qty,0).toLocaleString()}</b></div></div>
-        <BarChart data={pKeys.map(k=>({label:k,value:revByPeriod[k].qty}))} color="#3b82f6" formatVal={v=>v.toLocaleString()} height={100}/>
+        <div style={{fontWeight:700,fontSize:14,marginBottom:12}}>📈 מגמת הכנסות מול הוצאות</div>
+        {(()=>{
+          // Build expenses by period
+          const expByPeriod={};
+          fLogs.forEach(w=>{
+            const k=keyFn(w.endTime);if(!k)return;
+            const u=users.find(u2=>u2.id===w.userId);
+            const cost=(w.durationMin||0)*(Number(u?.hourlyRate||0)/60);
+            if(!expByPeriod[k])expByPeriod[k]=0;
+            expByPeriod[k]+=cost;
+          });
+          const allKeys=[...new Set([...pKeys,...Object.keys(expByPeriod)])].sort().slice(-10);
+          const maxVal=Math.max(...allKeys.map(k=>Math.max(revByPeriod[k]?.rev||0,expByPeriod[k]||0)),1);
+          const MN2=["","ינו","פבר","מרץ","אפר","מאי","יונ","יול","אוג","ספט","אוק","נוב","דצמ"];
+          const fmtL2=l=>{if(/^\d{4}-\d{2}$/.test(l)){const[y,m]=l.split("-");return MN2[+m]+"'"+y.slice(2)}if(/^\d{4}-Q\d/.test(l)){const p2=l.split("-");return p2[1]+"'"+p2[0].slice(2)}return l};
+          if(allKeys.length===0)return<div style={{color:"var(--c-dim)",textAlign:"center",padding:20}}>אין נתונים</div>;
+          const W2=480,H2=160,padL2=50,padR2=12,padT2=20,padB2=44;
+          const slotW2=(W2-padL2-padR2)/allKeys.length;
+          const bw2=Math.min(18,slotW2*.35);
+          return(<svg viewBox={`0 0 ${W2} ${H2+padT2+padB2}`} style={{width:"100%",height:"auto"}}>
+            {[0,.25,.5,.75,1].map((f,i)=>{const y=padT2+H2-(f*H2);const v=Math.round(maxVal*f);return(<g key={i}><line x1={padL2} y1={y} x2={W2-padR2} y2={y} stroke="var(--c-chart-grid)" strokeWidth={1} strokeDasharray={i===0?"":"3 3"} opacity={i===0?1:.3}/><text x={padL2-6} y={y+4} textAnchor="end" fill="var(--c-chart-label)" fontSize={9} fontFamily="sans-serif">{v>=1e3?(v/1e3).toFixed(0)+"K":v}</text></g>)})}
+            {allKeys.map((k,i)=>{
+              const x=padL2+i*slotW2+slotW2/2;
+              const rev2=revByPeriod[k]?.rev||0;const exp2=expByPeriod[k]||0;
+              const hR=Math.max((rev2/maxVal)*H2,2);const hE=Math.max((exp2/maxVal)*H2,2);
+              return(<g key={k}>
+                <rect x={x-bw2-1} y={padT2+H2-hR} width={bw2} height={hR} rx={3} fill="#a78bfa"/>
+                <rect x={x+1} y={padT2+H2-hE} width={bw2} height={hE} rx={3} fill="#f97316"/>
+                <text x={x} y={padT2+H2+18} textAnchor="middle" fill="var(--c-chart-label)" fontSize={10} fontFamily="sans-serif">{fmtL2(k)}</text>
+              </g>);
+            })}
+            <line x1={padL2} y1={padT2+H2} x2={W2-padR2} y2={padT2+H2} stroke="var(--c-chart-grid)" strokeWidth={1.5}/>
+          </svg>);
+        })()}
+        <div style={{display:"flex",gap:16,justifyContent:"center",marginTop:8}}>
+          <div style={{display:"flex",alignItems:"center",gap:5}}><div style={{width:10,height:10,borderRadius:2,background:"#a78bfa"}}/><span style={{fontSize:11,color:"var(--c-muted)"}}>הכנסות</span></div>
+          <div style={{display:"flex",alignItems:"center",gap:5}}><div style={{width:10,height:10,borderRadius:2,background:"#f97316"}}/><span style={{fontSize:11,color:"var(--c-muted)"}}>הוצאות</span></div>
+        </div>
+      </Card>
+
+      {/* Revenue vs Cost trend */}
+      <Card style={{marginBottom:12}}>
+        <div style={{fontWeight:700,fontSize:14,marginBottom:12}}>📈 מגמות הכנסות מול הוצאות</div>
+        <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:12}} className="chart-grid">
+          <div>
+            <div style={{fontSize:12,color:"#10b981",fontWeight:600,marginBottom:6}}>💰 הכנסות</div>
+            <BarChart data={pKeys.map(k=>({label:k,value:Math.round(revByPeriod[k].rev)}))} color="#10b981" formatVal={v=>fmtMoney(v)} height={100}/>
+          </div>
+          <div>
+            <div style={{fontSize:12,color:"#ef4444",fontWeight:600,marginBottom:6}}>💵 הוצאות</div>
+            <BarChart data={pKeys.map(k=>({label:k,value:Math.round(revByPeriod[k].cost)}))} color="#ef4444" formatVal={v=>fmtMoney(v)} height={100}/>
+          </div>
+        </div>
+        <div style={{display:"flex",justifyContent:"center",gap:20,marginTop:10,fontSize:12,flexWrap:"wrap"}}>
+          <span>הכנסות: <b style={{color:"#10b981"}}>{fmtMoney(pKeys.reduce((s,k)=>s+revByPeriod[k].rev,0))}</b></span>
+          <span>הוצאות: <b style={{color:"#ef4444"}}>{fmtMoney(pKeys.reduce((s,k)=>s+revByPeriod[k].cost,0))}</b></span>
+          <span>רווח: <b style={{color:pKeys.reduce((s,k)=>s+revByPeriod[k].rev-revByPeriod[k].cost,0)>=0?"#10b981":"#ef4444"}}>{fmtMoney(pKeys.reduce((s,k)=>s+revByPeriod[k].rev-revByPeriod[k].cost,0))}</b></span>
+        </div>
       </Card>
 
       {/* Project progress */}
@@ -1060,47 +1120,31 @@ function MyWork({orders,stages,workLogs,onStartWork,onEndWork,onPauseWork,onResu
         <div>
           <h2 style={{margin:"0 0 14px"}}>📡 מצב עבודה בזמן אמת</h2>
 
-          {/* Active workers */}
+          {/* Active workers — group by worker, not by log */}
           {(()=>{
             const activeWork=workLogs.filter(w=>!w.completed);
-            const onBreak=activeWork.filter(w=>w.paused);
-            const working=activeWork.filter(w=>!w.paused);
-            // Pending work: serials not started yet
-            const pendingCount=orders.reduce((s,o)=>{
-              const oSt=o.stageIds||[];
-              return s+(o.serials||[]).filter(sr=>oSt.some(sid=>!workLogs.some(w=>w.serialId===sr.id&&w.stageId===sid&&(w.completed||!w.completed)))).length;
-            },0);
-            const totalPending=orders.reduce((s,o)=>{
-              const oSt=o.stageIds||[];
-              return s+(o.serials||[]).filter(sr=>!oSt.every(sid=>workLogs.some(w=>w.serialId===sr.id&&w.stageId===sid&&w.completed))).length;
-            },0);
-
+            const totalPending=orders.reduce((s,o)=>{const oSt=o.stageIds||[];return s+(o.serials||[]).filter(sr=>!oSt.every(sid=>workLogs.some(w2=>w2.serialId===sr.id&&w2.stageId===sid&&w2.completed))).length},0);
+            // Group by worker
+            const allW={};
+            activeWork.forEach(w=>{
+              if(!allW[w.userId])allW[w.userId]={name:w.userName,logs:[]};
+              allW[w.userId].logs.push(w);
+            });
+            // Dedupe bulk within each worker, classify worker as working or break
+            const workerWork={};const workerBreak={};
+            Object.entries(allW).forEach(([uid2,wk])=>{
+              const anyActive=wk.logs.some(l=>!l.paused);
+              const seen2=new Set();const items=[];
+              wk.logs.forEach(w=>{
+                const key=w.bulkGroupId||w.id;if(seen2.has(key))return;seen2.add(key);
+                if(w.bulkGroupId){const group=wk.logs.filter(g=>g.bulkGroupId===w.bulkGroupId);items.push({...w,_sns:group.map(g=>g.serialSn),_count:group.length})}
+                else{items.push({...w,_sns:[w.serialSn],_count:1})}
+              });
+              if(anyActive){workerWork[uid2]={name:wk.name,items}}else{workerBreak[uid2]={name:wk.name,items}}
+            });
+            const ww=Object.keys(workerWork).length;const bw=Object.keys(workerBreak).length;
+            const activeTasks2=(customTasks||[]).filter(t=>t.active&&!t.completed);
             return(<>
-              {/* Group active work by worker, dedupe bulk */}
-              {(()=>{
-                const seen=new Set();const workerWork={};
-                working.forEach(w=>{
-                  const key=w.bulkGroupId||w.id;
-                  if(seen.has(key))return;seen.add(key);
-                  if(!workerWork[w.userId])workerWork[w.userId]={name:w.userName,items:[]};
-                  if(w.bulkGroupId){
-                    const group=working.filter(g=>g.bulkGroupId===w.bulkGroupId);
-                    workerWork[w.userId].items.push({...w,_sns:group.map(g=>g.serialSn),_count:group.length});
-                  }else{workerWork[w.userId].items.push({...w,_sns:[w.serialSn],_count:1})}
-                });
-                const seenB=new Set();const workerBreak={};
-                onBreak.forEach(w=>{
-                  const key=w.bulkGroupId||w.id;
-                  if(seenB.has(key))return;seenB.add(key);
-                  if(!workerBreak[w.userId])workerBreak[w.userId]={name:w.userName,items:[]};
-                  if(w.bulkGroupId){
-                    const group=onBreak.filter(g=>g.bulkGroupId===w.bulkGroupId);
-                    workerBreak[w.userId].items.push({...w,_sns:group.map(g=>g.serialSn),_count:group.length});
-                  }else{workerBreak[w.userId].items.push({...w,_sns:[w.serialSn],_count:1})}
-                });
-                const ww=Object.keys(workerWork).length;const bw=Object.keys(workerBreak).length;
-                const activeTasks2=(customTasks||[]).filter(t=>t.active&&!t.completed);
-                return(<>
               <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(130px,1fr))",gap:9,marginBottom:14}}>
                 <KpiBox i="🔄" v={ww} label="עובדים בעבודה" c="#f59e0b"/>
                 <KpiBox i="⏸️" v={bw} label="בהפסקה" c="#8b95a8"/>
@@ -1108,14 +1152,10 @@ function MyWork({orders,stages,workLogs,onStartWork,onEndWork,onPauseWork,onResu
                 <KpiBox i="📦" v={orders.filter(o=>(o.serials||[]).length>0&&(o.serials||[]).some(sr=>!(o.stageIds||[]).every(sid=>workLogs.some(w2=>w2.serialId===sr.id&&w2.stageId===sid&&w2.completed)))).length} label='פק\"ע בתהליך' c="#06b6d4"/>
               </div>
               {ww>0&&(<Card style={{marginBottom:12,border:"2px solid #f59e0b33"}}><div style={{fontWeight:700,fontSize:15,color:"#f59e0b",marginBottom:10}}>🔄 עובדים בעבודה ({ww})</div><div style={{display:"flex",flexDirection:"column",gap:8}}>{Object.values(workerWork).flatMap(wk=>wk.items.map(w=>{const stage=stages.find(s2=>s2.id===w.stageId);const order=orders.find(o=>o.id===w.orderId);return(<div key={w.id} style={{background:"var(--c-deep)",borderRadius:10,padding:"10px 14px",border:"1px solid #f59e0b22",display:"flex",justifyContent:"space-between",alignItems:"center",flexWrap:"wrap",gap:8}}><div><span style={{fontWeight:700,fontSize:14}}>{w.userName}</span><span style={{fontSize:12,color:"#60a5fa",marginRight:8}}>← {order?.woNumber||""}</span>{w._count>1?<span style={{fontSize:11,background:"#3b82f622",color:"#60a5fa",padding:"2px 8px",borderRadius:10}}>{w._count} יחידות</span>:<span style={{fontSize:12,color:"#7eb8ff"}}>{w.serialSn}</span>}<span style={{fontSize:11,color:stage?.color||"var(--c-muted)",marginRight:6}}>/ {stage?.name||""}</span></div><ActiveTimer startTime={w.startTime} pauseMin={w.totalPauseMin||0}/></div>)}))}</div></Card>)}
-              {bw>0&&(<Card style={{marginBottom:12,border:"1px solid #8b95a833"}}><div style={{fontWeight:700,fontSize:15,color:"#8b95a8",marginBottom:10}}>⏸️ בהפסקה ({bw})</div><div style={{display:"flex",flexDirection:"column",gap:6}}>{Object.values(workerBreak).flatMap(wk=>wk.items.map(w=>{const stage=stages.find(s2=>s2.id===w.stageId);return(<div key={w.id} style={{background:"var(--c-deep)",borderRadius:8,padding:"8px 12px",display:"flex",justifyContent:"space-between",alignItems:"center",opacity:.7}}><div><span style={{fontWeight:600}}>{w.userName}</span>{w._count>1?<span style={{fontSize:11,color:"var(--c-dim)",marginRight:8}}>{w._count} יחידות / {stage?.name||""}</span>:<span style={{fontSize:12,color:"var(--c-dim)",marginRight:8}}>{w.serialSn} / {stage?.name||""}</span>}</div><span style={{fontSize:12,color:"#8b95a8"}}>⏸️ {w.pauseStart?fmtTime(Math.round((Date.now()-new Date(w.pauseStart).getTime())/60000)):""}</span></div>)}))}</div></Card>)}
+              {bw>0&&(<Card style={{marginBottom:12,border:"1px solid #8b95a833"}}><div style={{fontWeight:700,fontSize:15,color:"#8b95a8",marginBottom:10}}>⏸️ בהפסקה ({bw})</div><div style={{display:"flex",flexDirection:"column",gap:6}}>{Object.values(workerBreak).flatMap(wk=>wk.items.map(w=>{const stage=stages.find(s2=>s2.id===w.stageId);return(<div key={w.id} style={{background:"var(--c-deep)",borderRadius:8,padding:"8px 12px",display:"flex",justifyContent:"space-between",alignItems:"center",opacity:.7}}><div><span style={{fontWeight:600}}>{w.userName}</span>{w._count>1?<span style={{fontSize:11,color:"var(--c-dim)",marginRight:8}}>{w._count} יחידות / {stage?.name||""}</span>:<span style={{fontSize:12,color:"var(--c-dim)",marginRight:8}}>{w.serialSn} / {stage?.name||""}</span>}</div><span style={{fontSize:12,color:"#8b95a8"}}>⏸️</span></div>)}))}</div></Card>)}
               {activeTasks2.length>0&&(<Card style={{marginBottom:12,border:"1px solid #a78bfa33"}}><div style={{fontWeight:700,fontSize:15,color:"#a78bfa",marginBottom:10}}>📌 עובדים על משימות</div><div style={{display:"flex",flexDirection:"column",gap:6}}>{activeTasks2.map(t=>(<div key={t.id} style={{background:"var(--c-deep)",borderRadius:10,padding:"10px 14px",border:t.paused?"1px solid #8b95a833":"1px solid #a78bfa22",display:"flex",justifyContent:"space-between",alignItems:"center",flexWrap:"wrap",gap:6}}><div><span style={{fontWeight:700}}>{t.userName}</span><span style={{fontSize:12,color:"#a78bfa",marginRight:8}}>← {t.name}</span>{t.paused&&<span style={{fontSize:11,color:"#8b95a8"}}>⏸️</span>}</div>{!t.paused?<ActiveTimer startTime={t.startTime} pauseMin={t.totalPauseMin||0}/>:<span style={{fontSize:14,color:"#8b95a8"}}>⏸️</span>}</div>))}</div></Card>)}
               {ww===0&&bw===0&&activeTasks2.length===0&&(<Card style={{marginBottom:12,textAlign:"center",padding:30,color:"var(--c-dim)"}}><div style={{fontSize:36,marginBottom:8}}>😴</div>אין עבודה פעילה כרגע</Card>)}
-                </>)})()}
 
-
-              {/* Remaining work summary */}
-              <Card style={{marginBottom:12}}>
                 <div style={{fontWeight:700,fontSize:15,marginBottom:10}}>📋 עבודה שנותרה</div>
                 <div style={{overflowX:"auto"}}><table><thead><tr><th>פק"ע</th><th>P/N</th><th>יחידות</th><th>הושלמו</th><th>בתהליך</th><th>נותרו</th><th>התקדמות</th></tr></thead><tbody>
                   {orders.filter(o=>(o.serials||[]).length>0).map(o=>{
