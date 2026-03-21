@@ -1104,8 +1104,10 @@ function MyWork({orders,stages,workLogs,onStartWork,onEndWork,onPauseWork,onResu
 
   const togglePause=()=>{
     if(!myActiveLog)return;
-    if(myActiveLog.paused){onResumeWork(myActiveLog.id)}
-    else{onPauseWork(myActiveLog.id)}
+    // Pause/resume ALL logs in bulk group
+    const logsToToggle=myActiveLog.bulkGroupId?myActiveLogs.filter(w=>w.bulkGroupId===myActiveLog.bulkGroupId):myActiveLogs.filter(w=>w.id===myActiveLog.id);
+    if(myActiveLog.paused){logsToToggle.forEach(w=>onResumeWork(w.id))}
+    else{logsToToggle.forEach(w=>onPauseWork(w.id))}
   };
 
   // My custom tasks
