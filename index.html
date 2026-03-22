@@ -223,6 +223,37 @@ function BarChart({data,color,formatVal,height=130}){
   );
 }
 
+// ── Line Chart (dual series) ─────────────────────────────────────────
+function LineChart({series,height=160,labels}){
+  const[hov,setHov]=useState(null);
+  if(!labels||!labels.length)return<div style={{height,display:"flex",alignItems:"center",justifyContent:"center",color:"var(--c-dim)",fontSize:13}}>אין נתונים</div>;
+  const padL=44,padR=16,padT=20,padB=48,W=560,H=height+padT+padB;
+  const MN=["","ינו","פבר","מרץ","אפר","מאי","יונ","יול","אוג","ספט","אוק","נוב","דצמ"];
+  const fmtL=l=>{if(/^\d{4}-\d{2}$/.test(l)){const[y,m]=l.split("-");return MN[+m]+"'"+y.slice(2)}if(/^\d{4}-Q\d/.test(l)){const p=l.split("-");return p[1]+"'"+p[0].slice(2)}return l};
+  const fmtA=v=>v>=1e6?(v/1e6).toFixed(1)+"M":v>=1e3?(v/1e3).toFixed(0)+"K":""+v;
+  const allVals=series.flatMap(s=>s.data);const maxV=Math.max(...allVals,1);
+  const mag=Math.pow(10,Math.floor(Math.log10(maxV)));const niceMax=Math.ceil(maxV/mag)*mag;
+  const grids=[0,.25,.5,.75,1].map(f=>Math.round(niceMax*f));
+  const slotW=(W-padL-padR)/(labels.length-1||1);
+  const px=i=>padL+i*slotW;const py=v=>padT+height-(v/niceMax)*height;
+  const makePath=(data)=>{if(data.length<2)return"";let d=`M${px(0)},${py(data[0])}`;for(let i=1;i<data.length;i++){const x0=px(i-1),y0=py(data[i-1]),x1=px(i),y1=py(data[i]);const cx=(x0+x1)/2;d+=` C${cx},${y0} ${cx},${y1} ${x1},${y1}`}return d};
+  const makeArea=(data)=>{if(data.length<2)return"";return makePath(data)+` L${px(data.length-1)},${padT+height} L${px(0)},${padT+height} Z`};
+  return(
+    <div>
+      <div style={{display:"flex",gap:16,justifyContent:"flex-end",marginBottom:6}}>
+        {series.map((s,i)=>(<div key={i} style={{display:"flex",alignItems:"center",gap:5,fontSize:11}}><div style={{width:16,height:3,borderRadius:2,background:s.color}}/><span style={{color:s.color}}>{s.label}</span></div>))}
+      </div>
+      <svg viewBox={`0 0 ${W} ${H}`} style={{width:"100%",height:"auto",display:"block"}}>
+        {grids.map((v,i)=>{const y=padT+height-(v/niceMax)*height;return(<g key={i}><line x1={padL} y1={y} x2={W-padR} y2={y} stroke="var(--c-chart-grid)" strokeWidth={i===0?1.5:1} strokeDasharray={i===0?"":"3 3"} opacity={i===0?1:.3}/><text x={padL-8} y={y+4} textAnchor="end" fill="var(--c-chart-label)" fontSize={10} fontFamily="sans-serif">{fmtA(v)}</text></g>)})}
+        {series.map((s,si)=>(<g key={si}><path d={makeArea(s.data)} fill={s.color} opacity={.08}/><path d={makePath(s.data)} fill="none" stroke={s.color} strokeWidth={2.5} strokeLinecap="round"/>{s.data.map((v,i)=>(<circle key={i} cx={px(i)} cy={py(v)} r={hov===i?5:3} fill={s.color} stroke="var(--c-bg)" strokeWidth={2} style={{cursor:"pointer"}} onMouseEnter={()=>setHov(i)} onMouseLeave={()=>setHov(null)}/>))}</g>))}
+        {hov!==null&&(<g><line x1={px(hov)} y1={padT} x2={px(hov)} y2={padT+height} stroke="var(--c-chart-label)" strokeWidth={1} strokeDasharray="3 3" opacity={.5}/>{(()=>{const tw=100,tx=Math.min(Math.max(px(hov)-tw/2,padL),W-padR-tw);return(<><rect x={tx} y={padT-2} width={tw} height={14+series.length*16} rx={5} fill="var(--c-chart-tooltip)" stroke="var(--c-chart-grid)" strokeWidth={1}/><text x={tx+tw/2} y={padT+10} textAnchor="middle" fill="var(--c-chart-label)" fontSize={10} fontFamily="sans-serif">{fmtL(labels[hov])}</text>{series.map((s,si)=>(<text key={si} x={tx+tw/2} y={padT+10+16*(si+1)} textAnchor="middle" fill={s.color} fontSize={11} fontWeight="700" fontFamily="sans-serif">{s.formatVal?s.formatVal(s.data[hov]):s.data[hov]?.toLocaleString()}</text>))}</>)})()}</g>)}
+        <line x1={padL} y1={padT+height} x2={W-padR} y2={padT+height} stroke="var(--c-chart-grid)" strokeWidth={1.5}/>
+        {labels.map((l,i)=>(<text key={i} x={px(i)} y={padT+height+22} textAnchor="middle" fill="var(--c-chart-label)" fontSize={10} fontWeight="600" fontFamily="sans-serif" transform={labels.length>8?`rotate(-25,${px(i)},${padT+height+22})`:""}>{fmtL(l)}</text>))}
+      </svg>
+    </div>
+  );
+}
+
 // ── Donut Chart ────────────────────────────────────────────────────────────
 function DonutChart({data,size=180}){
   const [hov,setHov]=useState(null);
@@ -476,22 +507,20 @@ function Dashboard({orders,projects,stages,users,workLogs}){
         </div>
       </Card>
 
-      {/* Revenue vs Cost trend */}
+      {/* Revenue & Cost trend - Line Chart */}
       <Card style={{marginBottom:12}}>
-        <div style={{fontWeight:700,fontSize:14,marginBottom:12}}>📈 מגמות הכנסות מול הוצאות</div>
-        <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:12}} className="chart-grid">
-          <div>
-            <div style={{fontSize:12,color:"#10b981",fontWeight:600,marginBottom:6}}>💰 הכנסות</div>
-            <BarChart data={pKeys.map(k=>({label:k,value:Math.round(revByPeriod[k].rev)}))} color="#10b981" formatVal={v=>fmtMoney(v)} height={100}/>
-          </div>
-          <div>
-            <div style={{fontSize:12,color:"#ef4444",fontWeight:600,marginBottom:6}}>💵 הוצאות</div>
-            <BarChart data={pKeys.map(k=>({label:k,value:Math.round(revByPeriod[k].cost)}))} color="#ef4444" formatVal={v=>fmtMoney(v)} height={100}/>
-          </div>
-        </div>
-        <div style={{display:"flex",justifyContent:"center",gap:20,marginTop:10,fontSize:12,flexWrap:"wrap"}}>
+        <div style={{fontWeight:700,fontSize:14,marginBottom:4}}>📈 ניתוח מגמות</div>
+        <LineChart
+          labels={pKeys}
+          series={[
+            {label:"הכנסות",color:"#10b981",data:pKeys.map(k=>Math.round(revByPeriod[k].rev)),formatVal:v=>fmtMoney(v)},
+            {label:"הוצאות",color:"#3b82f6",data:pKeys.map(k=>Math.round(revByPeriod[k].cost)),formatVal:v=>fmtMoney(v)}
+          ]}
+          height={180}
+        />
+        <div style={{display:"flex",justifyContent:"center",gap:20,marginTop:8,fontSize:12,flexWrap:"wrap"}}>
           <span>הכנסות: <b style={{color:"#10b981"}}>{fmtMoney(pKeys.reduce((s,k)=>s+revByPeriod[k].rev,0))}</b></span>
-          <span>הוצאות: <b style={{color:"#ef4444"}}>{fmtMoney(pKeys.reduce((s,k)=>s+revByPeriod[k].cost,0))}</b></span>
+          <span>הוצאות: <b style={{color:"#3b82f6"}}>{fmtMoney(pKeys.reduce((s,k)=>s+revByPeriod[k].cost,0))}</b></span>
           <span>רווח: <b style={{color:pKeys.reduce((s,k)=>s+revByPeriod[k].rev-revByPeriod[k].cost,0)>=0?"#10b981":"#ef4444"}}>{fmtMoney(pKeys.reduce((s,k)=>s+revByPeriod[k].rev-revByPeriod[k].cost,0))}</b></span>
         </div>
       </Card>
