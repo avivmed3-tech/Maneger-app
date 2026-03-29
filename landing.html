@@ -1,0 +1,265 @@
+<!DOCTYPE html>
+<html lang="he" dir="rtl">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1"/>
+<meta name="description" content="מערכת SaaS לניהול רצפת ייצור — מעקב הזמנות, שלבי עבודה, מספרים סידוריים, ביצועי עובדים ודוחות בזמן אמת"/>
+<meta property="og:type" content="website"/>
+<meta property="og:title" content="ניהול קו ייצור — מערכת ניהול מפעל חכמה"/>
+<meta property="og:description" content="מעקב הזמנות, שלבי עבודה, מספרים סידוריים, ביצועי עובדים ודוחות — הכל במקום אחד"/>
+<meta property="og:image" content="icon-512.png"/>
+<meta property="og:locale" content="he_IL"/>
+<title>ניהול קו ייצור — מערכת ניהול מפעל חכמה</title>
+<link rel="icon" type="image/png" href="icon-192.png"/>
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Heebo:wght@300;400;600;800;900&display=swap');
+*{box-sizing:border-box;margin:0;padding:0}
+:root{
+  --bg:#0a0e1a;--card:#131829;--deep:#0d1120;
+  --text:#e2e8f0;--muted:#8b95a8;--dim:#5a6478;
+  --accent:#3b82f6;--accent2:#06b6d4;--green:#10b981;--amber:#f59e0b;
+  --border:#1e2a42;
+}
+html{scroll-behavior:smooth}
+body{font-family:'Heebo',sans-serif;background:var(--bg);color:var(--text);line-height:1.6;overflow-x:hidden}
+a{color:var(--accent);text-decoration:none}
+
+/* ── Hero ── */
+.hero{min-height:100vh;display:flex;flex-direction:column;align-items:center;justify-content:center;text-align:center;padding:60px 20px 40px;position:relative;overflow:hidden}
+.hero::before{content:'';position:absolute;top:-40%;left:-20%;width:140%;height:140%;background:radial-gradient(ellipse at 30% 20%,#3b82f622 0%,transparent 60%),radial-gradient(ellipse at 70% 80%,#06b6d418 0%,transparent 50%);pointer-events:none}
+.hero-badge{display:inline-flex;align-items:center;gap:8px;background:#3b82f618;border:1px solid #3b82f633;border-radius:20px;padding:6px 16px;font-size:13px;color:#93c5fd;margin-bottom:24px;animation:fadeUp .6s ease-out}
+.hero h1{font-size:clamp(32px,7vw,56px);font-weight:900;line-height:1.15;margin-bottom:16px;letter-spacing:-1px;animation:fadeUp .6s ease-out .1s both}
+.hero h1 span{background:linear-gradient(135deg,#3b82f6,#06b6d4);-webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text}
+.hero p{font-size:clamp(16px,3vw,20px);color:var(--muted);max-width:600px;margin:0 auto 32px;animation:fadeUp .6s ease-out .2s both}
+.hero-btns{display:flex;gap:12px;flex-wrap:wrap;justify-content:center;animation:fadeUp .6s ease-out .3s both}
+.btn{display:inline-flex;align-items:center;gap:8px;padding:14px 28px;border-radius:12px;font-size:16px;font-weight:700;border:none;cursor:pointer;font-family:inherit;transition:transform .15s,box-shadow .15s}
+.btn:hover{transform:translateY(-2px)}
+.btn-primary{background:var(--accent);color:#fff;box-shadow:0 4px 20px #3b82f644}
+.btn-primary:hover{box-shadow:0 8px 30px #3b82f666}
+.btn-outline{background:transparent;color:var(--text);border:1px solid var(--border)}
+.btn-outline:hover{border-color:var(--accent);color:var(--accent)}
+
+/* ── Features ── */
+.section{padding:80px 20px;max-width:1100px;margin:0 auto}
+.section-title{text-align:center;margin-bottom:48px}
+.section-title h2{font-size:clamp(24px,5vw,36px);font-weight:800;margin-bottom:8px}
+.section-title p{color:var(--muted);font-size:16px}
+.features-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:16px}
+.feature-card{background:var(--card);border:1px solid var(--border);border-radius:16px;padding:28px 24px;transition:border-color .2s,transform .2s}
+.feature-card:hover{border-color:var(--accent);transform:translateY(-3px)}
+.feature-icon{font-size:32px;margin-bottom:12px}
+.feature-card h3{font-size:17px;font-weight:700;margin-bottom:6px}
+.feature-card p{font-size:14px;color:var(--muted);line-height:1.5}
+
+/* ── Pricing ── */
+.pricing-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:16px;align-items:start}
+.price-card{background:var(--card);border:1px solid var(--border);border-radius:16px;padding:28px 24px;position:relative;transition:border-color .2s,transform .2s}
+.price-card:hover{transform:translateY(-3px)}
+.price-card.popular{border-color:var(--accent);box-shadow:0 0 40px #3b82f622}
+.price-badge{position:absolute;top:-12px;right:20px;background:var(--accent);color:#fff;font-size:11px;font-weight:700;padding:4px 14px;border-radius:10px}
+.price-name{font-size:18px;font-weight:700;margin-bottom:4px}
+.price-amount{font-size:36px;font-weight:900;margin:12px 0 4px}
+.price-amount span{font-size:14px;font-weight:400;color:var(--muted)}
+.price-desc{font-size:13px;color:var(--muted);margin-bottom:16px}
+.price-features{list-style:none;display:flex;flex-direction:column;gap:8px;margin-bottom:20px}
+.price-features li{font-size:14px;color:var(--muted);display:flex;align-items:center;gap:8px}
+.price-features li::before{content:'✓';color:var(--green);font-weight:700;font-size:16px;flex-shrink:0}
+.price-features li.disabled{opacity:.4}
+.price-features li.disabled::before{content:'✕';color:var(--dim)}
+.price-btn{display:block;width:100%;text-align:center;padding:12px;border-radius:10px;font-size:15px;font-weight:700;border:none;cursor:pointer;font-family:inherit;transition:background .15s}
+.price-btn-primary{background:var(--accent);color:#fff}
+.price-btn-primary:hover{background:#2563eb}
+.price-btn-outline{background:transparent;color:var(--text);border:1px solid var(--border)}
+.price-btn-outline:hover{border-color:var(--accent)}
+
+/* ── FAQ ── */
+.faq-list{max-width:700px;margin:0 auto;display:flex;flex-direction:column;gap:8px}
+.faq-item{background:var(--card);border:1px solid var(--border);border-radius:12px;overflow:hidden}
+.faq-q{padding:16px 20px;font-weight:600;font-size:15px;cursor:pointer;display:flex;justify-content:space-between;align-items:center}
+.faq-q:hover{color:var(--accent)}
+.faq-q span{transition:transform .2s}
+.faq-item.open .faq-q span{transform:rotate(45deg)}
+.faq-a{padding:0 20px 16px;font-size:14px;color:var(--muted);line-height:1.6;display:none}
+.faq-item.open .faq-a{display:block}
+
+/* ── Footer ── */
+.footer{text-align:center;padding:40px 20px;border-top:1px solid var(--border);color:var(--dim);font-size:13px}
+
+/* ── Animations ── */
+@keyframes fadeUp{from{opacity:0;transform:translateY(20px)}to{opacity:1;transform:none}}
+
+/* ── Responsive ── */
+@media(max-width:600px){
+  .hero{padding:40px 16px 30px}
+  .section{padding:50px 16px}
+  .hero-btns{flex-direction:column;width:100%;max-width:300px}
+  .btn{justify-content:center}
+}
+</style>
+</head>
+<body>
+
+<!-- ═══ HERO ═══ -->
+<section class="hero">
+  <div class="hero-badge">⚙️ מערכת ניהול ייצור חכמה</div>
+  <h1>נהל את <span>המפעל שלך</span><br/>ממקום אחד</h1>
+  <p>מעקב הזמנות, שלבי עבודה, מספרים סידוריים, ביצועי עובדים ודוחות — בזמן אמת, מכל מכשיר</p>
+  <div class="hero-btns">
+    <a href="index.html" class="btn btn-primary">התחל בחינם ←</a>
+    <a href="#features" class="btn btn-outline">מה כולל?</a>
+  </div>
+</section>
+
+<!-- ═══ FEATURES ═══ -->
+<section class="section" id="features">
+  <div class="section-title">
+    <h2>הכל במקום אחד</h2>
+    <p>כלי ניהול שנבנו למפעלים — לא גיליון אקסל מנופח</p>
+  </div>
+  <div class="features-grid">
+    <div class="feature-card">
+      <div class="feature-icon">📋</div>
+      <h3>ניהול הזמנות ייצור</h3>
+      <p>מעקב מלא אחרי כל פקודת עבודה — מרגע הקליטה ועד המשלוח. שלבים, מספרים סידוריים, תמחור.</p>
+    </div>
+    <div class="feature-card">
+      <div class="feature-icon">👥</div>
+      <h3>ביצועי עובדים</h3>
+      <p>מי עובד על מה, כמה זמן לקח, יחידות לשעה, רווחיות — הכל מתועד אוטומטית.</p>
+    </div>
+    <div class="feature-card">
+      <div class="feature-icon">📊</div>
+      <h3>לוח חי בזמן אמת</h3>
+      <p>מסך גדול על קיר המפעל — מציג סטטוס עובדים, עבודות פעילות, הפסקות. מתעדכן אוטומטית.</p>
+    </div>
+    <div class="feature-card">
+      <div class="feature-icon">📱</div>
+      <h3>עובד מהטלפון</h3>
+      <p>אפליקציית PWA שנראית ומרגישה כמו אפליקציה נייטיב. עובדת גם ללא חיבור לאינטרנט.</p>
+    </div>
+    <div class="feature-card">
+      <div class="feature-icon">⚠️</div>
+      <h3>ניהול חוסרים ותקלות</h3>
+      <p>דיווח חוסרי חומרים ותקלות ישירות מרצפת הייצור. מעקב ופתרון מהיר.</p>
+    </div>
+    <div class="feature-card">
+      <div class="feature-icon">📈</div>
+      <h3>דוחות ותובנות</h3>
+      <p>דוח חודשי, מגמות ייצור, ניתוח רווחיות עובד — קבלת החלטות מבוססת נתונים.</p>
+    </div>
+  </div>
+</section>
+
+<!-- ═══ PRICING ═══ -->
+<section class="section" id="pricing">
+  <div class="section-title">
+    <h2>תמחור פשוט</h2>
+    <p>התחל בחינם, שדרג כשאתה צומח</p>
+  </div>
+  <div class="pricing-grid">
+    <!-- Free -->
+    <div class="price-card">
+      <div class="price-name">חינם</div>
+      <div class="price-amount">₪0<span> / חודש</span></div>
+      <div class="price-desc">למפעלים קטנים שרק מתחילים</div>
+      <ul class="price-features">
+        <li>עד 3 משתמשים</li>
+        <li>עד 10 הזמנות פעילות</li>
+        <li>ניהול שלבי ייצור</li>
+        <li>מספרים סידוריים</li>
+        <li>ייצוא Excel</li>
+        <li class="disabled">לוח חי</li>
+        <li class="disabled">דוחות PDF</li>
+        <li class="disabled">ייבוא Excel</li>
+      </ul>
+      <a href="index.html" class="price-btn price-btn-outline">התחל בחינם</a>
+    </div>
+    <!-- Pro -->
+    <div class="price-card popular">
+      <div class="price-badge">הכי פופולרי</div>
+      <div class="price-name">Pro</div>
+      <div class="price-amount">₪149<span> / חודש</span></div>
+      <div class="price-desc">למפעלים שגדלים ורוצים שליטה מלאה</div>
+      <ul class="price-features">
+        <li>עד 20 משתמשים</li>
+        <li>הזמנות ללא הגבלה</li>
+        <li>לוח חי בזמן אמת</li>
+        <li>דוחות PDF חודשיים</li>
+        <li>ייבוא וייצוא Excel</li>
+        <li>התראות Push</li>
+        <li>יומן ביקורת (Audit Log)</li>
+        <li>תמיכה במייל</li>
+      </ul>
+      <a href="index.html" class="price-btn price-btn-primary">14 יום ניסיון חינם ←</a>
+    </div>
+    <!-- Enterprise -->
+    <div class="price-card">
+      <div class="price-name">Enterprise</div>
+      <div class="price-amount">₪399<span> / חודש</span></div>
+      <div class="price-desc">למפעלים גדולים עם דרישות מיוחדות</div>
+      <ul class="price-features">
+        <li>משתמשים ללא הגבלה</li>
+        <li>הכל ב-Pro +</li>
+        <li>גישת API</li>
+        <li>ברנדינג מותאם אישית</li>
+        <li>תמיכה עדיפות</li>
+        <li>SLA מובטח</li>
+        <li>אינטגרציות מותאמות</li>
+        <li>הדרכה ו-Onboarding</li>
+      </ul>
+      <a href="index.html" class="price-btn price-btn-outline">צור קשר</a>
+    </div>
+  </div>
+</section>
+
+<!-- ═══ FAQ ═══ -->
+<section class="section" id="faq">
+  <div class="section-title">
+    <h2>שאלות נפוצות</h2>
+  </div>
+  <div class="faq-list">
+    <div class="faq-item">
+      <div class="faq-q" onclick="this.parentElement.classList.toggle('open')">האם צריך להתקין משהו?<span>+</span></div>
+      <div class="faq-a">לא. המערכת עובדת ישירות מהדפדפן — בטלפון, בטאבלט ובמחשב. אפשר גם להתקין כאפליקציה (PWA) לגישה מהירה יותר.</div>
+    </div>
+    <div class="faq-item">
+      <div class="faq-q" onclick="this.parentElement.classList.toggle('open')">מה קורה אם אין אינטרנט?<span>+</span></div>
+      <div class="faq-a">האפליקציה עובדת גם offline. הנתונים נשמרים מקומית ומסנכרנים אוטומטית כשהחיבור חוזר.</div>
+    </div>
+    <div class="faq-item">
+      <div class="faq-q" onclick="this.parentElement.classList.toggle('open')">כמה עובדים יכולים להשתמש?<span>+</span></div>
+      <div class="faq-a">בתוכנית החינמית עד 3 משתמשים, ב-Pro עד 20, וב-Enterprise ללא הגבלה.</div>
+    </div>
+    <div class="faq-item">
+      <div class="faq-q" onclick="this.parentElement.classList.toggle('open')">איך הנתונים מוגנים?<span>+</span></div>
+      <div class="faq-a">הנתונים מוצפנים ומאוחסנים בשרתים מאובטחים. כל חברה מבודדת לחלוטין ורואה רק את הנתונים שלה. גיבוי אוטומטי יומי.</div>
+    </div>
+    <div class="faq-item">
+      <div class="faq-q" onclick="this.parentElement.classList.toggle('open')">אפשר לבטל בכל זמן?<span>+</span></div>
+      <div class="faq-a">כן, אין התחייבות. אפשר לבטל, לשנות תוכנית, או לחזור לחינמית בכל רגע.</div>
+    </div>
+    <div class="faq-item">
+      <div class="faq-q" onclick="this.parentElement.classList.toggle('open')">האם יש תקופת ניסיון?<span>+</span></div>
+      <div class="faq-a">כן! 14 יום ניסיון חינם לתוכנית Pro — ללא כרטיס אשראי. פשוט נרשמים ומתחילים.</div>
+    </div>
+  </div>
+</section>
+
+<!-- ═══ CTA ═══ -->
+<section class="section" style="text-align:center;padding-bottom:100px">
+  <h2 style="font-size:clamp(24px,5vw,36px);font-weight:800;margin-bottom:12px">מוכן לנהל את המפעל בצורה חכמה?</h2>
+  <p style="color:var(--muted);font-size:16px;margin-bottom:28px">התחל בחינם תוך 30 שניות — בלי כרטיס אשראי</p>
+  <div style="display:flex;gap:12px;justify-content:center;flex-wrap:wrap">
+    <a href="index.html" class="btn btn-primary">התחל עכשיו ←</a>
+    <a href="index.html" class="btn btn-outline">🔍 נסה דמו</a>
+  </div>
+</section>
+
+<!-- ═══ FOOTER ═══ -->
+<footer class="footer">
+  <div>⚙️ ניהול קו ייצור — מערכת ניהול מפעל חכמה</div>
+  <div style="margin-top:8px">© 2026 כל הזכויות שמורות</div>
+</footer>
+
+</body>
+</html>
