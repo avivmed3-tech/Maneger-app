@@ -128,25 +128,29 @@ async function sha256(str){
 }
 
 // ── Supabase helpers ───────────────────────────────────────────────────────
+// Company ID is stored after login and sent as header for RLS
+let _companyId=DEFAULT_COMPANY_ID;
+function setCompanyId(id){_companyId=id||DEFAULT_COMPANY_ID}
+function sbHeaders(){return{...SB_H,"x-company-id":_companyId}}
 const SB={
   async get(table,params=""){
-    const r=await fetch(`${SB_URL}/rest/v1/${table}?${params}`,{headers:{...SB_H,"Range":"0-9999"}});
+    const r=await fetch(`${SB_URL}/rest/v1/${table}?${params}`,{headers:{...sbHeaders(),"Range":"0-9999"}});
     if(!r.ok)throw new Error(await r.text());return r.json();
   },
   async upsert(table,data){
     const arr=Array.isArray(data)?data:[data];
     if(arr.length===0)return; // Skip empty upserts
-    const r=await fetch(`${SB_URL}/rest/v1/${table}`,{method:"POST",headers:{...SB_H,"Prefer":"resolution=merge-duplicates,return=minimal"},body:JSON.stringify(arr)});
+    const r=await fetch(`${SB_URL}/rest/v1/${table}`,{method:"POST",headers:{...sbHeaders(),"Prefer":"resolution=merge-duplicates,return=minimal"},body:JSON.stringify(arr)});
     if(!r.ok)throw new Error(await r.text());
   },
   async del(table,match){
     const q=Object.entries(match).map(([k,v])=>`${k}=eq.${v}`).join("&");
-    const r=await fetch(`${SB_URL}/rest/v1/${table}?${q}`,{method:"DELETE",headers:SB_H});
+    const r=await fetch(`${SB_URL}/rest/v1/${table}?${q}`,{method:"DELETE",headers:sbHeaders()});
     if(!r.ok)throw new Error(await r.text());
   },
   async patch(table,match,data){
     const q=Object.entries(match).map(([k,v])=>`${k}=eq.${v}`).join("&");
-    const r=await fetch(`${SB_URL}/rest/v1/${table}?${q}`,{method:"PATCH",headers:{...SB_H,"Prefer":"return=minimal"},body:JSON.stringify(data)});
+    const r=await fetch(`${SB_URL}/rest/v1/${table}?${q}`,{method:"PATCH",headers:{...sbHeaders(),"Prefer":"return=minimal"},body:JSON.stringify(data)});
     if(!r.ok)throw new Error(await r.text());
   }
 };
@@ -244,6 +248,7 @@ const LS_PREFIX="pml_";
 
 // ── Utilities ──────────────────────────────────────────────────────────────
 const uid=()=>Math.random().toString(36).slice(2,9);
+const genuuid=()=>crypto.randomUUID?crypto.randomUUID():"10000000-1000-4000-8000-100000000000".replace(/[018]/g,c=>(c^crypto.getRandomValues(new Uint8Array(1))[0]&15>>c/4).toString(16));
 const fmt=d=>d?new Date(d).toLocaleDateString("he-IL"):"—";
 const fmtMoney=n=>(n!=null&&n!==""&&!isNaN(n))?"₪"+Number(n).toLocaleString("he-IL",{maximumFractionDigits:0}):"—";
 const fmtTime=mins=>{if(!mins&&mins!==0)return"—";const h=Math.floor(mins/60),m=Math.round(mins%60);return h>0?`${h}:${String(m).padStart(2,"0")} שע'`:`${m} דק'`};
@@ -553,10 +558,10 @@ function LoginScreen({onLogin,lightMode,toggleLight}){
       const existing=await SB.get("app_users",`username=eq.${encodeURIComponent(regUser.trim())}`);
       if(existing&&existing.length>0){setErr("שם משתמש תפוס");setLoading(false);return}
       // Create company
-      const compId=uid();
+      const compId=genuuid();
       await SB.upsert("companies",[{id:compId,name:companyName.trim(),slug:companyName.trim().toLowerCase().replace(/\s+/g,"-").replace(/[^a-z0-9\u0590-\u05ff-]/g,"")}]);
       // Create free subscription
-      await SB.upsert("subscriptions",[{id:uid(),company_id:compId,plan:"free",status:"trial",trial_ends_at:new Date(Date.now()+14*24*3600000).toISOString(),max_users:3,max_orders:10}]);
+      await SB.upsert("subscriptions",[{id:genuuid(),company_id:compId,plan:"free",status:"trial",trial_ends_at:new Date(Date.now()+14*24*3600000).toISOString(),max_users:3,max_orders:10}]);
       // Create admin user
       const hash=await sha256(regPass);
       const adminUser={id:uid(),username:regUser.trim(),password_hash:hash,role:"admin",name:adminName.trim(),project_access:"all",stage_access:"all",can_edit:true,can_view:true,active:true,hourly_rate:0,company_id:compId};
@@ -3256,7 +3261,7 @@ function App(){
           const s3=JSON.parse(saved);
           const freshUsers=users?.length?users:getUsers();
           const found=freshUsers.find(u=>u.id===s3.id&&u.username===s3.username&&u.active!==false);
-          if(found)setCurrentUser(found);else{localStorage.removeItem(LS_PREFIX+"session");setCurrentUser(null)}
+          if(found){setCurrentUser(found);setCompanyId(found.companyId||s3.companyId||DEFAULT_COMPANY_ID)}else{localStorage.removeItem(LS_PREFIX+"session");setCurrentUser(null)}
         }
       }catch{}
       setLoading(false);
@@ -3410,9 +3415,10 @@ function App(){
 
   const handleLogin=u=>{
     setCurrentUser(u);
-    try{localStorage.setItem(LS_PREFIX+"session",JSON.stringify({id:u.id,username:u.username}))}catch{}
-    // Load company subscription plan
     const cid=u.companyId||DEFAULT_COMPANY_ID;
+    setCompanyId(cid); // Set for all future SB requests (RLS)
+    try{localStorage.setItem(LS_PREFIX+"session",JSON.stringify({id:u.id,username:u.username,companyId:cid}))}catch{}
+    // Load company subscription plan
     SB.get("subscriptions",`company_id=eq.${cid}&status=eq.active`).then(rows=>{
       if(rows&&rows.length>0)setCompanyPlan(rows[0].plan||"free");
     }).catch(()=>{});
@@ -3651,10 +3657,10 @@ function App(){
     try{
       // Delete demo records by ID prefix using Supabase like operator
       await Promise.all([
-        fetch(`${SB_URL}/rest/v1/work_logs?id=like.wl_demo_*`,{method:"DELETE",headers:SB_H}),
-        fetch(`${SB_URL}/rest/v1/custom_tasks?id=like.demo_t_*`,{method:"DELETE",headers:SB_H}),
+        fetch(`${SB_URL}/rest/v1/work_logs?id=like.wl_demo_*`,{method:"DELETE",headers:sbHeaders()}),
+        fetch(`${SB_URL}/rest/v1/custom_tasks?id=like.demo_t_*`,{method:"DELETE",headers:sbHeaders()}),
       ]);
-      await fetch(`${SB_URL}/rest/v1/orders?id=like.demo_o_*`,{method:"DELETE",headers:SB_H});
+      await fetch(`${SB_URL}/rest/v1/orders?id=like.demo_o_*`,{method:"DELETE",headers:sbHeaders()});
       const data=await dbLoadAll();
       if(data.orders){setOrders(data.orders);LS.set("orders",data.orders)}
       if(data.workLogs){setWorkLogs(data.workLogs);LS.set("workLogs",data.workLogs)}
@@ -3665,7 +3671,7 @@ function App(){
   };
   useEffect(()=>{const isi=window.matchMedia("(display-mode:standalone)").matches||window.navigator.standalone;if(isi)return;const h=e=>{e.preventDefault();setInstallPrompt(e);setShowInstall(true)};window.addEventListener("beforeinstallprompt",h);window.addEventListener("appinstalled",()=>{setShowInstall(false);setInstallPrompt(null)});return()=>window.removeEventListener("beforeinstallprompt",h)},[]);
   // Service Worker
-  useEffect(()=>{if(!("serviceWorker" in navigator))return;navigator.serviceWorker.register("./sw.js?v=14").then(reg=>{swRegRef.current=reg;if(reg.waiting)setShowUpdate(true);reg.addEventListener("updatefound",()=>{const nw=reg.installing;if(!nw)return;nw.addEventListener("statechange",()=>{if(nw.state==="installed"&&navigator.serviceWorker.controller)setShowUpdate(true)})});setInterval(()=>reg.update(),30*60*1000)}).catch(()=>{});navigator.serviceWorker.addEventListener("controllerchange",()=>window.location.reload())},[]);
+  useEffect(()=>{if(!("serviceWorker" in navigator))return;navigator.serviceWorker.register("./sw.js?v=15").then(reg=>{swRegRef.current=reg;if(reg.waiting)setShowUpdate(true);reg.addEventListener("updatefound",()=>{const nw=reg.installing;if(!nw)return;nw.addEventListener("statechange",()=>{if(nw.state==="installed"&&navigator.serviceWorker.controller)setShowUpdate(true)})});setInterval(()=>reg.update(),30*60*1000)}).catch(()=>{});navigator.serviceWorker.addEventListener("controllerchange",()=>window.location.reload())},[]);
   // Network status
   useEffect(()=>{const on=()=>{setIsOffline(false);toast("החיבור חזר — מסנכרן נתונים...","success");refreshFromDB(true)};const off=()=>{setIsOffline(true)};window.addEventListener("online",on);window.addEventListener("offline",off);return()=>{window.removeEventListener("online",on);window.removeEventListener("offline",off)}},[]);
   // PWA Install
