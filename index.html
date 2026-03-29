@@ -206,13 +206,15 @@ const projectToDb=p=>({id:p.id,name:p.name,company_id:p.companyId||DEFAULT_COMPA
 
 // ── DB load all ────────────────────────────────────────────────────────────
 async function dbLoadAll(){
+  const cid=_companyId||DEFAULT_COMPANY_ID;
+  const cf=`company_id=eq.${cid}&`;
   const [orders,projects,stages,blocks,logs,tasks]=await Promise.all([
-    SB.get("orders","order=created_at.asc"),
-    SB.get("projects","order=name.asc"),
-    SB.get("stages","order=stage_order.asc"),
-    SB.get("stage_blocks","order=created_at.asc"),
-    SB.get("work_logs","order=created_at.asc"),
-    SB.get("custom_tasks","order=created_at.asc"),
+    SB.get("orders",cf+"order=created_at.asc"),
+    SB.get("projects",cf+"order=name.asc"),
+    SB.get("stages",cf+"order=stage_order.asc"),
+    SB.get("stage_blocks",cf+"order=created_at.asc"),
+    SB.get("work_logs",cf+"order=created_at.asc"),
+    SB.get("custom_tasks",cf+"order=created_at.asc"),
   ]);
   return{
     orders:orders.map(dbToOrder),projects:projects.map(dbToProject),
@@ -221,7 +223,8 @@ async function dbLoadAll(){
   };
 }
 async function dbLoadUsers(){
-  const rows=await SB.get("app_users","order=name.asc");
+  const cid=_companyId||DEFAULT_COMPANY_ID;
+  const rows=await SB.get("app_users",`company_id=eq.${cid}&order=name.asc`);
   return rows.map(dbToUser);
 }
 const FALLBACK_USERS=[
@@ -3365,12 +3368,13 @@ function App(){
             console.log("Realtime change:",tbl);
             // Small delay to let write finish
             await new Promise(r=>setTimeout(r,300));
-            if(["orders"].includes(tbl)){const rows=await SB.get("orders","order=created_at.asc");setOrders(rows.map(dbToOrder));LS.set("orders",rows.map(dbToOrder))}
-            if(["work_logs"].includes(tbl)){const rows=await SB.get("work_logs","order=created_at.asc");setWorkLogs(rows.map(dbToLog));LS.set("workLogs",rows.map(dbToLog))}
-            if(["custom_tasks"].includes(tbl)){const rows=await SB.get("custom_tasks","order=created_at.asc");setCustomTasks(rows.map(dbToTask));LS.set("customTasks",rows.map(dbToTask))}
-            if(["stages"].includes(tbl)){const rows=await SB.get("stages","order=stage_order.asc");setStages(rows.map(dbToStage));LS.set("stages",rows.map(dbToStage))}
-            if(["projects"].includes(tbl)){const rows=await SB.get("projects","order=name.asc");setProjects(rows.map(dbToProject));LS.set("projects",rows.map(dbToProject))}
-            if(["stage_blocks"].includes(tbl)){const rows=await SB.get("stage_blocks","order=created_at.asc");setStageBlocks(rows.map(dbToBlock));LS.set("stageBlocks",rows.map(dbToBlock))}
+            const cf=`company_id=eq.${_companyId}&`;
+            if(["orders"].includes(tbl)){const rows=await SB.get("orders",cf+"order=created_at.asc");setOrders(rows.map(dbToOrder));LS.set("orders",rows.map(dbToOrder))}
+            if(["work_logs"].includes(tbl)){const rows=await SB.get("work_logs",cf+"order=created_at.asc");setWorkLogs(rows.map(dbToLog));LS.set("workLogs",rows.map(dbToLog))}
+            if(["custom_tasks"].includes(tbl)){const rows=await SB.get("custom_tasks",cf+"order=created_at.asc");setCustomTasks(rows.map(dbToTask));LS.set("customTasks",rows.map(dbToTask))}
+            if(["stages"].includes(tbl)){const rows=await SB.get("stages",cf+"order=stage_order.asc");setStages(rows.map(dbToStage));LS.set("stages",rows.map(dbToStage))}
+            if(["projects"].includes(tbl)){const rows=await SB.get("projects",cf+"order=name.asc");setProjects(rows.map(dbToProject));LS.set("projects",rows.map(dbToProject))}
+            if(["stage_blocks"].includes(tbl)){const rows=await SB.get("stage_blocks",cf+"order=created_at.asc");setStageBlocks(rows.map(dbToBlock));LS.set("stageBlocks",rows.map(dbToBlock))}
           }catch(err){console.warn("Realtime msg error",err)}
         };
         ws.onclose=()=>{
