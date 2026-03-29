@@ -403,29 +403,31 @@ function LoginScreen({onLogin,lightMode,toggleLight}){
     if(!username.trim()||!password.trim()){setErr("יש למלא שם משתמש וסיסמה");return}
     setLoading(true);setErr("");
     try{
-      // Hash password with SHA-256
       const hash=await sha256(password);
-      // Fetch from Supabase
       const rows=await SB.get("app_users",`username=eq.${encodeURIComponent(username.trim())}&active=eq.true`);
-      if(!rows||rows.length===0){setErr("שם משתמש או סיסמה שגויים");setLoading(false);return}
+      if(!rows||rows.length===0){setErr("שם משתמש לא נמצא במערכת");setLoading(false);return}
       const row=rows[0];
-      if(row.password_hash!==hash){setErr("שם משתמש או סיסמה שגויים");setLoading(false);return}
+      if(row.password_hash!==hash){
+        setErr(`סיסמה שגויה`);
+        setLoading(false);return;
+      }
       const u=dbToUser(row);
-      // Update local cache
       const cached=getUsers();
       const upd=cached.some(c=>c.id===u.id)?cached.map(c=>c.id===u.id?u:c):[...cached,u];
       LS.set("users",upd);
       addAuditEntry({userId:u.id,username:u.username,name:u.name,action:"התחברות",target:"",details:""});
       onLogin(u);
     }catch(e){
+      console.error("Login error:",e);
       // Fallback to local cache if Supabase unreachable
-      const users=getUsers();
-      sha256(password).then(hash=>{
+      try{
+        const hash=await sha256(password);
+        const users=getUsers();
         const u=users.find(u=>u.username===username.trim()&&(u.password_hash===hash||u.password===password)&&u.active!==false);
-        if(!u){setErr("שם משתמש או סיסמה שגויים (offline)");setLoading(false);return}
+        if(!u){setErr(`שגיאת חיבור לשרת: ${e.message||e}`);setLoading(false);return}
         addAuditEntry({userId:u.id,username:u.username,name:u.name,action:"התחברות (offline)",target:"",details:""});
         onLogin(u);
-      });
+      }catch(e2){setErr(`שגיאה: ${e2.message||e2}`);}
     }
     setLoading(false);
   };
