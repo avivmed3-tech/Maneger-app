@@ -1,4 +1,4 @@
-const CACHE='pml-v3';
+const CACHE='pml-v4';
 const ASSETS=['./','./index.html','./manifest.json'];
 
 self.addEventListener('install',e=>{
@@ -24,4 +24,22 @@ self.addEventListener('fetch',e=>{
 
 self.addEventListener('message',e=>{
   if(e.data&&e.data.type==='SKIP_WAITING')self.skipWaiting();
+  if(e.data&&e.data.type==='NOTIFY'){
+    self.registration.showNotification(e.data.title,{
+      body:e.data.body,
+      icon:'./icon-192.png',
+      badge:'./icon-192.png',
+      tag:e.data.tag||'pml-notify',
+      renotify:true,
+      data:{url:e.data.url||'/'}
+    });
+  }
+});
+
+self.addEventListener('notificationclick',e=>{
+  e.notification.close();
+  e.waitUntil(clients.matchAll({type:'window'}).then(cs=>{
+    if(cs.length>0){cs[0].focus();return}
+    return clients.openWindow(e.notification.data?.url||'/');
+  }));
 });

@@ -3,6 +3,7 @@
 <head>
 <meta charset="utf-8"/>
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"/>
+<meta http-equiv="Content-Security-Policy" content="default-src 'self' 'unsafe-inline' 'unsafe-eval'; connect-src 'self' https://*.supabase.co wss://*.supabase.co https://cdnjs.cloudflare.com https://cdn.jsdelivr.net; script-src 'self' 'unsafe-inline' 'unsafe-eval' https://cdnjs.cloudflare.com https://cdn.jsdelivr.net; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:;"/>
 <meta name="theme-color" content="#0a0e1a" id="tcm"/>
 <meta name="apple-mobile-web-app-capable" content="yes"/>
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent"/>
@@ -79,8 +80,105 @@ button{font-family:inherit;cursor:pointer}
 const {useState,useEffect,useCallback,useRef,useMemo}=React;
 
 // ── Config ─────────────────────────────────────────────────────────────────
-const GS_URL="https://script.google.com/macros/s/AKfycbwtX-uluEd_hLBc21ZIU7YBlHvWvoFa2kB7BWa8tXwN-LlWHBZTR55s5j-bsGsmrVXymw/exec";
-const APP_VERSION="2.0.0";const APP_DATE="2026-03-19";
+const APP_VERSION="3.0.0";const APP_DATE="2026-03-28";
+const SB_URL="https://lwiurzkiojctwzllpnmr.supabase.co";
+const SB_KEY="eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imx3aXVyemtpb2pjdHd6bGxwbm1yIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzQ2MjU4NTAsImV4cCI6MjA5MDIwMTg1MH0.jWOnAtsjbefoY18ofSd46WMdgY47Vv4k7LgcHdOrj6Q";
+const SB_H={"Content-Type":"application/json","apikey":SB_KEY,"Authorization":"Bearer "+SB_KEY};
+
+// ── SHA-256 password hashing ────────────────────────────────────────────────
+async function sha256(str){
+  const buf=await crypto.subtle.digest("SHA-256",new TextEncoder().encode(str));
+  return Array.from(new Uint8Array(buf)).map(b=>b.toString(16).padStart(2,"0")).join("");
+}
+
+// ── Supabase helpers ───────────────────────────────────────────────────────
+const SB={
+  async get(table,params=""){
+    const r=await fetch(`${SB_URL}/rest/v1/${table}?${params}`,{headers:{...SB_H,"Range":"0-9999"}});
+    if(!r.ok)throw new Error(await r.text());return r.json();
+  },
+  async upsert(table,data){
+    const r=await fetch(`${SB_URL}/rest/v1/${table}`,{method:"POST",headers:{...SB_H,"Prefer":"resolution=merge-duplicates,return=minimal"},body:JSON.stringify(Array.isArray(data)?data:[data])});
+    if(!r.ok)throw new Error(await r.text());
+  },
+  async del(table,match){
+    const q=Object.entries(match).map(([k,v])=>`${k}=eq.${v}`).join("&");
+    const r=await fetch(`${SB_URL}/rest/v1/${table}?${q}`,{method:"DELETE",headers:SB_H});
+    if(!r.ok)throw new Error(await r.text());
+  },
+  async patch(table,match,data){
+    const q=Object.entries(match).map(([k,v])=>`${k}=eq.${v}`).join("&");
+    const r=await fetch(`${SB_URL}/rest/v1/${table}?${q}`,{method:"PATCH",headers:{...SB_H,"Prefer":"return=minimal"},body:JSON.stringify(data)});
+    if(!r.ok)throw new Error(await r.text());
+  }
+};
+
+// ── DB row converters (DB → App format) ────────────────────────────────────
+const dbToUser=r=>({id:r.id,username:r.username,password_hash:r.password_hash,role:r.role,name:r.name,
+  projectAccess:r.project_access,stageAccess:r.stage_access,
+  canEdit:r.can_edit,canView:r.can_view,active:r.active,hourlyRate:r.hourly_rate});
+const userToDb=u=>({id:u.id,username:u.username,password_hash:u.password_hash||u.passwordHash||"",
+  role:u.role,name:u.name,project_access:u.projectAccess,stage_access:u.stageAccess,
+  can_edit:u.canEdit,can_view:u.canView,active:u.active!==false,hourly_rate:Number(u.hourlyRate||0)});
+const dbToOrder=r=>({id:r.id,woNumber:r.wo_number,pn:r.pn,description:r.description,qty:r.qty,
+  unitPrice:r.unit_price,projectId:r.project_id,receivedDate:r.received_date,targetDate:r.target_date,
+  stageIds:r.stage_ids,blockId:r.block_id,serials:r.serials,shortages:r.shortages,
+  defects:r.defects,deliveredSerials:r.delivered_serials,status:r.status});
+const orderToDb=o=>({id:o.id,wo_number:o.woNumber,pn:o.pn||null,description:o.description||null,
+  qty:Number(o.qty)||0,unit_price:Number(o.unitPrice)||0,project_id:o.projectId||null,
+  received_date:o.receivedDate||null,target_date:o.targetDate||null,stage_ids:o.stageIds||[],
+  block_id:o.blockId||null,serials:o.serials||[],shortages:o.shortages||[],
+  defects:o.defects||[],delivered_serials:o.deliveredSerials||[],status:o.status||"open",
+  updated_at:new Date().toISOString()});
+const dbToLog=r=>({id:r.id,userId:r.user_id,userName:r.user_name,serialId:r.serial_id,
+  serialSn:r.serial_sn,stageId:r.stage_id,orderId:r.order_id,startTime:r.start_time,
+  endTime:r.end_time,completed:r.completed,durationMin:r.duration_min,paused:r.paused,
+  pauseStart:r.pause_start,totalPauseMin:r.total_pause_min,pauseLog:r.pause_log,
+  bulk:r.bulk,bulkGroupId:r.bulk_group_id,bulkCount:r.bulk_count});
+const logToDb=w=>({id:w.id,user_id:w.userId,user_name:w.userName,serial_id:w.serialId||null,
+  serial_sn:w.serialSn||null,stage_id:w.stageId||null,order_id:w.orderId||null,
+  start_time:w.startTime||null,end_time:w.endTime||null,completed:w.completed||false,
+  duration_min:Number(w.durationMin||0),paused:w.paused||false,pause_start:w.pauseStart||null,
+  total_pause_min:Number(w.totalPauseMin||0),pause_log:w.pauseLog||[],
+  bulk:w.bulk||false,bulk_group_id:w.bulkGroupId||null,bulk_count:w.bulkCount||null});
+const dbToTask=r=>({id:r.id,userId:r.user_id,userName:r.user_name,name:r.name,
+  description:r.description,price:r.price,active:r.active,completed:r.completed,partial:r.partial,
+  startTime:r.start_time,endTime:r.end_time,durationMin:r.duration_min,paused:r.paused,
+  pauseStart:r.pause_start,totalPauseMin:r.total_pause_min,pauseLog:r.pause_log,
+  createdAt:r.created_at});
+const taskToDb=t=>({id:t.id,user_id:t.userId,user_name:t.userName,name:t.name,
+  description:t.description||null,price:Number(t.price||0),active:t.active||false,
+  completed:t.completed||false,partial:t.partial||false,start_time:t.startTime||null,
+  end_time:t.endTime||null,duration_min:Number(t.durationMin||0),paused:t.paused||false,
+  pause_start:t.pauseStart||null,total_pause_min:Number(t.totalPauseMin||0),
+  pause_log:t.pauseLog||[],updated_at:new Date().toISOString()});
+const dbToStage=r=>({id:r.id,name:r.name,order:r.stage_order,color:r.color,price:r.price});
+const stageToDb=s=>({id:s.id,name:s.name,stage_order:s.order||0,color:s.color||"#3b82f6",price:Number(s.price||0)});
+const dbToBlock=r=>({id:r.id,name:r.name,stages:r.stages});
+const blockToDb=b=>({id:b.id,name:b.name,stages:b.stages||[]});
+const dbToProject=r=>({id:r.id,name:r.name});
+const projectToDb=p=>({id:p.id,name:p.name});
+
+// ── DB load all ────────────────────────────────────────────────────────────
+async function dbLoadAll(){
+  const [orders,projects,stages,blocks,logs,tasks]=await Promise.all([
+    SB.get("orders","order=created_at.asc"),
+    SB.get("projects","order=name.asc"),
+    SB.get("stages","order=stage_order.asc"),
+    SB.get("stage_blocks","order=created_at.asc"),
+    SB.get("work_logs","order=created_at.asc"),
+    SB.get("custom_tasks","order=created_at.asc"),
+  ]);
+  return{
+    orders:orders.map(dbToOrder),projects:projects.map(dbToProject),
+    stages:stages.map(dbToStage),stageBlocks:blocks.map(dbToBlock),
+    workLogs:logs.map(dbToLog),customTasks:tasks.map(dbToTask)
+  };
+}
+async function dbLoadUsers(){
+  const rows=await SB.get("app_users","order=name.asc");
+  return rows.map(dbToUser);
+}
 const FALLBACK_USERS=[
   {id:"admin",username:"admin",password:"admin123",role:"admin",name:"מנהל מערכת",projectAccess:"all",stageAccess:"all",canEdit:true,canView:true,active:true,hourlyRate:0},
   {id:"w1",username:"yossi",password:"1234",role:"worker",name:"יוסי כהן",projectAccess:"all",stageAccess:["s1","s2","s3"],canEdit:false,canView:true,active:true,hourlyRate:55},
@@ -115,17 +213,28 @@ const mkKey=d=>d?d.slice(0,7):null;
 const qK=d=>{if(!d)return null;const[y,m]=d.split("-");return`${y}-Q${Math.ceil(Number(m)/3)}`};
 const yK=d=>d?d.slice(0,4):null;
 
-// ── Storage ────────────────────────────────────────────────────────────────
+// ── LocalStorage cache (גיבוי מקומי לעבודה offline) ──────────────────────
 const LS={
   get:k=>{try{const v=localStorage.getItem(LS_PREFIX+k);return v?JSON.parse(v):null}catch{return null}},
   set:(k,v)=>{try{localStorage.setItem(LS_PREFIX+k,JSON.stringify(v))}catch{}}
 };
 function getUsers(){try{const u=localStorage.getItem(LS_PREFIX+"users");return u?JSON.parse(u):FALLBACK_USERS}catch{return FALLBACK_USERS}}
-function saveUsers(u){LS.set("users",u);fetch(GS_URL,{method:"POST",body:JSON.stringify({action:"saveUsers",users:u})}).catch(()=>{})}
-async function gsLoad(){try{const r=await fetch(GS_URL+"?t="+Date.now());const t=await r.text();const d=JSON.parse(t);return d&&d.orders?d:null}catch{return null}}
-async function gsLoadUsers(){try{const r=await fetch(GS_URL+"?type=users&t="+Date.now());const t=await r.text();const d=JSON.parse(t);if(Array.isArray(d)&&d.length>0){LS.set("users",d);return d}return null}catch{return null}}
+async function saveUsers(users){
+  LS.set("users",users);
+  try{await SB.upsert("app_users",users.map(userToDb))}catch(e){console.warn("saveUsers error",e)}
+}
 function getAuditLog(){return LS.get("audit")||[]}
-function addAuditEntry(entry){try{const log=getAuditLog();log.unshift({...entry,id:uid(),timestamp:nowISO(),reverted:false});LS.set("audit",log.slice(0,1000))}catch{}}
+function addAuditEntry(entry){
+  try{
+    const log=getAuditLog();
+    const e={...entry,id:uid(),timestamp:nowISO(),reverted:false};
+    log.unshift(e);LS.set("audit",log.slice(0,1000));
+    // Save audit to DB asynchronously (non-blocking)
+    SB.upsert("audit_log",{id:e.id,user_id:e.userId||null,username:e.username||null,
+      name:e.name||null,action:e.action,target:e.target||null,details:e.details||null,
+      reverted:false,can_undo:e.canUndo||false}).catch(()=>{});
+  }catch{}
+}
 
 // ── Auth Context ───────────────────────────────────────────────────────────
 const AuthCtx=React.createContext(null);
@@ -291,13 +400,34 @@ function LoginScreen({onLogin,lightMode,toggleLight}){
   const [showPass,setShowPass]=useState(false);
   const [loading,setLoading]=useState(false);
   const attempt=async()=>{
+    if(!username.trim()||!password.trim()){setErr("יש למלא שם משתמש וסיסמה");return}
     setLoading(true);setErr("");
-    await new Promise(r=>setTimeout(r,200));
-    const users=getUsers();
-    const u=users.find(u=>u.username===username&&u.password===password&&u.active!==false);
-    if(!u){setErr("שם משתמש או סיסמה שגויים");setLoading(false);return}
-    addAuditEntry({userId:u.id,username:u.username,name:u.name,action:"התחברות",target:"",details:""});
-    onLogin(u);
+    try{
+      // Hash password with SHA-256
+      const hash=await sha256(password);
+      // Fetch from Supabase
+      const rows=await SB.get("app_users",`username=eq.${encodeURIComponent(username.trim())}&active=eq.true`);
+      if(!rows||rows.length===0){setErr("שם משתמש או סיסמה שגויים");setLoading(false);return}
+      const row=rows[0];
+      if(row.password_hash!==hash){setErr("שם משתמש או סיסמה שגויים");setLoading(false);return}
+      const u=dbToUser(row);
+      // Update local cache
+      const cached=getUsers();
+      const upd=cached.some(c=>c.id===u.id)?cached.map(c=>c.id===u.id?u:c):[...cached,u];
+      LS.set("users",upd);
+      addAuditEntry({userId:u.id,username:u.username,name:u.name,action:"התחברות",target:"",details:""});
+      onLogin(u);
+    }catch(e){
+      // Fallback to local cache if Supabase unreachable
+      const users=getUsers();
+      sha256(password).then(hash=>{
+        const u=users.find(u=>u.username===username.trim()&&(u.password_hash===hash||u.password===password)&&u.active!==false);
+        if(!u){setErr("שם משתמש או סיסמה שגויים (offline)");setLoading(false);return}
+        addAuditEntry({userId:u.id,username:u.username,name:u.name,action:"התחברות (offline)",target:"",details:""});
+        onLogin(u);
+      });
+    }
+    setLoading(false);
   };
   const lm=lightMode;
   return(
@@ -464,48 +594,6 @@ function Dashboard({orders,projects,stages,users,workLogs}){
           <div style={{flex:1,display:"flex",alignItems:"center",justifyContent:"center"}}><DonutChart data={donutData} size={170}/></div>
         </Card>
       </div>
-
-      {/* Revenue vs Expenses Trend */}
-      <Card style={{marginBottom:12}}>
-        <div style={{fontWeight:700,fontSize:14,marginBottom:12}}>📈 מגמת הכנסות מול הוצאות</div>
-        {(()=>{
-          // Build expenses by period
-          const expByPeriod={};
-          fLogs.forEach(w=>{
-            const k=keyFn(w.endTime);if(!k)return;
-            const u=users.find(u2=>u2.id===w.userId);
-            const cost=(w.durationMin||0)*(Number(u?.hourlyRate||0)/60);
-            if(!expByPeriod[k])expByPeriod[k]=0;
-            expByPeriod[k]+=cost;
-          });
-          const allKeys=[...new Set([...pKeys,...Object.keys(expByPeriod)])].sort().slice(-10);
-          const maxVal=Math.max(...allKeys.map(k=>Math.max(revByPeriod[k]?.rev||0,expByPeriod[k]||0)),1);
-          const MN2=["","ינו","פבר","מרץ","אפר","מאי","יונ","יול","אוג","ספט","אוק","נוב","דצמ"];
-          const fmtL2=l=>{if(/^\d{4}-\d{2}$/.test(l)){const[y,m]=l.split("-");return MN2[+m]+"'"+y.slice(2)}if(/^\d{4}-Q\d/.test(l)){const p2=l.split("-");return p2[1]+"'"+p2[0].slice(2)}return l};
-          if(allKeys.length===0)return<div style={{color:"var(--c-dim)",textAlign:"center",padding:20}}>אין נתונים</div>;
-          const W2=480,H2=160,padL2=50,padR2=12,padT2=20,padB2=44;
-          const slotW2=(W2-padL2-padR2)/allKeys.length;
-          const bw2=Math.min(18,slotW2*.35);
-          return(<svg viewBox={`0 0 ${W2} ${H2+padT2+padB2}`} style={{width:"100%",height:"auto"}}>
-            {[0,.25,.5,.75,1].map((f,i)=>{const y=padT2+H2-(f*H2);const v=Math.round(maxVal*f);return(<g key={i}><line x1={padL2} y1={y} x2={W2-padR2} y2={y} stroke="var(--c-chart-grid)" strokeWidth={1} strokeDasharray={i===0?"":"3 3"} opacity={i===0?1:.3}/><text x={padL2-6} y={y+4} textAnchor="end" fill="var(--c-chart-label)" fontSize={9} fontFamily="sans-serif">{v>=1e3?(v/1e3).toFixed(0)+"K":v}</text></g>)})}
-            {allKeys.map((k,i)=>{
-              const x=padL2+i*slotW2+slotW2/2;
-              const rev2=revByPeriod[k]?.rev||0;const exp2=expByPeriod[k]||0;
-              const hR=Math.max((rev2/maxVal)*H2,2);const hE=Math.max((exp2/maxVal)*H2,2);
-              return(<g key={k}>
-                <rect x={x-bw2-1} y={padT2+H2-hR} width={bw2} height={hR} rx={3} fill="#a78bfa"/>
-                <rect x={x+1} y={padT2+H2-hE} width={bw2} height={hE} rx={3} fill="#f97316"/>
-                <text x={x} y={padT2+H2+18} textAnchor="middle" fill="var(--c-chart-label)" fontSize={10} fontFamily="sans-serif">{fmtL2(k)}</text>
-              </g>);
-            })}
-            <line x1={padL2} y1={padT2+H2} x2={W2-padR2} y2={padT2+H2} stroke="var(--c-chart-grid)" strokeWidth={1.5}/>
-          </svg>);
-        })()}
-        <div style={{display:"flex",gap:16,justifyContent:"center",marginTop:8}}>
-          <div style={{display:"flex",alignItems:"center",gap:5}}><div style={{width:10,height:10,borderRadius:2,background:"#a78bfa"}}/><span style={{fontSize:11,color:"var(--c-muted)"}}>הכנסות</span></div>
-          <div style={{display:"flex",alignItems:"center",gap:5}}><div style={{width:10,height:10,borderRadius:2,background:"#f97316"}}/><span style={{fontSize:11,color:"var(--c-muted)"}}>הוצאות</span></div>
-        </div>
-      </Card>
 
       {/* Revenue & Cost trend - Line Chart */}
       <Card style={{marginBottom:12}}>
@@ -1081,9 +1169,169 @@ function Shortages({orders,updO,projects}){
 }
 
 // ══════════════════════════════════════════════════════════════════════════
+// ═══ ADMIN TASKS BOARD ══════════════════════════════════════════════════
+// ══════════════════════════════════════════════════════════════════════════
+function AdminTasksBoard({customTasks,onDeleteTask,onMarkPartialTask,onMarkDoneTask}){
+  const [taskView,setTaskView]=useState("board");
+  const [detailTask,setDetailTask]=useState(null);
+  const openTasks=(customTasks||[]).filter(t=>!t.completed&&!t.partial);
+  const partialTasks=(customTasks||[]).filter(t=>!t.completed&&t.partial);
+  const doneTasks=(customTasks||[]).filter(t=>t.completed);
+  const workerSummary={};
+  (customTasks||[]).filter(t=>!t.completed).forEach(t=>{
+    if(!workerSummary[t.userId])workerSummary[t.userId]={name:t.userName,open:0,partial:0};
+    if(t.partial)workerSummary[t.userId].partial++;else workerSummary[t.userId].open++;
+  });
+  const TaskCard=({t,accent})=>(
+    <div style={{background:"var(--c-deep)",borderRadius:10,padding:"12px 14px",border:t.partial?"1px solid #3b82f655":t.active?`1px solid ${accent||"#a78bfa"}`:"1px solid var(--c-border)",cursor:"pointer"}}
+      onClick={()=>setDetailTask(t)}>
+      <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",gap:6,flexWrap:"wrap"}}>
+        <div style={{flex:1,minWidth:0}}>
+          <div style={{display:"flex",alignItems:"center",gap:6,flexWrap:"wrap",marginBottom:4}}>
+            <span style={{fontWeight:700,fontSize:14}}>{t.name}</span>
+            {t.partial&&<span style={{fontSize:11,background:"#3b82f622",color:"#60a5fa",padding:"2px 8px",borderRadius:12,border:"1px solid #3b82f633"}}>🔄 חלקית</span>}
+            {t.active&&!t.partial&&<span style={{fontSize:11,background:"#a78bfa22",color:"#a78bfa",padding:"2px 8px",borderRadius:12}}>⚡ פעיל</span>}
+            {t.price>0&&<span style={{fontSize:11,color:"#10b981"}}>₪{t.price}</span>}
+          </div>
+          <div style={{display:"flex",gap:8,flexWrap:"wrap",alignItems:"center"}}>
+            <span style={{fontSize:12,background:"#60a5fa22",color:"#60a5fa",padding:"2px 8px",borderRadius:8}}>👤 {t.userName}</span>
+            {t.description&&<span style={{fontSize:11,color:"var(--c-dim)",overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",maxWidth:200}}>{t.description}</span>}
+          </div>
+        </div>
+        <div style={{display:"flex",flexDirection:"column",alignItems:"flex-end",gap:3,flexShrink:0}}>
+          <div style={{fontSize:11,color:"var(--c-dim)"}}>הוקצה: {fmt(t.createdAt?.slice(0,10))}</div>
+          {t.endTime&&<div style={{fontSize:11,color:"#10b981"}}>הסתיים: {fmt(t.endTime?.slice(0,10))}</div>}
+          <div style={{display:"flex",gap:4}}>
+            <button onClick={e=>{e.stopPropagation();onMarkPartialTask&&onMarkPartialTask(t.id)}} title="סמן חלקית" style={{background:t.partial?"#3b82f633":"transparent",border:"1px solid #3b82f644",borderRadius:6,padding:"3px 7px",fontSize:11,color:"#60a5fa",fontFamily:"inherit",cursor:"pointer"}}>〰️</button>
+            <button onClick={e=>{e.stopPropagation();onMarkDoneTask&&onMarkDoneTask(t.id)}} title="סמן כבוצע" style={{background:"transparent",border:"1px solid #10b98144",borderRadius:6,padding:"3px 7px",fontSize:11,color:"#10b981",fontFamily:"inherit",cursor:"pointer"}}>✅</button>
+            <IBtn onClick={e=>{e.stopPropagation();if(confirm("למחוק משימה?"))onDeleteTask(t.id)}}>🗑️</IBtn>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+  return(
+    <Card style={{marginBottom:14,border:"1px solid #a78bfa33"}}>
+      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:12,flexWrap:"wrap",gap:8}}>
+        <div style={{fontWeight:700,fontSize:15,color:"#a78bfa"}}>📌 לוח משימות</div>
+        <div style={{display:"flex",gap:6,alignItems:"center",flexWrap:"wrap"}}>
+          <span style={{fontSize:12,background:"#f59e0b22",color:"#f59e0b",padding:"3px 10px",borderRadius:12}}>{openTasks.length} פתוחות</span>
+          <span style={{fontSize:12,background:"#3b82f622",color:"#60a5fa",padding:"3px 10px",borderRadius:12}}>{partialTasks.length} חלקיות</span>
+          <span style={{fontSize:12,background:"#10b98122",color:"#10b981",padding:"3px 10px",borderRadius:12}}>{doneTasks.length} הושלמו</span>
+          <SegBtn options={[["board","כרטיסים"],["summary","סיכום"]]} value={taskView} onChange={setTaskView}/>
+        </div>
+      </div>
+
+      {taskView==="summary"&&(
+        <div>
+          <div style={{fontWeight:600,fontSize:13,color:"var(--c-dim)",marginBottom:8}}>משימות פתוחות לפי עובד</div>
+          {Object.keys(workerSummary).length===0?<div style={{color:"var(--c-dim)",textAlign:"center",padding:14}}>אין משימות פתוחות</div>:(
+            <div style={{display:"flex",flexDirection:"column",gap:6,marginBottom:14}}>
+              {Object.values(workerSummary).sort((a,b)=>(b.open+b.partial)-(a.open+a.partial)).map((w,i)=>(
+                <div key={i} style={{background:"var(--c-deep)",borderRadius:8,padding:"10px 14px",display:"flex",justifyContent:"space-between",alignItems:"center",border:"1px solid var(--c-border)"}}>
+                  <span style={{fontWeight:600,fontSize:14}}>{w.name}</span>
+                  <div style={{display:"flex",gap:10}}>
+                    {w.open>0&&<span style={{fontSize:12,background:"#f59e0b22",color:"#f59e0b",padding:"3px 10px",borderRadius:10}}>{w.open} פתוחות</span>}
+                    {w.partial>0&&<span style={{fontSize:12,background:"#3b82f622",color:"#60a5fa",padding:"3px 10px",borderRadius:10}}>{w.partial} חלקיות</span>}
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+          <div style={{fontWeight:600,fontSize:13,color:"var(--c-dim)",marginBottom:8}}>הושלמו לאחרונה</div>
+          {doneTasks.length===0?<div style={{color:"var(--c-dim)",fontSize:12,textAlign:"center",padding:8}}>אין</div>:(
+            <div style={{overflowX:"auto"}}>
+              <table><thead><tr><th>עובד</th><th>משימה</th><th>הוקצה</th><th>הסתיים</th><th>זמן</th><th>תמחור</th><th></th></tr></thead><tbody>
+                {doneTasks.sort((a,b)=>(b.endTime||"").localeCompare(a.endTime||"")).slice(0,20).map(t=>(
+                  <tr key={t.id} style={{cursor:"pointer"}} onClick={()=>setDetailTask(t)}>
+                    <td style={{fontWeight:600}}>{t.userName}</td>
+                    <td style={{color:"#a78bfa"}}>{t.name}</td>
+                    <td style={{fontSize:11,color:"var(--c-dim)"}}>{fmt(t.createdAt?.slice(0,10))}</td>
+                    <td style={{fontSize:11,color:"#10b981"}}>{fmt(t.endTime?.slice(0,10))}</td>
+                    <td>{fmtTime(t.durationMin)}</td>
+                    <td style={{color:t.price?"#10b981":"var(--c-dim)"}}>{t.price?fmtMoney(t.price):"—"}</td>
+                    <td><IBtn onClick={e=>{e.stopPropagation();if(confirm("למחוק?"))onDeleteTask(t.id)}}>🗑️</IBtn></td>
+                  </tr>
+                ))}
+              </tbody></table>
+            </div>
+          )}
+        </div>
+      )}
+
+      {taskView==="board"&&(
+        <div>
+          {openTasks.length===0&&partialTasks.length===0?<div style={{color:"var(--c-dim)",fontSize:12,textAlign:"center",padding:16}}>אין משימות פתוחות</div>:(
+            <div style={{display:"flex",flexDirection:"column",gap:6}}>
+              {openTasks.length>0&&<div style={{fontSize:11,fontWeight:700,color:"#f59e0b",marginBottom:2}}>🔴 פתוחות ({openTasks.length})</div>}
+              {openTasks.map(t=><TaskCard key={t.id} t={t} accent="#f59e0b"/>)}
+              {partialTasks.length>0&&<div style={{fontSize:11,fontWeight:700,color:"#60a5fa",marginTop:6,marginBottom:2}}>🔄 בוצעו חלקית ({partialTasks.length})</div>}
+              {partialTasks.map(t=><TaskCard key={t.id} t={t} accent="#3b82f6"/>)}
+            </div>
+          )}
+          {doneTasks.length>0&&(
+            <details style={{marginTop:10}}>
+              <summary style={{fontSize:12,color:"var(--c-dim)",cursor:"pointer",padding:"6px 0",borderTop:"1px solid var(--c-border)"}}>✅ הושלמו ({doneTasks.length})</summary>
+              <div style={{display:"flex",flexDirection:"column",gap:4,marginTop:6}}>
+                {doneTasks.slice(0,10).map(t=>(
+                  <div key={t.id} style={{background:"var(--c-deep)",borderRadius:8,padding:"8px 12px",opacity:.7,display:"flex",justifyContent:"space-between",alignItems:"center",cursor:"pointer"}} onClick={()=>setDetailTask(t)}>
+                    <div><span style={{fontWeight:600,fontSize:13}}>✅ {t.name}</span><span style={{fontSize:11,color:"#60a5fa",marginRight:8}}>{t.userName}</span></div>
+                    <div style={{display:"flex",gap:8,alignItems:"center"}}>
+                      <span style={{fontSize:11,color:"var(--c-dim)"}}>{fmt(t.endTime?.slice(0,10))}</span>
+                      <IBtn onClick={e=>{e.stopPropagation();if(confirm("למחוק?"))onDeleteTask(t.id)}}>🗑️</IBtn>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </details>
+          )}
+        </div>
+      )}
+
+      {detailTask&&(
+        <div onClick={()=>setDetailTask(null)} style={{position:"fixed",inset:0,background:"#000000cc",zIndex:200,display:"flex",alignItems:"center",justifyContent:"center",padding:16}}>
+          <div onClick={e=>e.stopPropagation()} style={{background:"var(--c-card)",borderRadius:14,padding:24,maxWidth:520,width:"100%",border:"1px solid var(--c-border)",maxHeight:"90vh",overflowY:"auto"}}>
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:16}}>
+              <div style={{fontWeight:700,fontSize:17,color:"#a78bfa"}}>📌 פירוט משימה</div>
+              <IBtn onClick={()=>setDetailTask(null)}>✕</IBtn>
+            </div>
+            <div style={{display:"flex",flexDirection:"column",gap:10}}>
+              <div style={{background:"var(--c-deep)",borderRadius:10,padding:14}}>
+                <div style={{fontWeight:700,fontSize:16,marginBottom:4}}>{detailTask.name}</div>
+                {detailTask.description&&<div style={{fontSize:13,color:"var(--c-muted)",marginBottom:8}}>{detailTask.description}</div>}
+                <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
+                  {detailTask.partial&&<span style={{fontSize:12,background:"#3b82f622",color:"#60a5fa",padding:"3px 10px",borderRadius:10}}>🔄 בוצע חלקית</span>}
+                  {detailTask.completed&&<span style={{fontSize:12,background:"#10b98122",color:"#10b981",padding:"3px 10px",borderRadius:10}}>✅ הושלם</span>}
+                  {!detailTask.completed&&!detailTask.partial&&<span style={{fontSize:12,background:"#f59e0b22",color:"#f59e0b",padding:"3px 10px",borderRadius:10}}>🔴 פתוח</span>}
+                </div>
+              </div>
+              <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8}}>
+                <div style={{background:"var(--c-deep)",borderRadius:8,padding:10}}><div style={{fontSize:10,color:"var(--c-dim)",marginBottom:2}}>עובד</div><div style={{fontWeight:600,color:"#60a5fa"}}>{detailTask.userName}</div></div>
+                <div style={{background:"var(--c-deep)",borderRadius:8,padding:10}}><div style={{fontSize:10,color:"var(--c-dim)",marginBottom:2}}>תמחור</div><div style={{fontWeight:600,color:"#10b981"}}>{detailTask.price?fmtMoney(detailTask.price):"—"}</div></div>
+                <div style={{background:"var(--c-deep)",borderRadius:8,padding:10}}><div style={{fontSize:10,color:"var(--c-dim)",marginBottom:2}}>תאריך הקצאה</div><div style={{fontWeight:600}}>{fmt(detailTask.createdAt?.slice(0,10))}</div></div>
+                <div style={{background:"var(--c-deep)",borderRadius:8,padding:10}}><div style={{fontSize:10,color:"var(--c-dim)",marginBottom:2}}>תאריך סיום</div><div style={{fontWeight:600,color:detailTask.endTime?"#10b981":"var(--c-dim)"}}>{detailTask.endTime?fmt(detailTask.endTime.slice(0,10)):"—"}</div></div>
+                {detailTask.durationMin>0&&<div style={{background:"var(--c-deep)",borderRadius:8,padding:10}}><div style={{fontSize:10,color:"var(--c-dim)",marginBottom:2}}>זמן ביצוע</div><div style={{fontWeight:600,color:"#a78bfa"}}>{fmtTime(detailTask.durationMin)}</div></div>}
+                {(detailTask.pauseLog||[]).length>0&&<div style={{background:"var(--c-deep)",borderRadius:8,padding:10}}><div style={{fontSize:10,color:"var(--c-dim)",marginBottom:2}}>הפסקות</div><div style={{fontWeight:600,color:"#f97316"}}>{(detailTask.pauseLog||[]).length} ({fmtTime(detailTask.totalPauseMin||0)})</div></div>}
+              </div>
+              {!detailTask.completed&&(
+                <div style={{display:"flex",gap:8,marginTop:4,flexWrap:"wrap"}}>
+                  <Btn color="#3b82f6" small onClick={()=>{onMarkPartialTask&&onMarkPartialTask(detailTask.id);setDetailTask(null)}}>🔄 סמן חלקית</Btn>
+                  <Btn color="#10b981" small onClick={()=>{onMarkDoneTask&&onMarkDoneTask(detailTask.id);setDetailTask(null)}}>✅ סמן כבוצע</Btn>
+                  <Btn small onClick={()=>{if(confirm("למחוק?"))onDeleteTask(detailTask.id);setDetailTask(null)}}>🗑️ מחק</Btn>
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+    </Card>
+  );
+}
+
+// ══════════════════════════════════════════════════════════════════════════
 // ═══ MY WORK (Worker View) — Enhanced with Break, Bulk, Custom Tasks ════
 // ══════════════════════════════════════════════════════════════════════════
-function MyWork({orders,stages,workLogs,onStartWork,onEndWork,onPauseWork,onResumeWork,customTasks,onAddTask,onStartTask,onEndTask,onPauseTask,onResumeTask,onDeleteTask}){
+function MyWork({orders,stages,workLogs,onStartWork,onEndWork,onPauseWork,onResumeWork,customTasks,onAddTask,onStartTask,onEndTask,onPauseTask,onResumeTask,onDeleteTask,onMarkPartialTask,onMarkDoneTask}){
   const {currentUser}=useAuth();
   const myAccess=currentUser.stageAccess==="all"?stages.map(s=>s.id):(Array.isArray(currentUser.stageAccess)?currentUser.stageAccess:[]);
   const myActiveLogs=workLogs.filter(w=>w.userId===currentUser.id&&!w.completed);
@@ -1204,32 +1452,8 @@ function MyWork({orders,stages,workLogs,onStartWork,onEndWork,onPauseWork,onResu
             </>);
           })()}
 
-          {/* Admin tasks section */}
-          <Card style={{marginBottom:14,border:"1px solid #a78bfa33"}}>
-            <div style={{fontWeight:700,fontSize:15,color:"#a78bfa",marginBottom:10}}>📌 משימות שהקצתי</div>
-            {(customTasks||[]).filter(t=>!t.completed).length===0?<div style={{color:"var(--c-dim)",fontSize:12,textAlign:"center",padding:10}}>אין משימות פתוחות</div>:(
-              <div style={{display:"flex",flexDirection:"column",gap:6}}>
-                {(customTasks||[]).filter(t=>!t.completed).map(t=>(
-                  <div key={t.id} style={{background:"var(--c-deep)",borderRadius:8,padding:"10px 12px",border:t.active?"1px solid #a78bfa":"1px solid var(--c-border)"}}>
-                    <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",flexWrap:"wrap",gap:6}}>
-                      <div><span style={{fontWeight:600}}>{t.name}</span><span style={{fontSize:11,color:"#60a5fa",marginRight:8}}>→ {t.userName}</span>{t.price>0&&<span style={{fontSize:11,color:"#a78bfa"}}>₪{t.price}</span>}{t.active&&<span style={{fontSize:11,background:t.paused?"#8b95a822":"#a78bfa22",color:t.paused?"#8b95a8":"#a78bfa",padding:"2px 6px",borderRadius:10,marginRight:6}}>{t.paused?"⏸️ הפסקה":"🔄 בביצוע"}</span>}</div>
-                      <div style={{display:"flex",gap:4,alignItems:"center"}}><span style={{fontSize:11,color:"var(--c-dim)"}}>{fmt(t.createdAt?.slice(0,10))}</span><IBtn onClick={()=>{if(confirm("למחוק משימה?"))onDeleteTask(t.id)}}>🗑️</IBtn></div>
-                    </div>
-                  </div>
-                ))}
-              </div>
-            )}
-            {(customTasks||[]).filter(t=>t.completed).length>0&&(
-              <div style={{marginTop:8,borderTop:"1px solid var(--c-border)",paddingTop:8}}>
-                <div style={{fontSize:11,color:"var(--c-dim)",marginBottom:4}}>הושלמו:</div>
-                {(customTasks||[]).filter(t=>t.completed).slice(0,8).map(t=>(
-                  <div key={t.id} style={{fontSize:12,color:"var(--c-muted)",padding:"2px 0",display:"flex",gap:8,alignItems:"center"}}>
-                    <span>✅ {t.name}</span><span style={{color:"#60a5fa"}}>{t.userName}</span><span style={{color:"#a78bfa"}}>{fmtTime(t.durationMin)}</span>{t.price>0&&<span style={{color:"#10b981"}}>₪{t.price}</span>}<IBtn onClick={()=>onDeleteTask(t.id)}>🗑️</IBtn>
-                  </div>
-                ))}
-              </div>
-            )}
-          </Card>
+          {/* Admin tasks section — full task board */}
+          <AdminTasksBoard customTasks={customTasks} onDeleteTask={onDeleteTask} onMarkPartialTask={onMarkPartialTask} onMarkDoneTask={onMarkDoneTask}/>
         </div>
       ):(
       <div>
@@ -1280,19 +1504,31 @@ function MyWork({orders,stages,workLogs,onStartWork,onEndWork,onPauseWork,onResu
       <Card style={{marginBottom:14,border:"1px solid #a78bfa33"}}>
         {currentUser.role==="admin"?(
           <div>
-            <div style={{fontWeight:700,fontSize:15,color:"#a78bfa",marginBottom:10}}>📌 משימות שהקצתי</div>
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:10,flexWrap:"wrap",gap:6}}>
+              <div style={{fontWeight:700,fontSize:15,color:"#a78bfa"}}>📌 משימות שהקצתי</div>
+              <div style={{display:"flex",gap:6}}>
+                <span style={{fontSize:12,background:"#f59e0b22",color:"#f59e0b",padding:"2px 10px",borderRadius:12}}>{(customTasks||[]).filter(t=>!t.completed&&!t.partial).length} פתוחות</span>
+                <span style={{fontSize:12,background:"#3b82f622",color:"#60a5fa",padding:"2px 10px",borderRadius:12}}>{(customTasks||[]).filter(t=>t.partial&&!t.completed).length} חלקיות</span>
+              </div>
+            </div>
             {(customTasks||[]).filter(t=>!t.completed).length===0?<div style={{color:"var(--c-dim)",fontSize:12,textAlign:"center",padding:10}}>אין משימות פתוחות</div>:(
               <div style={{display:"flex",flexDirection:"column",gap:6}}>
-                {(customTasks||[]).filter(t=>!t.completed).map(t=>(
-                  <div key={t.id} style={{background:"var(--c-deep)",borderRadius:8,padding:"10px 12px",border:t.active?"1px solid #a78bfa":"1px solid var(--c-border)"}}>
+                {(customTasks||[]).filter(t=>!t.completed).sort((a,b)=>(a.partial?1:0)-(b.partial?1:0)).map(t=>(
+                  <div key={t.id} style={{background:"var(--c-deep)",borderRadius:8,padding:"10px 12px",border:t.partial?"1px solid #3b82f655":t.active?"1px solid #a78bfa":"1px solid var(--c-border)"}}>
                     <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",flexWrap:"wrap",gap:6}}>
                       <div>
                         <span style={{fontWeight:600,fontSize:13}}>{t.name}</span>
                         <span style={{fontSize:11,color:"#60a5fa",marginRight:8}}>→ {t.userName}</span>
+                        {t.partial&&<span style={{fontSize:11,background:"#3b82f622",color:"#60a5fa",padding:"2px 6px",borderRadius:10,marginRight:4}}>〰️ חלקית</span>}
                         {t.price>0&&<span style={{fontSize:11,color:"#a78bfa",marginRight:6}}>₪{t.price}</span>}
-                        {t.active&&<span style={{fontSize:11,background:"#a78bfa22",color:"#a78bfa",padding:"2px 6px",borderRadius:10}}>🔄 בביצוע</span>}
+                        {t.active&&!t.partial&&<span style={{fontSize:11,background:"#a78bfa22",color:"#a78bfa",padding:"2px 6px",borderRadius:10}}>🔄 בביצוע</span>}
                       </div>
-                      <span style={{fontSize:11,color:"var(--c-dim)"}}>{fmt(t.createdAt?.slice(0,10))}</span>
+                      <div style={{display:"flex",gap:4,alignItems:"center"}}>
+                        <span style={{fontSize:11,color:"var(--c-dim)"}}>{fmt(t.createdAt?.slice(0,10))}</span>
+                        <button onClick={()=>onMarkPartialTask&&onMarkPartialTask(t.id)} title="חלקית" style={{background:t.partial?"#3b82f633":"transparent",border:"1px solid #3b82f644",borderRadius:6,padding:"2px 6px",fontSize:11,color:"#60a5fa",fontFamily:"inherit",cursor:"pointer"}}>〰️</button>
+                        <button onClick={()=>onMarkDoneTask&&onMarkDoneTask(t.id)} title="בוצע" style={{background:"transparent",border:"1px solid #10b98144",borderRadius:6,padding:"2px 6px",fontSize:11,color:"#10b981",fontFamily:"inherit",cursor:"pointer"}}>✅</button>
+                        <IBtn onClick={()=>{if(confirm("למחוק משימה?"))onDeleteTask(t.id)}}>🗑️</IBtn>
+                      </div>
                     </div>
                     {t.description&&<div style={{fontSize:11,color:"var(--c-muted)",marginTop:4}}>{t.description}</div>}
                   </div>
@@ -1300,14 +1536,16 @@ function MyWork({orders,stages,workLogs,onStartWork,onEndWork,onPauseWork,onResu
               </div>
             )}
             {(customTasks||[]).filter(t=>t.completed).length>0&&(
-              <div style={{marginTop:10,borderTop:"1px solid var(--c-border)",paddingTop:8}}>
-                <div style={{fontSize:11,color:"var(--c-dim)",marginBottom:6}}>הושלמו:</div>
-                {(customTasks||[]).filter(t=>t.completed).slice(0,8).map(t=>(
-                  <div key={t.id} style={{fontSize:12,color:"var(--c-muted)",padding:"3px 0",display:"flex",gap:10,flexWrap:"wrap"}}>
-                    <span>✅ {t.name}</span><span style={{color:"#60a5fa"}}>{t.userName}</span><span style={{color:"#a78bfa"}}>{fmtTime(t.durationMin)}</span>{t.price>0&&<span style={{color:"#10b981"}}>₪{t.price}</span>}
-                  </div>
-                ))}
-              </div>
+              <details style={{marginTop:10}}>
+                <summary style={{fontSize:11,color:"var(--c-dim)",cursor:"pointer",padding:"4px 0",borderTop:"1px solid var(--c-border)"}}>✅ הושלמו ({(customTasks||[]).filter(t=>t.completed).length})</summary>
+                <div style={{marginTop:6}}>
+                  {(customTasks||[]).filter(t=>t.completed).slice(0,8).map(t=>(
+                    <div key={t.id} style={{fontSize:12,color:"var(--c-muted)",padding:"3px 0",display:"flex",gap:10,flexWrap:"wrap"}}>
+                      <span>✅ {t.name}</span><span style={{color:"#60a5fa"}}>{t.userName}</span><span style={{color:"#a78bfa"}}>{fmtTime(t.durationMin)}</span>{t.price>0&&<span style={{color:"#10b981"}}>₪{t.price}</span>}
+                    </div>
+                  ))}
+                </div>
+              </details>
             )}
           </div>
         ):(
@@ -1409,17 +1647,11 @@ function ActiveTimer({startTime,pauseMin=0}){
 // ══════════════════════════════════════════════════════════════════════════
 // ═══ WORKERS DASHBOARD ══════════════════════════════════════════════════
 // ══════════════════════════════════════════════════════════════════════════
-function WorkersDashboard({users,workLogs,orders,stages,customTasks,onAddTask,onDeleteLog}){
+function WorkersDashboard({users,workLogs,orders,stages,customTasks,onAddTask,onDeleteLog,onUpdateTask,onDeleteTask,onMarkPartialTask,onMarkDoneTask}){
   const [search,setSearch]=useState("");
   const [period,setPeriod]=useState("all");
   const workers=users.filter(u=>u.role!=="admin"&&u.active!==false);
   const filtered=workers.filter(w=>!search||w.name.includes(search));
-  // Task management
-  const [showTaskForm,setShowTaskForm]=useState(false);
-  const [taskName,setTaskName]=useState("");
-  const [taskDesc,setTaskDesc]=useState("");
-  const [taskWorker,setTaskWorker]=useState("");
-  const [taskPrice,setTaskPrice]=useState("");
 
   // Period filter for logs
   const filterByPeriod=(dateStr)=>{
@@ -1484,29 +1716,8 @@ function WorkersDashboard({users,workLogs,orders,stages,customTasks,onAddTask,on
         </div>
       </Card>
 
-      {/* Add Task for worker (admin only) */}
-      <Card style={{marginBottom:14,border:"1px solid #a78bfa33"}}>
-        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:10}}>
-          <h3 style={{margin:0,fontSize:15,color:"#a78bfa"}}>📌 הקצאת משימה לעובד</h3>
-          <Btn color="#a78bfa" small onClick={()=>setShowTaskForm(p=>!p)}>+ משימה חדשה</Btn>
-        </div>
-        {showTaskForm&&(
-          <div style={{background:"var(--c-deep)",borderRadius:8,padding:12,marginBottom:10,display:"flex",gap:10,flexWrap:"wrap",alignItems:"flex-end"}}>
-            <div style={{display:"flex",flexDirection:"column",gap:4,minWidth:140}}>
-              <label style={{fontSize:11,color:"var(--c-dim)",fontWeight:600}}>עובד *</label>
-              <select value={taskWorker} onChange={e=>setTaskWorker(e.target.value)}>
-                <option value="">-- בחר עובד --</option>
-                {workers.map(w=><option key={w.id} value={w.id}>{w.name}</option>)}
-              </select>
-            </div>
-            <Field label="שם משימה *" value={taskName} onChange={setTaskName} style={{minWidth:160}}/>
-            <Field label="תיאור" value={taskDesc} onChange={setTaskDesc} style={{minWidth:200}}/>
-            <Field label="תמחור ₪" type="number" value={taskPrice} onChange={setTaskPrice} style={{minWidth:80}}/>
-            <Btn color="#a78bfa" onClick={addTask} small>הקצה</Btn>
-            <Btn onClick={()=>setShowTaskForm(false)} small>ביטול</Btn>
-          </div>
-        )}
-      </Card>
+      {/* Tasks Board */}
+      <AdminTasksBoard workers={workers} customTasks={customTasks||[]} onAddTask={onAddTask} onUpdateTask={onUpdateTask} onDeleteTask={onDeleteTask} filterByPeriod={filterByPeriod}/>
 
       {/* Worker cards with detailed stats */}
       <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(300px,1fr))",gap:10,marginBottom:14}}>
@@ -1799,19 +2010,27 @@ function AdminPanel({projects,stages,onClose,lightMode,updO}){
   const muted=lm?"#5a6478":"#8b95a8";
   const inp={background:lm?"#f7f8fa":"#0a0e1a",border:`1px solid ${lm?"#c8cdd6":"#283650"}`,color:text,borderRadius:6,padding:"7px 10px",paddingRight:"30px",fontSize:13,width:"100%",outline:"none",fontFamily:"inherit"};
 
-  const addUser=()=>{
+  const addUser=async()=>{
     if(!newUser.username||!newUser.password||!newUser.name)return alert("כל השדות הם חובה");
     if(users.find(u=>u.username===newUser.username))return alert("שם משתמש קיים");
-    const u={...newUser,id:uid()};
+    const hash=await sha256(newUser.password);
+    const u={...newUser,id:uid(),password_hash:hash,password:undefined};
+    delete u.password;
     const updated=[...users,u];
     saveUsers(updated);setUsersLocal(updated);
     addAuditEntry({userId:currentUser.id,username:currentUser.username,name:currentUser.name,action:"הוספת משתמש",target:newUser.username,details:newUser.name});
     setNewUser({username:"",password:"",name:"",role:"worker",projectAccess:"all",stageAccess:"all",canEdit:false,canView:true,active:true,hourlyRate:0});
     setAddMode(false);
   };
-  const saveUser=()=>{
+  const saveUser=async()=>{
     if(!editUser.username||!editUser.name)return alert("שם משתמש ושם מלא חובה");
-    const updated=users.map(u=>u.id===editUser.id?editUser:u);
+    let u={...editUser};
+    // If password field was changed (not empty and not a hash), re-hash it
+    if(u.password&&u.password.length<60){
+      u.password_hash=await sha256(u.password);
+      delete u.password;
+    }
+    const updated=users.map(usr=>usr.id===u.id?u:usr);
     saveUsers(updated);setUsersLocal(updated);
     addAuditEntry({userId:currentUser.id,username:currentUser.username,name:currentUser.name,action:"עדכון משתמש",target:editUser.username,details:editUser.name});
     setEditUser(null);
@@ -2238,7 +2457,7 @@ function UpdateBanner({onUpdate,onDismiss,lm}){return(
 // ══════════════════════════════════════════════════════════════════════════
 // ═══ NAVBAR ═════════════════════════════════════════════════════════════
 // ══════════════════════════════════════════════════════════════════════════
-function Navbar({tab,setTab,tabs,lightMode,toggleLight,sync,onAdmin,onLogout,alertCount,onAlerts,onRefresh}){
+function Navbar({tab,setTab,tabs,lightMode,toggleLight,sync,onAdmin,onLogout,alertCount,onAlerts,onRefresh,onLiveBoard,onReport,onHistory,isAdmin}){
   const {currentUser}=useAuth();
   const [menuOpen,setMenuOpen]=useState(false);
   const lm=lightMode;
@@ -2257,10 +2476,16 @@ function Navbar({tab,setTab,tabs,lightMode,toggleLight,sync,onAdmin,onLogout,ale
           {tabs.map(t=>(<button key={t.id} onClick={()=>setTab(t.id)} style={{padding:"0 14px",height:52,background:"none",border:"none",color:tab===t.id?navActive:navMuted,borderBottom:tab===t.id?`3px solid ${navActive}`:"3px solid transparent",fontWeight:tab===t.id?700:400,fontSize:13,whiteSpace:"nowrap",fontFamily:"inherit"}}>{t.label}</button>))}
         </div>
         <div className="hide-mobile" style={{display:"flex",gap:6,alignItems:"center",flexShrink:0}}>
+          {currentUser?.role==="admin"&&<button onClick={onLiveBoard} title="מסך מפעל" style={{background:"#06b6d422",border:"1px solid #06b6d444",color:"#06b6d4",borderRadius:8,padding:"5px 12px",fontSize:12,fontWeight:700,fontFamily:"inherit"}}>📡 מפעל</button>}
+          {currentUser?.role==="admin"&&<button onClick={onReport} title="דוח חודשי" style={{background:"#10b98122",border:"1px solid #10b98144",color:"#10b981",borderRadius:8,padding:"5px 12px",fontSize:12,fontWeight:700,fontFamily:"inherit"}}>📄 דוח</button>}
+          {currentUser?.role==="admin"&&<button onClick={onHistory} title="היסטוריה" style={{background:"#8b5cf622",border:"1px solid #8b5cf644",color:"#8b5cf6",borderRadius:8,padding:"5px 12px",fontSize:12,fontWeight:700,fontFamily:"inherit"}}>📋 היסטוריה</button>}
           <button onClick={onAlerts} style={{background:alertCount>0?"#ef444422":"transparent",border:`1px solid ${alertCount>0?"#ef4444":navBorder}`,borderRadius:8,padding:"5px 10px",fontSize:14,color:alertCount>0?"#ef4444":navMuted,fontFamily:"inherit",position:"relative"}}>🔔{alertCount>0&&<span style={{position:"absolute",top:-4,right:-4,background:"#ef4444",color:"#fff",fontSize:9,fontWeight:700,borderRadius:10,padding:"1px 5px",minWidth:16,textAlign:"center"}}>{alertCount}</span>}</button>
           <button onClick={toggleLight} style={{background:lm?"#e2e8f0":"#0d1120",border:`1px solid ${navBorder}`,borderRadius:8,padding:"5px 12px",fontSize:13,color:navMuted,fontFamily:"inherit"}}>{lm?"🌙":"☀️"}</button>
           {currentUser?.role==="admin"&&<button onClick={onAdmin} style={{background:"#f59e0b22",border:"1px solid #f59e0b44",color:"#f59e0b",borderRadius:8,padding:"5px 12px",fontSize:12,fontWeight:700,fontFamily:"inherit"}}>🛡️</button>}
-          <div style={{fontSize:11,padding:"3px 9px",borderRadius:20,background:sync==="ok"?(lm?"#d1fae5":"#052e16"):sync==="saving"?(lm?"#dbeafe":"#1e3a5f"):(lm?"#fee2e2":"#450a0a"),color:sync==="ok"?(lm?"#059669":"#6ee7b7"):sync==="saving"?(lm?"#2563eb":"#93c5fd"):(lm?"#dc2626":"#fca5a5"),whiteSpace:"nowrap",cursor:"pointer"}} onClick={onRefresh} title="לחץ לרענון">{sync==="ok"?"☁️ מסונכרן":sync==="saving"?"⏳ שומר...":"❌ שגיאה"}</div>
+          <div style={{fontSize:11,padding:"3px 9px",borderRadius:20,background:sync==="ok"?(lm?"#d1fae5":"#052e16"):sync==="saving"?(lm?"#dbeafe":"#1e3a5f"):(lm?"#fee2e2":"#450a0a"),color:sync==="ok"?(lm?"#059669":"#6ee7b7"):sync==="saving"?(lm?"#2563eb":"#93c5fd"):(lm?"#dc2626":"#fca5a5"),whiteSpace:"nowrap",cursor:"pointer",display:"flex",alignItems:"center",gap:4}} onClick={onRefresh} title="לחץ לרענון">
+            {sync==="ok"&&<span style={{display:"inline-block",width:6,height:6,borderRadius:"50%",background:"#10b981",animation:"pulse 2s infinite"}}/>}
+            {sync==="ok"?"בזמן אמת":sync==="saving"?"⏳ שומר...":"❌ שגיאה"}
+          </div>
           <div style={{display:"flex",alignItems:"center",gap:6,padding:"4px 10px",background:lm?"#e2e8f0":"#0d1120",borderRadius:8,border:`1px solid ${navBorder}`}}>
             <span style={{fontSize:12,color:navActive,fontWeight:700}}>{currentUser?.name}</span>
             <span style={{color:navMuted}}>·</span>
@@ -2285,10 +2510,302 @@ function Navbar({tab,setTab,tabs,lightMode,toggleLight,sync,onAdmin,onLogout,ale
           <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
             <button onClick={()=>{toggleLight();setMenuOpen(false)}} style={{background:lm?"#e2e8f0":"#0d1120",border:`1px solid ${navBorder}`,borderRadius:8,padding:"7px 14px",fontSize:13,color:navMuted,fontFamily:"inherit"}}>{lm?"🌙 כהה":"☀️ בהיר"}</button>
             {currentUser?.role==="admin"&&<button onClick={()=>{onAdmin();setMenuOpen(false)}} style={{background:"#f59e0b22",border:"1px solid #f59e0b44",color:"#f59e0b",borderRadius:8,padding:"7px 14px",fontSize:13,fontWeight:700,fontFamily:"inherit"}}>🛡️ ניהול</button>}
+            {currentUser?.role==="admin"&&<button onClick={()=>{onLiveBoard();setMenuOpen(false)}} style={{background:"#06b6d422",border:"1px solid #06b6d444",color:"#06b6d4",borderRadius:8,padding:"7px 14px",fontSize:13,fontWeight:700,fontFamily:"inherit"}}>📡 מפעל</button>}
+            {currentUser?.role==="admin"&&<button onClick={()=>{onReport();setMenuOpen(false)}} style={{background:"#10b98122",border:"1px solid #10b98144",color:"#10b981",borderRadius:8,padding:"7px 14px",fontSize:13,fontWeight:700,fontFamily:"inherit"}}>📄 דוח</button>}
+            {currentUser?.role==="admin"&&<button onClick={()=>{onHistory();setMenuOpen(false)}} style={{background:"#8b5cf622",border:"1px solid #8b5cf644",color:"#8b5cf6",borderRadius:8,padding:"7px 14px",fontSize:13,fontWeight:700,fontFamily:"inherit"}}>📋 היסטוריה</button>}
           </div>
         </div>
       )}
     </div>
+  );
+}
+
+// ══════════════════════════════════════════════════════════════════════════
+// ═══ PUSH NOTIFICATIONS UTILITY ════════════════════════════════════════
+// ══════════════════════════════════════════════════════════════════════════
+const PushNotify={
+  async request(){
+    if(!("Notification" in window))return false;
+    if(Notification.permission==="granted")return true;
+    const p=await Notification.requestPermission();
+    return p==="granted";
+  },
+  send(title,body,tag="pml"){
+    if(!("serviceWorker" in navigator))return;
+    navigator.serviceWorker.ready.then(reg=>{
+      reg.active?.postMessage({type:"NOTIFY",title,body,tag});
+    });
+  }
+};
+
+// ══════════════════════════════════════════════════════════════════════════
+// ═══ LIVE FACTORY BOARD (מסך מפעל) ════════════════════════════════════
+// ══════════════════════════════════════════════════════════════════════════
+function LiveFactoryBoard({orders,workLogs,stages,customTasks,users,onClose}){
+  const [now,setNow]=useState(Date.now());
+  useEffect(()=>{const t=setInterval(()=>setNow(Date.now()),1000);return()=>clearInterval(t)},[]);
+
+  const activeWork=workLogs.filter(w=>!w.completed);
+  const workerMap={};
+  activeWork.forEach(w=>{
+    if(!workerMap[w.userId])workerMap[w.userId]={name:w.userName,logs:[],paused:false};
+    workerMap[w.userId].logs.push(w);
+    if(!w.paused)workerMap[w.userId].paused=false; else workerMap[w.userId].paused=true;
+  });
+  // Dedupe bulk
+  const workerCards=Object.values(workerMap).map(wk=>{
+    const seen=new Set();const items=[];
+    wk.logs.forEach(w=>{
+      const key=w.bulkGroupId||w.id;if(seen.has(key))return;seen.add(key);
+      const group=w.bulkGroupId?wk.logs.filter(g=>g.bulkGroupId===w.bulkGroupId):[w];
+      items.push({...w,_count:group.length,_sns:group.map(g=>g.serialSn)});
+    });
+    const anyActive=wk.logs.some(l=>!l.paused);
+    return{name:wk.name,items,status:anyActive?"working":"break"};
+  });
+
+  const activeTasks=(customTasks||[]).filter(t=>t.active&&!t.completed);
+  const pendingTotal=orders.reduce((s,o)=>{
+    const oSt=o.stageIds||[];
+    return s+(o.serials||[]).filter(sr=>!oSt.every(sid=>workLogs.some(w=>w.serialId===sr.id&&w.stageId===sid&&w.completed))).length;
+  },0);
+  const doneToday=workLogs.filter(w=>w.completed&&w.endTime&&new Date(w.endTime).toDateString()===new Date().toDateString()).length;
+
+  const fmtElapsed=ms=>{const s=Math.floor(ms/1000),m=Math.floor(s/60),h=Math.floor(m/60);return h>0?`${h}:${String(m%60).padStart(2,"0")}:${String(s%60).padStart(2,"0")}`:`${m}:${String(s%60).padStart(2,"0")}`};
+
+  return(
+    <div style={{position:"fixed",inset:0,background:"#05080f",zIndex:500,overflow:"auto",padding:20}}>
+      {/* Header */}
+      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:20}}>
+        <div style={{display:"flex",alignItems:"center",gap:12}}>
+          <div style={{fontSize:32}}>⚙️</div>
+          <div>
+            <div style={{fontWeight:800,fontSize:22,color:"#60a5fa",letterSpacing:-.5}}>מצב רצפת ייצור</div>
+            <div style={{fontSize:13,color:"#5a6478"}}>{new Date().toLocaleString("he-IL",{weekday:"long",day:"numeric",month:"long",hour:"2-digit",minute:"2-digit"})}</div>
+          </div>
+        </div>
+        <button onClick={onClose} style={{background:"#1e2a42",border:"1px solid #283650",color:"#8b95a8",borderRadius:10,padding:"8px 16px",fontSize:14,fontFamily:"inherit"}}>✕ סגור</button>
+      </div>
+
+      {/* KPI row */}
+      <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(150px,1fr))",gap:10,marginBottom:20}}>
+        {[
+          {i:"🔄",v:workerCards.filter(w=>w.status==="working").length,l:"עובדים פעילים",c:"#f59e0b"},
+          {i:"⏸️",v:workerCards.filter(w=>w.status==="break").length,l:"בהפסקה",c:"#8b95a8"},
+          {i:"✅",v:doneToday,l:"הושלמו היום",c:"#10b981"},
+          {i:"📋",v:pendingTotal,l:"יחידות ממתינות",c:"#3b82f6"},
+          {i:"📌",v:activeTasks.length,l:"משימות פעילות",c:"#a78bfa"},
+        ].map((k,i)=>(
+          <div key={i} style={{background:"#0d1120",borderRadius:12,padding:"14px 16px",border:`1px solid ${k.c}33`,textAlign:"center"}}>
+            <div style={{fontSize:24,marginBottom:4}}>{k.i}</div>
+            <div style={{fontSize:28,fontWeight:800,color:k.c}}>{k.v}</div>
+            <div style={{fontSize:11,color:"#5a6478",marginTop:2}}>{k.l}</div>
+          </div>
+        ))}
+      </div>
+
+      {/* Worker cards */}
+      <div style={{marginBottom:16,fontWeight:700,fontSize:15,color:"#8b95a8",borderBottom:"1px solid #1e2a42",paddingBottom:8}}>👷 עובדים בזמן אמת</div>
+      {workerCards.length===0&&<div style={{textAlign:"center",padding:40,color:"#5a6478",fontSize:18}}>😴 אין עבודה פעילה כרגע</div>}
+      <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(280px,1fr))",gap:12,marginBottom:24}}>
+        {workerCards.map((wk,i)=>(
+          <div key={i} style={{background:"#0d1120",borderRadius:14,padding:16,border:`2px solid ${wk.status==="working"?"#f59e0b33":"#1e2a42"}`}}>
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:12}}>
+              <div style={{fontWeight:700,fontSize:16,color:"#e2e8f0"}}>{wk.name}</div>
+              <span style={{fontSize:11,background:wk.status==="working"?"#f59e0b22":"#1e2a42",color:wk.status==="working"?"#f59e0b":"#8b95a8",padding:"3px 10px",borderRadius:20,animation:wk.status==="working"?"pulse 2s infinite":"none"}}>
+                {wk.status==="working"?"🔄 עובד":"⏸️ הפסקה"}
+              </span>
+            </div>
+            {wk.items.map((w,j)=>{
+              const stage=stages.find(s=>s.id===w.stageId);
+              const elapsed=now-new Date(w.startTime).getTime()-(w.totalPauseMin||0)*60000;
+              const order=orders.find(o=>o.id===w.orderId);
+              return(
+                <div key={j} style={{background:"#131829",borderRadius:8,padding:"10px 12px",marginBottom:6,border:`1px solid ${stage?.color||"#1e2a42"}22`}}>
+                  <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+                    <div>
+                      <div style={{fontSize:13,fontWeight:600,color:stage?.color||"#60a5fa"}}>{stage?.name||"—"}</div>
+                      <div style={{fontSize:11,color:"#5a6478"}}>{order?.woNumber||""} {w._count>1?`× ${w._count} יחידות`:w.serialSn}</div>
+                    </div>
+                    <div style={{fontSize:18,fontWeight:800,color:w.paused?"#8b95a8":"#f59e0b",fontVariantNumeric:"tabular-nums"}}>
+                      {w.paused?"⏸️":fmtElapsed(Math.max(0,elapsed))}
+                    </div>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        ))}
+      </div>
+
+      {/* Active tasks */}
+      {activeTasks.length>0&&(
+        <>
+          <div style={{marginBottom:12,fontWeight:700,fontSize:15,color:"#8b95a8",borderBottom:"1px solid #1e2a42",paddingBottom:8}}>📌 משימות פעילות</div>
+          <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(240px,1fr))",gap:10}}>
+            {activeTasks.map(t=>(
+              <div key={t.id} style={{background:"#0d1120",borderRadius:10,padding:"12px 14px",border:"1px solid #a78bfa33"}}>
+                <div style={{fontWeight:600,color:"#a78bfa",marginBottom:4}}>{t.name}</div>
+                <div style={{fontSize:12,color:"#60a5fa"}}>{t.userName}</div>
+              </div>
+            ))}
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
+// ══════════════════════════════════════════════════════════════════════════
+// ═══ MONTHLY PDF REPORT ════════════════════════════════════════════════
+// ══════════════════════════════════════════════════════════════════════════
+function MonthlyReportModal({orders,workLogs,stages,projects,users,onClose}){
+  const [month,setMonth]=useState(()=>new Date().toISOString().slice(0,7));
+  const [generating,setGenerating]=useState(false);
+
+  const generate=()=>{
+    setGenerating(true);
+    try{
+      const [y,m]=month.split("-").map(Number);
+      const fLogs=workLogs.filter(w=>{if(!w.completed||!w.endTime)return false;const d=new Date(w.endTime);return d.getFullYear()===y&&d.getMonth()+1===m});
+      const fOrders=orders.filter(o=>o.receivedDate&&new Date(o.receivedDate).getFullYear()===y&&new Date(o.receivedDate).getMonth()+1===m);
+
+      // Build HTML report
+      const totalMin=fLogs.reduce((s,w)=>s+w.durationMin,0);
+      const totalRev=fOrders.reduce((s,o)=>s+Number(o.unitPrice||0)*Number(o.qty||0),0);
+      const workerStats={};
+      fLogs.forEach(w=>{
+        if(!workerStats[w.userId])workerStats[w.userId]={name:w.userName,min:0,units:0};
+        workerStats[w.userId].min+=w.durationMin;
+        workerStats[w.userId].units++;
+      });
+
+      const html=`<!DOCTYPE html><html dir="rtl" lang="he"><head><meta charset="utf-8"/>
+<style>body{font-family:Arial,sans-serif;direction:rtl;padding:40px;color:#1a1f2e;max-width:900px;margin:0 auto}
+h1{color:#3b82f6;border-bottom:3px solid #3b82f6;padding-bottom:12px}
+h2{color:#374151;margin-top:32px;font-size:16px;border-bottom:1px solid #e5e7eb;padding-bottom:6px}
+table{width:100%;border-collapse:collapse;margin-top:10px;font-size:13px}
+th{background:#f3f4f6;padding:8px 10px;text-align:right;font-weight:600;border:1px solid #e5e7eb}
+td{padding:7px 10px;border:1px solid #e5e7eb}tr:nth-child(even){background:#f9fafb}
+.kpi{display:inline-block;background:#eff6ff;border:1px solid #bfdbfe;border-radius:8px;padding:12px 20px;margin:6px;text-align:center}
+.kpi-v{font-size:24px;font-weight:800;color:#2563eb}.kpi-l{font-size:11px;color:#6b7280}
+.footer{margin-top:40px;padding-top:16px;border-top:1px solid #e5e7eb;font-size:11px;color:#9ca3af}
+</style></head><body>
+<h1>⚙️ דוח חודשי — ניהול קו ייצור</h1>
+<p style="color:#6b7280;margin-bottom:20px">תקופה: ${new Date(y,m-1).toLocaleString("he-IL",{month:"long",year:"numeric"})} | הופק: ${new Date().toLocaleDateString("he-IL")}</p>
+<div>
+  <div class="kpi"><div class="kpi-v">${fOrders.length}</div><div class="kpi-l">פקעות שנפתחו</div></div>
+  <div class="kpi"><div class="kpi-v">${fLogs.length}</div><div class="kpi-l">פעולות עבודה</div></div>
+  <div class="kpi"><div class="kpi-v">${Math.round(totalMin/60)} שע'</div><div class="kpi-l">סה"כ שעות</div></div>
+  <div class="kpi"><div class="kpi-v">₪${totalRev.toLocaleString("he-IL")}</div><div class="kpi-l">הכנסה פוטנציאלית</div></div>
+</div>
+<h2>📋 פקעות החודש</h2>
+<table><thead><tr><th>מספר פקעה</th><th>תיאור</th><th>P/N</th><th>כמות</th><th>פרויקט</th><th>יעד אספקה</th></tr></thead><tbody>
+${fOrders.map(o=>`<tr><td>${o.woNumber}</td><td>${o.description||"—"}</td><td>${o.pn||"—"}</td><td>${o.qty}</td><td>${projects.find(p=>p.id===o.projectId)?.name||"—"}</td><td>${o.targetDate||"—"}</td></tr>`).join("")}
+</tbody></table>
+<h2>👥 ביצועי עובדים</h2>
+<table><thead><tr><th>עובד</th><th>פעולות</th><th>שעות</th></tr></thead><tbody>
+${Object.values(workerStats).sort((a,b)=>b.min-a.min).map(w=>`<tr><td>${w.name}</td><td>${w.units}</td><td>${Math.round(w.min/60)}</td></tr>`).join("")}
+</tbody></table>
+<div class="footer">דוח זה הופק אוטומטית ממערכת ניהול קו ייצור v${APP_VERSION}</div>
+</body></html>`;
+
+      const blob=new Blob([html],{type:"text/html;charset=utf-8"});
+      const a=document.createElement("a");
+      a.href=URL.createObjectURL(blob);
+      a.download=`דוח_ייצור_${month}.html`;
+      a.click();
+      URL.revokeObjectURL(a.href);
+    }finally{setGenerating(false)}
+  };
+
+  return(
+    <Modal onClose={onClose}>
+      <div style={{fontWeight:700,fontSize:18,color:"#60a5fa",marginBottom:20}}>📄 דוח חודשי</div>
+      <div style={{marginBottom:16}}>
+        <label style={{fontSize:12,color:"var(--c-dim)",display:"block",marginBottom:6}}>בחר חודש</label>
+        <input type="month" value={month} onChange={e=>setMonth(e.target.value)} style={{maxWidth:200}}/>
+      </div>
+      <div style={{background:"var(--c-deep)",borderRadius:10,padding:14,marginBottom:16,fontSize:13,color:"var(--c-muted)"}}>
+        הדוח יכלול: פקעות שנפתחו, פעולות עבודה, ביצועי עובדים, ו-KPI של החודש. ייפתח כקובץ HTML שניתן להדפסה.
+      </div>
+      <div style={{display:"flex",gap:10}}>
+        <Btn color="#3b82f6" onClick={generate} disabled={generating}>{generating?"⏳ מייצר...":"📥 הורד דוח"}</Btn>
+        <Btn onClick={onClose}>סגור</Btn>
+      </div>
+    </Modal>
+  );
+}
+
+// ══════════════════════════════════════════════════════════════════════════
+// ═══ HISTORY PANEL ════════════════════════════════════════════════════
+// ══════════════════════════════════════════════════════════════════════════
+function HistoryPanel({onClose,orders,updO}){
+  const [auditLog,setAuditLog]=useState([]);
+  const [loading,setLoading]=useState(true);
+  const [filter,setFilter]=useState("all");
+
+  useEffect(()=>{
+    SB.get("audit_log","order=created_at.desc&limit=200").then(rows=>{
+      setAuditLog(rows.map(r=>({
+        id:r.id,userId:r.user_id,username:r.username,name:r.name,
+        action:r.action,target:r.target,details:r.details,
+        reverted:r.reverted,canUndo:r.can_undo,timestamp:r.created_at
+      })));
+      setLoading(false);
+    }).catch(()=>{
+      setAuditLog(getAuditLog());
+      setLoading(false);
+    });
+  },[]);
+
+  const filtered=auditLog.filter(e=>{
+    if(filter==="all")return true;
+    if(filter==="login")return e.action.includes("התחבר");
+    if(filter==="work")return e.action.includes("עבוד")||e.action.includes("סיום")||e.action.includes("הפסקה");
+    if(filter==="admin")return e.action.includes("משתמש")||e.action.includes("ייבוא")||e.action.includes("מחיקה");
+    return true;
+  });
+
+  const actionColor=a=>{
+    if(a.includes("התחבר"))return"#60a5fa";
+    if(a.includes("סיום")||a.includes("הושלם"))return"#10b981";
+    if(a.includes("הפסקה"))return"#f59e0b";
+    if(a.includes("מחיקה")||a.includes("ביטול"))return"#ef4444";
+    if(a.includes("הוספ")||a.includes("יצירה"))return"#a78bfa";
+    return"#8b95a8";
+  };
+
+  return(
+    <Modal onClose={onClose} wide>
+      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:16}}>
+        <div style={{fontWeight:700,fontSize:18,color:"#60a5fa"}}>📋 היסטוריית פעילות</div>
+        <IBtn onClick={onClose}>✕</IBtn>
+      </div>
+      <div style={{display:"flex",gap:6,marginBottom:14,flexWrap:"wrap"}}>
+        {[["all","הכל"],["login","התחברויות"],["work","עבודה"],["admin","ניהול"]].map(([v,l])=>(
+          <button key={v} onClick={()=>setFilter(v)} style={{background:filter===v?"var(--c-accent)":"var(--c-deep)",border:`1px solid ${filter===v?"var(--c-accent)":"var(--c-border)"}`,color:filter===v?"#fff":"var(--c-muted)",borderRadius:8,padding:"5px 12px",fontSize:12,fontFamily:"inherit",cursor:"pointer"}}>{l}</button>
+        ))}
+        <span style={{fontSize:12,color:"var(--c-dim)",padding:"5px 0",marginRight:"auto"}}>{filtered.length} רשומות</span>
+      </div>
+      {loading?<div style={{textAlign:"center",padding:30,color:"var(--c-dim)"}}>⏳ טוען...</div>:(
+        <div style={{display:"flex",flexDirection:"column",gap:4,maxHeight:"60vh",overflowY:"auto"}}>
+          {filtered.map(e=>(
+            <div key={e.id} style={{background:"var(--c-deep)",borderRadius:8,padding:"10px 12px",border:`1px solid ${actionColor(e.action)}22`,display:"flex",gap:10,alignItems:"flex-start"}}>
+              <div style={{width:8,height:8,borderRadius:"50%",background:actionColor(e.action),marginTop:5,flexShrink:0}}/>
+              <div style={{flex:1,minWidth:0}}>
+                <div style={{display:"flex",justifyContent:"space-between",flexWrap:"wrap",gap:4}}>
+                  <span><b style={{color:"#60a5fa"}}>{e.name||e.username||"מערכת"}</b><span style={{color:"var(--c-muted)",marginRight:6}}>{e.action}</span>{e.target&&<span style={{color:"var(--c-dim)",fontSize:12}}> — {e.target}</span>}</span>
+                  <span style={{fontSize:11,color:"var(--c-dim)",whiteSpace:"nowrap"}}>{e.timestamp?new Date(e.timestamp).toLocaleString("he-IL",{day:"2-digit",month:"2-digit",hour:"2-digit",minute:"2-digit"}):""}</span>
+                </div>
+                {e.details&&<div style={{fontSize:11,color:"var(--c-dim)",marginTop:3}}>{e.details}</div>}
+              </div>
+            </div>
+          ))}
+          {filtered.length===0&&<div style={{textAlign:"center",padding:20,color:"var(--c-dim)"}}>אין רשומות</div>}
+        </div>
+      )}
+    </Modal>
   );
 }
 
@@ -2304,6 +2821,10 @@ function App(){
   const [tab,setTab]=useState("dashboard");
   const [showAdmin,setShowAdmin]=useState(false);
   const [showAlerts,setShowAlerts]=useState(false);
+  const [showLiveBoard,setShowLiveBoard]=useState(false);
+  const [showReport,setShowReport]=useState(false);
+  const [showHistory,setShowHistory]=useState(false);
+  const [pushEnabled,setPushEnabled]=useState(()=>Notification?.permission==="granted");
   const [orders,setOrders]=useState([]);
   const [projects,setProjects]=useState(DEF_PROJ);
   const [stages,setStages]=useState(DEF_STAGES);
@@ -2333,70 +2854,36 @@ function App(){
     const lct=LS.get("customTasks");if(lct)setCustomTasks(lct);
     const lsb=LS.get("stageBlocks");if(lsb)setStageBlocks(lsb);
 
-    // Then sync from Google Sheets (overrides localStorage if available)
-    console.log("[SYNC] Starting gsLoad from:",GS_URL?"GS":"local only");
-    Promise.all([gsLoad(),gsLoadUsers()]).then(([data,users])=>{
-      console.log("[SYNC] gsLoad result:",data?"✅ got data ("+((data.orders||[]).length)+" orders)":"❌ no data");
-      console.log("[SYNC] gsLoadUsers result:",users?"✅ got "+users.length+" users":"❌ no users");
+    // Then load from Supabase
+    Promise.all([dbLoadAll(),dbLoadUsers()]).then(([data,users])=>{
       if(data){
-        if(data.orders)setOrders(data.orders);
-        if(data.projects)setProjects(data.projects);
-        if(data.stages)setStages(data.stages);
-        if(data.workLogs)setWorkLogs(data.workLogs);
-        if(data.customTasks)setCustomTasks(data.customTasks);
-        if(data.stageBlocks)setStageBlocks(data.stageBlocks);
-        if(data.orders)LS.set("orders",data.orders);
-        if(data.projects)LS.set("projects",data.projects);
-        if(data.stages)LS.set("stages",data.stages);
-        if(data.workLogs)LS.set("workLogs",data.workLogs);
-        if(data.customTasks)LS.set("customTasks",data.customTasks);
-        if(data.stageBlocks)LS.set("stageBlocks",data.stageBlocks);
+        if(data.orders?.length||!lo){setOrders(data.orders);LS.set("orders",data.orders)}
+        if(data.projects?.length||!lp){setProjects(data.projects);LS.set("projects",data.projects)}
+        if(data.stages?.length||!ls){setStages(data.stages);LS.set("stages",data.stages)}
+        if(data.workLogs?.length||!lw){setWorkLogs(data.workLogs);LS.set("workLogs",data.workLogs)}
+        if(data.customTasks){setCustomTasks(data.customTasks);LS.set("customTasks",data.customTasks)}
+        if(data.stageBlocks){setStageBlocks(data.stageBlocks);LS.set("stageBlocks",data.stageBlocks)}
       }
-      if(users)LS.set("users",users);
-      // If no data from GS and no local data, seed demo
-      if(!data&&!lo){
-        // Demo data seed code follows
-        const demoSerials1=[{id:"sn1a",sn:"ALF-PCB-0001",createdAt:"2026-01-05T08:00:00Z"},{id:"sn1b",sn:"ALF-PCB-0002",createdAt:"2026-01-05T08:00:00Z"},{id:"sn1c",sn:"ALF-PCB-0003",createdAt:"2026-01-05T08:00:00Z"},{id:"sn1d",sn:"ALF-PCB-0004",createdAt:"2026-01-06T08:00:00Z"},{id:"sn1e",sn:"ALF-PCB-0005",createdAt:"2026-01-06T08:00:00Z"},{id:"sn1f",sn:"ALF-PCB-0006",createdAt:"2026-01-07T08:00:00Z"},{id:"sn1g",sn:"ALF-PCB-0007",createdAt:"2026-01-07T08:00:00Z"},{id:"sn1h",sn:"ALF-PCB-0008",createdAt:"2026-01-08T08:00:00Z"}];
-        const demoSerials2=[{id:"sn2a",sn:"BET-SNS-0001",createdAt:"2026-01-10T08:00:00Z"},{id:"sn2b",sn:"BET-SNS-0002",createdAt:"2026-01-10T08:00:00Z"},{id:"sn2c",sn:"BET-SNS-0003",createdAt:"2026-01-10T08:00:00Z"},{id:"sn2d",sn:"BET-SNS-0004",createdAt:"2026-01-11T08:00:00Z"},{id:"sn2e",sn:"BET-SNS-0005",createdAt:"2026-01-11T08:00:00Z"},{id:"sn2f",sn:"BET-SNS-0006",createdAt:"2026-01-12T08:00:00Z"}];
-        const demoSerials3=[{id:"sn3a",sn:"GAM-MOT-0001",createdAt:"2026-02-01T08:00:00Z"},{id:"sn3b",sn:"GAM-MOT-0002",createdAt:"2026-02-01T08:00:00Z"},{id:"sn3c",sn:"GAM-MOT-0003",createdAt:"2026-02-02T08:00:00Z"},{id:"sn3d",sn:"GAM-MOT-0004",createdAt:"2026-02-02T08:00:00Z"},{id:"sn3e",sn:"GAM-MOT-0005",createdAt:"2026-02-03T08:00:00Z"}];
-        const demoSerials4=[{id:"sn4a",sn:"ALF-PWR-0001",createdAt:"2026-02-15T08:00:00Z"},{id:"sn4b",sn:"ALF-PWR-0002",createdAt:"2026-02-15T08:00:00Z"},{id:"sn4c",sn:"ALF-PWR-0003",createdAt:"2026-02-16T08:00:00Z"},{id:"sn4d",sn:"ALF-PWR-0004",createdAt:"2026-02-16T08:00:00Z"}];
-        const demoSerials5=[{id:"sn5a",sn:"BET-CTL-0001",createdAt:"2026-03-01T08:00:00Z"},{id:"sn5b",sn:"BET-CTL-0002",createdAt:"2026-03-01T08:00:00Z"},{id:"sn5c",sn:"BET-CTL-0003",createdAt:"2026-03-02T08:00:00Z"}];
-        const demoOrders=[
-          {id:"o1",woNumber:"WO-2601",pn:"ALF-PCB-100",description:"לוח PCB ראשי — בקר תעשייתי",qty:8,unitPrice:1200,projectId:"p1",receivedDate:"2026-01-05",targetDate:"2026-02-28",stageIds:["s1","s2","s3","s4","s5","s6"],serials:demoSerials1,shortages:[],defects:[{id:"d1",title:"הלחמה קרה ברכיב U3",serialId:"sn1c",type:"quality",severity:"high",description:"הלחמה קרה ב-IC U3",responsible:"יוסי כהן",discoveredDate:"2026-01-20",status:"closed",closedDate:"2026-01-22"},{id:"d2",title:"שריטה על PCB",serialId:"sn1f",type:"material",severity:"medium",description:"שריטה על שכבת הנחושת",responsible:"דנה לוי",discoveredDate:"2026-02-05",status:"open"},{id:"d3",title:"קצר ב-connector J4",serialId:"sn1h",type:"quality",severity:"critical",description:"קצר בין פין 3-4",responsible:"משה אברהם",discoveredDate:"2026-03-10",status:"open"}]},
-          {id:"o2",woNumber:"WO-2602",pn:"BET-SNS-200",description:"חיישן תעשייתי",qty:6,unitPrice:850,projectId:"p2",receivedDate:"2026-01-10",targetDate:"2026-03-15",stageIds:["s1","s2","s3","s5","s6"],serials:demoSerials2,shortages:[],defects:[{id:"d4",title:"סטיית כיול 2.3%",serialId:"sn2b",type:"process",severity:"medium",description:"סטייה מהספק",responsible:"רונית שרון",discoveredDate:"2026-02-12",status:"closed",closedDate:"2026-02-14"}]},
-          {id:"o3",woNumber:"WO-2603",pn:"GAM-MOT-300",description:"בקר מנוע סרוו — 3 צירים",qty:5,unitPrice:2200,projectId:"p3",receivedDate:"2026-02-01",targetDate:"2026-04-30",stageIds:["s1","s2","s3","s4","s5"],serials:demoSerials3,shortages:[],defects:[{id:"d5",title:"רעש חריג במנוע",serialId:"sn3a",type:"equipment",severity:"high",description:"רעש מכני 2kHz",responsible:"אבי מזרחי",discoveredDate:"2026-02-20",status:"open"},{id:"d6",title:"פלט PWM לא יציב",serialId:"sn3c",type:"process",severity:"medium",description:"תנודות PWM",responsible:"דנה לוי",discoveredDate:"2026-03-01",status:"open"}]},
-          {id:"o4",woNumber:"WO-2604",pn:"ALF-PWR-150",description:"ספק כוח תעשייתי 48V/10A",qty:4,unitPrice:680,projectId:"p1",receivedDate:"2026-02-15",targetDate:"2026-03-31",stageIds:["s1","s2","s3","s4","s5","s6"],serials:demoSerials4,shortages:[],defects:[]},
-          {id:"o5",woNumber:"WO-2605",pn:"BET-CTL-250",description:"בקר PLC מודולרי",qty:3,unitPrice:3500,projectId:"p2",receivedDate:"2026-03-01",targetDate:"2026-05-15",stageIds:["s1","s2","s3","s4","s5","s6"],serials:demoSerials5,shortages:[],defects:[{id:"d7",title:"תקלת Modbus RTU",serialId:"sn5a",type:"process",severity:"high",description:"תקשורת נופלת אחרי 30 דק",responsible:"אבי מזרחי",discoveredDate:"2026-03-14",status:"open"}]}
-        ];
-        const wN={"w1":"יוסי כהן","w2":"דנה לוי","w3":"משה אברהם","w4":"רונית שרון","w5":"אבי מזרחי"};
-        const dl=[];const mk=(sId,sn,stId,uId,dt,dur,oId)=>{const s2=new Date(dt);dl.push({id:"wl"+dl.length,userId:uId,userName:wN[uId],serialId:sId,serialSn:sn,stageId:stId,orderId:oId,startTime:s2.toISOString(),endTime:new Date(s2.getTime()+dur*60000).toISOString(),completed:true,durationMin:dur})};
-        // Demo work logs (abbreviated — same data as before)
-        mk("sn1a","ALF-PCB-0001","s1","w1","2026-01-06T07:30:00",18,"o1");mk("sn1a","ALF-PCB-0001","s2","w1","2026-01-07T08:00:00",42,"o1");mk("sn1a","ALF-PCB-0001","s3","w2","2026-01-08T07:45:00",35,"o1");mk("sn1a","ALF-PCB-0001","s4","w3","2026-01-09T08:15:00",28,"o1");mk("sn1a","ALF-PCB-0001","s5","w4","2026-01-10T07:30:00",22,"o1");mk("sn1a","ALF-PCB-0001","s6","w4","2026-01-10T14:00:00",15,"o1");
-        mk("sn1b","ALF-PCB-0002","s1","w1","2026-01-06T09:00:00",20,"o1");mk("sn1b","ALF-PCB-0002","s2","w2","2026-01-07T10:00:00",48,"o1");mk("sn1b","ALF-PCB-0002","s3","w2","2026-01-08T10:00:00",32,"o1");mk("sn1b","ALF-PCB-0002","s4","w3","2026-01-09T10:30:00",30,"o1");mk("sn1b","ALF-PCB-0002","s5","w3","2026-01-10T09:00:00",25,"o1");mk("sn1b","ALF-PCB-0002","s6","w4","2026-01-11T07:30:00",12,"o1");
-        mk("sn1c","ALF-PCB-0003","s1","w4","2026-01-07T07:30:00",16,"o1");mk("sn1c","ALF-PCB-0003","s2","w1","2026-01-08T08:00:00",55,"o1");mk("sn1c","ALF-PCB-0003","s3","w2","2026-01-09T08:00:00",40,"o1");mk("sn1c","ALF-PCB-0003","s4","w3","2026-01-10T08:00:00",26,"o1");mk("sn1c","ALF-PCB-0003","s5","w4","2026-01-11T10:00:00",20,"o1");mk("sn1c","ALF-PCB-0003","s6","w3","2026-01-12T07:30:00",14,"o1");
-        mk("sn1d","ALF-PCB-0004","s1","w1","2026-01-08T07:30:00",22,"o1");mk("sn1d","ALF-PCB-0004","s2","w5","2026-01-09T08:00:00",50,"o1");mk("sn1d","ALF-PCB-0004","s3","w5","2026-01-10T08:00:00",38,"o1");mk("sn1d","ALF-PCB-0004","s4","w3","2026-01-11T08:00:00",32,"o1");mk("sn1d","ALF-PCB-0004","s5","w4","2026-01-12T09:00:00",24,"o1");mk("sn1d","ALF-PCB-0004","s6","w4","2026-01-13T07:30:00",13,"o1");
-        mk("sn1e","ALF-PCB-0005","s1","w4","2026-01-09T07:30:00",19,"o1");mk("sn1e","ALF-PCB-0005","s2","w2","2026-01-10T08:00:00",44,"o1");mk("sn1e","ALF-PCB-0005","s3","w2","2026-01-11T08:00:00",36,"o1");mk("sn1e","ALF-PCB-0005","s4","w3","2026-01-12T08:00:00",29,"o1");mk("sn1e","ALF-PCB-0005","s5","w3","2026-01-13T08:00:00",21,"o1");mk("sn1e","ALF-PCB-0005","s6","w4","2026-01-14T07:30:00",11,"o1");
-        mk("sn1f","ALF-PCB-0006","s1","w1","2026-02-01T07:30:00",17,"o1");mk("sn1f","ALF-PCB-0006","s2","w5","2026-02-02T08:00:00",46,"o1");mk("sn1f","ALF-PCB-0006","s3","w2","2026-02-03T08:00:00",33,"o1");
-        mk("sn1g","ALF-PCB-0007","s1","w1","2026-02-05T07:30:00",21,"o1");mk("sn1g","ALF-PCB-0007","s2","w1","2026-02-06T08:00:00",52,"o1");
-        mk("sn1h","ALF-PCB-0008","s1","w4","2026-03-01T07:30:00",20,"o1");
-        mk("sn2a","BET-SNS-0001","s1","w1","2026-01-12T07:30:00",15,"o2");mk("sn2a","BET-SNS-0001","s2","w5","2026-01-13T08:00:00",38,"o2");mk("sn2a","BET-SNS-0001","s3","w5","2026-01-14T08:00:00",30,"o2");mk("sn2a","BET-SNS-0001","s5","w3","2026-01-15T08:00:00",24,"o2");mk("sn2a","BET-SNS-0001","s6","w4","2026-01-16T07:30:00",10,"o2");
-        mk("sn2b","BET-SNS-0002","s1","w4","2026-01-13T07:30:00",14,"o2");mk("sn2b","BET-SNS-0002","s2","w2","2026-01-14T08:00:00",40,"o2");mk("sn2b","BET-SNS-0002","s3","w2","2026-01-15T08:00:00",28,"o2");mk("sn2b","BET-SNS-0002","s5","w3","2026-01-16T08:00:00",20,"o2");mk("sn2b","BET-SNS-0002","s6","w3","2026-01-17T07:30:00",12,"o2");
-        mk("sn2c","BET-SNS-0003","s1","w1","2026-01-14T07:30:00",16,"o2");mk("sn2c","BET-SNS-0003","s2","w5","2026-01-15T08:00:00",42,"o2");mk("sn2c","BET-SNS-0003","s3","w5","2026-01-16T08:00:00",34,"o2");mk("sn2c","BET-SNS-0003","s5","w4","2026-01-17T08:00:00",22,"o2");mk("sn2c","BET-SNS-0003","s6","w4","2026-01-18T07:30:00",11,"o2");
-        mk("sn2d","BET-SNS-0004","s1","w1","2026-02-10T07:30:00",18,"o2");mk("sn2d","BET-SNS-0004","s2","w2","2026-02-11T08:00:00",45,"o2");
-        mk("sn2e","BET-SNS-0005","s1","w4","2026-02-15T07:30:00",17,"o2");
-        mk("sn3a","GAM-MOT-0001","s1","w1","2026-02-03T07:30:00",25,"o3");mk("sn3a","GAM-MOT-0001","s2","w5","2026-02-04T08:00:00",65,"o3");mk("sn3a","GAM-MOT-0001","s3","w5","2026-02-05T08:00:00",55,"o3");mk("sn3a","GAM-MOT-0001","s4","w3","2026-02-06T08:00:00",40,"o3");mk("sn3a","GAM-MOT-0001","s5","w3","2026-02-07T08:00:00",30,"o3");
-        mk("sn3b","GAM-MOT-0002","s1","w4","2026-02-05T07:30:00",22,"o3");mk("sn3b","GAM-MOT-0002","s2","w2","2026-02-06T08:00:00",58,"o3");mk("sn3b","GAM-MOT-0002","s3","w2","2026-02-07T08:00:00",48,"o3");
-        mk("sn3c","GAM-MOT-0003","s1","w1","2026-02-10T07:30:00",24,"o3");
-        mk("sn4a","ALF-PWR-0001","s1","w1","2026-02-18T07:30:00",14,"o4");mk("sn4a","ALF-PWR-0001","s2","w2","2026-02-19T08:00:00",35,"o4");mk("sn4a","ALF-PWR-0001","s3","w2","2026-02-20T08:00:00",28,"o4");mk("sn4a","ALF-PWR-0001","s4","w3","2026-02-21T08:00:00",22,"o4");
-        mk("sn4b","ALF-PWR-0002","s1","w4","2026-03-01T07:30:00",16,"o4");
-        mk("sn5a","BET-CTL-0001","s1","w1","2026-03-05T07:30:00",20,"o5");
-        setOrders(demoOrders);setWorkLogs(dl);LS.set("users",FALLBACK_USERS);
-        // Also save demo data to GS so other devices can sync
-        LS.set("orders",demoOrders);LS.set("projects",DEF_PROJ);LS.set("stages",DEF_STAGES);LS.set("workLogs",dl);
-        if(GS_URL){fetch(GS_URL,{method:"POST",body:JSON.stringify({action:"save",payload:{orders:demoOrders,projects:DEF_PROJ,stages:DEF_STAGES,workLogs:dl}})}).catch(()=>{});fetch(GS_URL,{method:"POST",body:JSON.stringify({action:"saveUsers",users:FALLBACK_USERS})}).catch(()=>{})}
+      if(users?.length){LS.set("users",users)}
+      // Seed demo projects/stages if DB is empty
+      if(data&&!data.orders?.length&&!lo){
+        SB.upsert("projects",DEF_PROJ.map(projectToDb)).catch(()=>{});
+        SB.upsert("stages",DEF_STAGES.map(stageToDb)).catch(()=>{});
       }
-      // Restore session
-      try{const saved=localStorage.getItem(LS_PREFIX+"session");if(saved){const s3=JSON.parse(saved);const freshUsers=users||getUsers();const found=freshUsers.find(u=>u.id===s3.id&&u.username===s3.username&&u.active!==false);if(found)setCurrentUser(found);else localStorage.removeItem(LS_PREFIX+"session")}}catch{}
+      // Restore session from fresh user list
+      try{
+        const saved=localStorage.getItem(LS_PREFIX+"session");
+        if(saved){
+          const s3=JSON.parse(saved);
+          const freshUsers=users?.length?users:getUsers();
+          const found=freshUsers.find(u=>u.id===s3.id&&u.username===s3.username&&u.active!==false);
+          if(found)setCurrentUser(found);else localStorage.removeItem(LS_PREFIX+"session");
+        }
+      }catch{}
+      setLoading(false);
+    }).catch(()=>{
+      // Supabase unreachable — use local cache
+      try{const saved=localStorage.getItem(LS_PREFIX+"session");if(saved){const s3=JSON.parse(saved);const found=getUsers().find(u=>u.id===s3.id&&u.username===s3.username&&u.active!==false);if(found)setCurrentUser(found)}}catch{}
       setLoading(false);
     });
   },[]);
@@ -2406,14 +2893,13 @@ function App(){
   useEffect(()=>{sRef.current=stages},[stages]);
   useEffect(()=>{wRef.current=workLogs},[workLogs]);
 
-  // ── Refresh from Google Sheets ──────────────────────────────────
+  // ── Refresh from Supabase ──────────────────────────────────────
   const lastPersistRef=useRef(0);
-  const refreshFromGS=useCallback(async(force)=>{
-    // Skip if we just saved (prevents overwriting local changes with stale GS data)
+  const refreshFromDB=useCallback(async(force)=>{
     if(!force&&Date.now()-lastPersistRef.current<5000)return;
     setSync("saving");
     try{
-      const [data,users]=await Promise.all([gsLoad(),gsLoadUsers()]);
+      const [data,users]=await Promise.all([dbLoadAll(),dbLoadUsers()]);
       if(data){
         if(data.orders)setOrders(data.orders);
         if(data.projects)setProjects(data.projects);
@@ -2422,23 +2908,57 @@ function App(){
         if(data.customTasks)setCustomTasks(data.customTasks);
         if(data.stageBlocks)setStageBlocks(data.stageBlocks);
       }
-      if(users)LS.set("users",users);
+      if(users?.length)LS.set("users",users);
       setSync("ok");
     }catch{setSync("error")}
   },[]);
 
-  // Auto-refresh when tab becomes visible (user switches back to app)
+  // ── Supabase Realtime ──────────────────────────────────────────
+  const [onlineUsers,setOnlineUsers]=useState([]);
   useEffect(()=>{
-    const handler=()=>{if(document.visibilityState==="visible")refreshFromGS()};
-    document.addEventListener("visibilitychange",handler);
-    return()=>document.removeEventListener("visibilitychange",handler);
-  },[refreshFromGS]);
-
-  // Polling every 30 seconds
-  useEffect(()=>{
-    const interval=setInterval(()=>refreshFromGS(),30000);
-    return()=>clearInterval(interval);
-  },[refreshFromGS]);
+    if(!currentUser)return;
+    // Connect to Supabase Realtime via WebSocket
+    const wsUrl=`wss://lwiurzkiojctwzllpnmr.supabase.co/realtime/v1/websocket?apikey=${SB_KEY}&vsn=1.0.0`;
+    let ws=null;let heartbeat=null;let reconnectTimer=null;let dead=false;
+    const connect=()=>{
+      try{
+        ws=new WebSocket(wsUrl);
+        ws.onopen=()=>{
+          // Join all relevant channels
+          const tables=["orders","work_logs","custom_tasks","stages","projects","stage_blocks"];
+          tables.forEach(t=>{
+            ws.send(JSON.stringify({topic:`realtime:public:${t}`,event:"phx_join",payload:{config:{broadcast:{ack:false},presence:{key:""},postgres_changes:[{event:"*",schema:"public",table:t}]}},ref:"1"}));
+          });
+          // Heartbeat every 25s
+          heartbeat=setInterval(()=>{try{ws.send(JSON.stringify({topic:"phoenix",event:"heartbeat",payload:{},ref:"hb"}))}catch{}},25000);
+          setSync("ok");
+        };
+        ws.onmessage=async(e)=>{
+          try{
+            const msg=JSON.parse(e.data);
+            if(msg.event==="postgres_changes"||msg.payload?.data?.type){
+              // Something changed in DB — refresh only the changed table
+              const tbl=msg.payload?.data?.table||msg.topic?.split(":")?.[2];
+              if(!tbl)return;
+              if(["orders"].includes(tbl)){const rows=await SB.get("orders","order=created_at.asc");setOrders(rows.map(dbToOrder));LS.set("orders",rows.map(dbToOrder))}
+              if(["work_logs"].includes(tbl)){const rows=await SB.get("work_logs","order=created_at.asc");setWorkLogs(rows.map(dbToLog));LS.set("workLogs",rows.map(dbToLog))}
+              if(["custom_tasks"].includes(tbl)){const rows=await SB.get("custom_tasks","order=created_at.asc");setCustomTasks(rows.map(dbToTask));LS.set("customTasks",rows.map(dbToTask))}
+              if(["stages"].includes(tbl)){const rows=await SB.get("stages","order=stage_order.asc");setStages(rows.map(dbToStage));LS.set("stages",rows.map(dbToStage))}
+              if(["projects"].includes(tbl)){const rows=await SB.get("projects","order=name.asc");setProjects(rows.map(dbToProject));LS.set("projects",rows.map(dbToProject))}
+              if(["stage_blocks"].includes(tbl)){const rows=await SB.get("stage_blocks","order=created_at.asc");setStageBlocks(rows.map(dbToBlock));LS.set("stageBlocks",rows.map(dbToBlock))}
+            }
+          }catch{}
+        };
+        ws.onclose=()=>{
+          clearInterval(heartbeat);
+          if(!dead)reconnectTimer=setTimeout(connect,5000);
+        };
+        ws.onerror=()=>{ws.close()};
+      }catch{}
+    };
+    connect();
+    return()=>{dead=true;clearInterval(heartbeat);clearTimeout(reconnectTimer);try{ws?.close()}catch{}};
+  },[currentUser?.id]);
 
   const ctRef=useRef(customTasks);
   useEffect(()=>{ctRef.current=customTasks},[customTasks]);
@@ -2447,9 +2967,23 @@ function App(){
 
   const persist=(no,np,ns,nw,nct,nsb)=>{
     const o=no??oRef.current,p=np??pRef.current,s=ns??sRef.current,w=nw??wRef.current,ct=nct??ctRef.current,sb=nsb??sbRef.current;
+    // Always save to localStorage immediately
     LS.set("orders",o);LS.set("projects",p);LS.set("stages",s);LS.set("workLogs",w);LS.set("customTasks",ct);LS.set("stageBlocks",sb);
     lastPersistRef.current=Date.now();
-    setSync("saving");clearTimeout(saveTimer);saveTimer=setTimeout(async()=>{try{await fetch(GS_URL,{method:"POST",body:JSON.stringify({action:"save",payload:{orders:o,projects:p,stages:s,workLogs:w,customTasks:ct,stageBlocks:sb}})});setSync("ok")}catch{setSync("error")}},800);
+    setSync("saving");clearTimeout(saveTimer);
+    saveTimer=setTimeout(async()=>{
+      try{
+        await Promise.all([
+          SB.upsert("orders",o.map(orderToDb)),
+          SB.upsert("projects",p.map(projectToDb)),
+          SB.upsert("stages",s.map(stageToDb)),
+          SB.upsert("stage_blocks",sb.map(blockToDb)),
+          SB.upsert("work_logs",w.map(logToDb)),
+          SB.upsert("custom_tasks",ct.map(taskToDb)),
+        ]);
+        setSync("ok");
+      }catch(e){console.warn("Supabase save error",e);setSync("error")}
+    },800);
   };
 
   const handleLogin=u=>{setCurrentUser(u);try{localStorage.setItem(LS_PREFIX+"session",JSON.stringify({id:u.id,username:u.username}))}catch{}};
@@ -2508,9 +3042,13 @@ function App(){
     setWorkLogs(prev=>{
       const next=prev.map(w=>w.id===logId?{...w,completed:true,endTime:nowISO(),durationMin:duration}:w);
       persist(null,null,null,next);
-      // Check auto delivery
       const log=next.find(w=>w.id===logId);
       if(log?.orderId)setTimeout(()=>checkAutoDelivery(log.orderId,next),100);
+      // Push notification to admin
+      if(pushEnabled&&currentUser?.role!=="admin"){
+        const stage=stages.find(s=>s.id===log?.stageId);
+        PushNotify.send("✅ שלב הושלם",`${log?.userName} סיים ${stage?.name||""} — ${log?.serialSn}`,"work-done");
+      }
       return next;
     });
     const log=workLogs.find(w=>w.id===logId);
@@ -2531,6 +3069,9 @@ function App(){
   const handlePauseTask=(taskId)=>{setCustomTasks(prev=>{const next=prev.map(t=>t.id===taskId?{...t,paused:true,pauseStart:nowISO(),pauseLog:[...(t.pauseLog||[]),{start:nowISO()}]}:t);persist(null,null,null,null,next);return next})};
   const handleResumeTask=(taskId)=>{setCustomTasks(prev=>{const next=prev.map(t=>{if(t.id!==taskId)return t;const pMin=t.pauseStart?Math.round((Date.now()-new Date(t.pauseStart).getTime())/60000):0;const pl=[...(t.pauseLog||[])];if(pl.length>0&&!pl[pl.length-1].end)pl[pl.length-1].end=nowISO();return{...t,paused:false,pauseStart:null,totalPauseMin:(t.totalPauseMin||0)+pMin,pauseLog:pl}});persist(null,null,null,null,next);return next})};
   const handleDeleteTask=(taskId)=>{setCustomTasks(prev=>{const next=prev.filter(t=>t.id!==taskId);persist(null,null,null,null,next);return next})};
+  const handleMarkPartialTask=(taskId)=>{setCustomTasks(prev=>{const next=prev.map(t=>t.id===taskId?{...t,partial:!t.partial}:t);persist(null,null,null,null,next);return next})};
+  const handleMarkDoneTask=(taskId)=>{setCustomTasks(prev=>{const next=prev.map(t=>t.id===taskId?{...t,completed:true,partial:false,endTime:t.endTime||nowISO()}:t);persist(null,null,null,null,next);return next})};
+  const handleUpdateTask=(taskId,updates)=>{setCustomTasks(prev=>{const next=prev.map(t=>t.id===taskId?{...t,...updates}:t);persist(null,null,null,null,next);return next})};
   const handleDeleteLog=(ids)=>{setWorkLogs(prev=>{const next=prev.filter(w=>!ids.includes(w.id));persist(null,null,null,next);return next})};
   // Listen for delete from WorkersDashboard
   useEffect(()=>{const h=(e)=>{setCustomTasks(prev=>{const next=prev.filter(t=>t.id!==e.detail);persist(null,null,null,null,next);return next})};window.addEventListener("deleteTask",h);return()=>window.removeEventListener("deleteTask",h)},[]);
@@ -2559,6 +3100,13 @@ function App(){
     {id:"projects",label:"🏗️ פרויקטים"},
   ];
 
+  // Push notification enable on login for admin
+  useEffect(()=>{
+    if(isAdmin&&Notification?.permission==="default"){
+      PushNotify.request().then(ok=>setPushEnabled(ok));
+    }
+  },[isAdmin]);
+
   // Alert count for badge
   const alertCount=useMemo(()=>{let c=0;filteredOrders.forEach(o=>(o.defects||[]).filter(d=>d.status!=="closed"&&(d.severity==="critical"||d.severity==="high")).forEach(()=>c++));filteredOrders.filter(o=>o.targetDate&&new Date(o.targetDate)<new Date()).forEach(()=>c++);filteredWorkLogs.filter(w=>!w.completed).forEach(w=>{if(Math.round((Date.now()-new Date(w.startTime).getTime())/60000)>120)c++});return c},[filteredOrders,filteredWorkLogs]);
 
@@ -2579,13 +3127,13 @@ function App(){
   return(
     <AuthCtx.Provider value={{currentUser,canEdit,canViewProject}}>
       {showUpdate&&<UpdateBanner onUpdate={handleUpdate} onDismiss={()=>setShowUpdate(false)} lm={lm}/>}
-      <Navbar tab={tab} setTab={setTab} tabs={TABS} lightMode={lightMode} toggleLight={()=>setLightMode(p=>!p)} sync={sync} onAdmin={()=>setShowAdmin(true)} onLogout={handleLogout} alertCount={alertCount} onAlerts={()=>setShowAlerts(true)} onRefresh={()=>refreshFromGS(true)}/>
+      <Navbar tab={tab} setTab={setTab} tabs={TABS} lightMode={lightMode} toggleLight={()=>setLightMode(p=>!p)} sync={sync} onAdmin={()=>setShowAdmin(true)} onLogout={handleLogout} alertCount={alertCount} onAlerts={()=>setShowAlerts(true)} onRefresh={()=>refreshFromDB(true)} onLiveBoard={()=>setShowLiveBoard(true)} onReport={()=>setShowReport(true)} onHistory={()=>setShowHistory(true)} isAdmin={isAdmin}/>
       <main className="main-content" style={{maxWidth:1440,margin:"0 auto",padding:"16px 14px",paddingBottom:showInstall?"100px":"calc(16px + env(safe-area-inset-bottom,0px))"}}>
         {tab==="dashboard"&&<Dashboard orders={filteredOrders} projects={filteredProjects} stages={stages} users={getUsers()} workLogs={filteredWorkLogs}/>}
         {tab==="orders"&&<Orders orders={filteredOrders} projects={filteredProjects} stages={stages} stageBlocks={stageBlocks} updO={updO} workLogs={filteredWorkLogs} onWorkLog={handleStartWork}/>}
         {tab==="shortages"&&<Shortages orders={filteredOrders} updO={updO} projects={filteredProjects}/>}
-        {tab==="mywork"&&<MyWork orders={filteredOrders} stages={stages} workLogs={filteredWorkLogs} onStartWork={handleStartWork} onEndWork={handleEndWork} onPauseWork={handlePauseWork} onResumeWork={handleResumeWork} customTasks={customTasks} onAddTask={handleAddTask} onStartTask={handleStartTask} onEndTask={handleEndTask} onPauseTask={handlePauseTask} onResumeTask={handleResumeTask} onDeleteTask={handleDeleteTask}/>}
-        {tab==="workers"&&isAdmin&&<WorkersDashboard users={getUsers()} workLogs={filteredWorkLogs} orders={filteredOrders} stages={stages} customTasks={customTasks} onAddTask={handleAddTask} onDeleteLog={handleDeleteLog}/>}
+        {tab==="mywork"&&<MyWork orders={filteredOrders} stages={stages} workLogs={filteredWorkLogs} onStartWork={handleStartWork} onEndWork={handleEndWork} onPauseWork={handlePauseWork} onResumeWork={handleResumeWork} customTasks={customTasks} onAddTask={handleAddTask} onStartTask={handleStartTask} onEndTask={handleEndTask} onPauseTask={handlePauseTask} onResumeTask={handleResumeTask} onDeleteTask={handleDeleteTask} onMarkPartialTask={handleMarkPartialTask} onMarkDoneTask={handleMarkDoneTask}/>}
+        {tab==="workers"&&isAdmin&&<WorkersDashboard users={getUsers()} workLogs={filteredWorkLogs} orders={filteredOrders} stages={stages} customTasks={customTasks} onAddTask={handleAddTask} onDeleteLog={handleDeleteLog} onDeleteTask={handleDeleteTask} onMarkPartialTask={handleMarkPartialTask} onMarkDoneTask={handleMarkDoneTask}/>}
         {tab==="yield"&&<YieldDashboard orders={filteredOrders} projects={filteredProjects} stages={stages} workLogs={filteredWorkLogs}/>}
         {tab==="stages"&&isAdmin&&<StagesManagement stages={stages} setStages={setStages} stageBlocks={stageBlocks} setStageBlocks={setStageBlocks} persist={persist}/>}
         {tab==="projects"&&<Projects projects={filteredProjects} orders={filteredOrders} updP={updP} stages={stages} workLogs={filteredWorkLogs}/>}
@@ -2594,6 +3142,9 @@ function App(){
       {showInstall&&<InstallBanner onInstall={handleInstall} onDismiss={()=>setShowInstall(false)} lm={lm}/>}
       {showAdmin&&isAdmin&&<AdminPanel projects={projects} stages={stages} onClose={()=>setShowAdmin(false)} lightMode={lightMode} updO={updO}/>}
       {showAlerts&&<AlertsPanel orders={filteredOrders} stages={stages} workLogs={filteredWorkLogs} users={getUsers()} onClose={()=>setShowAlerts(false)}/>}
+      {showLiveBoard&&isAdmin&&<LiveFactoryBoard orders={filteredOrders} workLogs={filteredWorkLogs} stages={stages} customTasks={customTasks} users={getUsers()} onClose={()=>setShowLiveBoard(false)}/>}
+      {showReport&&isAdmin&&<MonthlyReportModal orders={filteredOrders} workLogs={filteredWorkLogs} stages={stages} projects={filteredProjects} users={getUsers()} onClose={()=>setShowReport(false)}/>}
+      {showHistory&&isAdmin&&<HistoryPanel orders={filteredOrders} updO={updO} onClose={()=>setShowHistory(false)}/>}
     </AuthCtx.Provider>
   );
 }
