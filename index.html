@@ -3238,6 +3238,7 @@ function App(){
   // Service Worker
   useEffect(()=>{if(!("serviceWorker" in navigator))return;navigator.serviceWorker.register("./sw.js?v=3").then(reg=>{swRegRef.current=reg;if(reg.waiting)setShowUpdate(true);reg.addEventListener("updatefound",()=>{const nw=reg.installing;if(!nw)return;nw.addEventListener("statechange",()=>{if(nw.state==="installed"&&navigator.serviceWorker.controller)setShowUpdate(true)})});setInterval(()=>reg.update(),30*60*1000)}).catch(()=>{});navigator.serviceWorker.addEventListener("controllerchange",()=>window.location.reload())},[]);
   // PWA Install
+  const handleInstall=async()=>{if(!installPrompt)return;installPrompt.prompt();setInstallPrompt(null);setShowInstall(false)};
   const handleUpdate=()=>{const r=swRegRef.current;if(r?.waiting)r.waiting.postMessage({type:"SKIP_WAITING"});else window.location.reload();setShowUpdate(false)};
 
   if(!currentUser)return(<AuthCtx.Provider value={{currentUser,canEdit:false,canViewProject:()=>false}}><LoginScreen onLogin={handleLogin} lightMode={lightMode} toggleLight={()=>setLightMode(p=>!p)}/></AuthCtx.Provider>);
