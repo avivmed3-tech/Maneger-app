@@ -11,6 +11,18 @@
 <meta name="mobile-web-app-capable" content="yes"/>
 <link rel="manifest" href="manifest.json"/>
 <link rel="apple-touch-icon" href="icon-192.png"/>
+<link rel="icon" type="image/png" sizes="192x192" href="icon-192.png"/>
+<meta name="description" content="מערכת SaaS לניהול רצפת ייצור — מעקב הזמנות, שלבי עבודה, מספרים סידוריים, ביצועי עובדים ודוחות בזמן אמת"/>
+<meta name="keywords" content="ניהול ייצור, מפעל, קו ייצור, מעקב הזמנות, SaaS, production management"/>
+<meta name="author" content="Production Line Manager"/>
+<meta property="og:type" content="website"/>
+<meta property="og:title" content="ניהול קו ייצור — מערכת ניהול מפעל חכמה"/>
+<meta property="og:description" content="מעקב הזמנות, שלבי עבודה, מספרים סידוריים, ביצועי עובדים ודוחות — הכל במקום אחד"/>
+<meta property="og:image" content="icon-512.png"/>
+<meta property="og:locale" content="he_IL"/>
+<meta name="twitter:card" content="summary"/>
+<meta name="twitter:title" content="ניהול קו ייצור"/>
+<meta name="twitter:description" content="מערכת SaaS לניהול רצפת ייצור במפעלים"/>
 <title>⚙️ ניהול קו ייצור</title>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
@@ -74,6 +86,10 @@ button{font-family:inherit;cursor:pointer}
 .fade-in{animation:fadeIn .3s ease-out}
 @keyframes shimmer{0%{background-position:200% 0}100%{background-position:-200% 0}}
 .skel{background:linear-gradient(90deg,var(--c-border) 25%,var(--c-border2) 50%,var(--c-border) 75%);background-size:200% 100%;animation:shimmer 1.5s ease-in-out infinite;border-radius:8px}
+@keyframes toastIn{from{opacity:0;transform:translateY(-12px) scale(.95)}to{opacity:1;transform:none}}
+@keyframes toastOut{from{opacity:1;transform:none}to{opacity:0;transform:translateY(-12px) scale(.95)}}
+.toast-in{animation:toastIn .25s ease-out forwards}
+.toast-out{animation:toastOut .2s ease-in forwards}
 </style>
 </head>
 <body>
@@ -333,6 +349,44 @@ const SkeletonDashboard=()=>(
     </div>
   </div>
 );
+// ── Toast Notification System ────────────────────────────────────────────
+const ToastCtx=React.createContext({toast:()=>{}});
+const useToast=()=>React.useContext(ToastCtx);
+function ToastProvider({children}){
+  const [toasts,setToasts]=useState([]);
+  const toast=useCallback((msg,type="info",duration=3500)=>{
+    const id=Date.now()+Math.random();
+    setToasts(p=>[...p,{id,msg,type,leaving:false}]);
+    setTimeout(()=>setToasts(p=>p.map(t=>t.id===id?{...t,leaving:true}:t)),duration);
+    setTimeout(()=>setToasts(p=>p.filter(t=>t.id!==id)),duration+250);
+  },[]);
+  const colors={success:{bg:"#052e16",border:"#10b981",icon:"✅",text:"#6ee7b7"},error:{bg:"#450a0a",border:"#ef4444",icon:"❌",text:"#fca5a5"},warning:{bg:"#451a03",border:"#f59e0b",icon:"⚠️",text:"#fcd34d"},info:{bg:"#0c1e3a",border:"#3b82f6",icon:"ℹ️",text:"#93c5fd"}};
+  const colorsLight={success:{bg:"#f0fdf4",border:"#16a34a",icon:"✅",text:"#15803d"},error:{bg:"#fef2f2",border:"#dc2626",icon:"❌",text:"#dc2626"},warning:{bg:"#fffbeb",border:"#d97706",icon:"⚠️",text:"#92400e"},info:{bg:"#eff6ff",border:"#2563eb",icon:"ℹ️",text:"#1d4ed8"}};
+  const lm=document.body.classList.contains("light-mode");
+  const cm=lm?colorsLight:colors;
+  return(
+    <ToastCtx.Provider value={{toast}}>
+      {children}
+      <div style={{position:"fixed",top:12,left:"50%",transform:"translateX(-50%)",zIndex:9999,display:"flex",flexDirection:"column",gap:8,width:"90%",maxWidth:400,pointerEvents:"none"}}>
+        {toasts.map(t=>{const c=cm[t.type]||cm.info;return(
+          <div key={t.id} className={t.leaving?"toast-out":"toast-in"} style={{background:c.bg,border:`1px solid ${c.border}`,borderRadius:10,padding:"10px 14px",display:"flex",alignItems:"center",gap:10,boxShadow:"0 8px 24px #0004",pointerEvents:"auto"}}>
+            <span style={{fontSize:18,flexShrink:0}}>{c.icon}</span>
+            <span style={{fontSize:13,color:c.text,flex:1,lineHeight:1.4}}>{t.msg}</span>
+          </div>
+        )})}
+      </div>
+    </ToastCtx.Provider>
+  );
+}
+// ── Empty State Component ────────────────────────────────────────────────
+const EmptyState=({icon="📭",title="אין נתונים",subtitle,action,actionLabel})=>(
+  <div style={{textAlign:"center",padding:"40px 20px",color:"var(--c-dim)"}}>
+    <div style={{fontSize:40,marginBottom:10,opacity:.7}}>{icon}</div>
+    <div style={{fontSize:15,fontWeight:600,color:"var(--c-muted)",marginBottom:4}}>{title}</div>
+    {subtitle&&<div style={{fontSize:12,color:"var(--c-dim)",marginBottom:action?14:0}}>{subtitle}</div>}
+    {action&&<button onClick={action} style={{background:"var(--c-accent)",color:"#fff",border:"none",borderRadius:8,padding:"8px 18px",fontSize:13,fontWeight:600,fontFamily:"inherit"}}>{actionLabel||"התחל"}</button>}
+  </div>
+);
 const SegBtn=({options,value,onChange})=>(
   <div style={{display:"flex",flexWrap:"wrap"}}>
     {options.map(([v,l],i)=>(
@@ -486,9 +540,9 @@ function LoginScreen({onLogin,lightMode,toggleLight}){
       <div style={{background:lm?"#ffffff":"#131829",borderRadius:20,padding:"clamp(24px,6vw,44px) clamp(20px,6vw,40px)",maxWidth:420,width:"100%",border:`1px solid ${lm?"#dde1e8":"#1e2a42"}`,boxShadow:lm?"0 8px 40px #0001":"0 20px 60px #000a"}}>
         <div style={{textAlign:"center",marginBottom:32}}><div style={{fontSize:52,marginBottom:10}}>⚙️</div><div style={{fontSize:24,fontWeight:800,color:lm?"#1a1f2e":"#e2e8f0",letterSpacing:-.5}}>ניהול קו ייצור</div><div style={{fontSize:13,color:lm?"#5a6478":"#8b95a8",marginTop:6}}>כניסה למערכת</div></div>
         <div style={{display:"flex",flexDirection:"column",gap:16}}>
-          <div><label style={{fontSize:12,color:"var(--c-muted)",fontWeight:600,display:"block",marginBottom:5}}>שם משתמש</label><input value={username} onChange={e=>setUsername(e.target.value)} onKeyDown={e=>e.key==="Enter"&&attempt()} placeholder="הכנס שם משתמש"/></div>
-          <div><label style={{fontSize:12,color:"var(--c-muted)",fontWeight:600,display:"block",marginBottom:5}}>סיסמה</label>
-            <div style={{position:"relative"}}><input type={showPass?"text":"password"} value={password} onChange={e=>setPassword(e.target.value)} onKeyDown={e=>e.key==="Enter"&&attempt()} placeholder="הכנס סיסמה" style={{paddingLeft:44}}/><button onClick={()=>setShowPass(p=>!p)} style={{position:"absolute",left:12,top:"50%",transform:"translateY(-50%)",background:"none",border:"none",fontSize:18,color:"var(--c-muted)",lineHeight:1}}>{showPass?"🙈":"👁️"}</button></div>
+          <div><label htmlFor="login-user" style={{fontSize:12,color:"var(--c-muted)",fontWeight:600,display:"block",marginBottom:5}}>שם משתמש</label><input id="login-user" autoComplete="username" value={username} onChange={e=>setUsername(e.target.value)} onKeyDown={e=>e.key==="Enter"&&attempt()} placeholder="הכנס שם משתמש"/></div>
+          <div><label htmlFor="login-pass" style={{fontSize:12,color:"var(--c-muted)",fontWeight:600,display:"block",marginBottom:5}}>סיסמה</label>
+            <div style={{position:"relative"}}><input id="login-pass" autoComplete="current-password" type={showPass?"text":"password"} value={password} onChange={e=>setPassword(e.target.value)} onKeyDown={e=>e.key==="Enter"&&attempt()} placeholder="הכנס סיסמה" style={{paddingLeft:44}}/><button onClick={()=>setShowPass(p=>!p)} aria-label={showPass?"הסתר סיסמה":"הצג סיסמה"} style={{position:"absolute",left:12,top:"50%",transform:"translateY(-50%)",background:"none",border:"none",fontSize:18,color:"var(--c-muted)",lineHeight:1}}>{showPass?"🙈":"👁️"}</button></div>
           </div>
           {err&&<div style={{background:lm?"#fee2e2":"#450a0a",color:lm?"#dc2626":"#fca5a5",borderRadius:8,padding:"10px 14px",fontSize:13,border:lm?"1px solid #fecaca":"1px solid #7f1d1d"}}>❌ {err}</div>}
           <button onClick={attempt} disabled={loading} style={{background:loading?"#2563eb99":"var(--c-accent)",color:"#fff",border:"none",borderRadius:10,padding:"13px",fontWeight:700,fontSize:16,marginTop:4,fontFamily:"inherit"}}>{loading?"⏳ מתחבר...":"כניסה למערכת"}</button>
@@ -684,6 +738,7 @@ function Dashboard({orders,projects,stages,users,workLogs}){
 // ═══ ORDERS (Work Orders / פקעות) ════════════════════════════════════════
 // ══════════════════════════════════════════════════════════════════════════
 function OrderForm({initial,projects,stages,stageBlocks,onSave,onClose}){
+  const {toast}=useToast();
   const [f,setF]=useState({
     woNumber:initial?.woNumber||"",description:initial?.description||"",pn:initial?.pn||"",
     qty:initial?.qty||"",unitPrice:initial?.unitPrice||"",projectId:initial?.projectId||"",
@@ -705,7 +760,7 @@ function OrderForm({initial,projects,stages,stageBlocks,onSave,onClose}){
     setF(p=>({...p,blockId,stageIds:ids}));
   };
   const handleSave=()=>{
-    if(!f.woNumber||!f.qty)return alert('יש למלא מספר פק"ע וכמות');
+    if(!f.woNumber||!f.qty)return toast('יש למלא מספר פק"ע וכמות',"warning");
     let serials=initial?.serials||[];
     if(genSerials&&!initial){
       const prefix=snPrefix||f.pn||f.woNumber;
@@ -1380,6 +1435,7 @@ function AdminTasksBoard({customTasks,onDeleteTask,onMarkPartialTask,onMarkDoneT
 // ═══ MY WORK (Worker View) — Enhanced with Break, Bulk, Custom Tasks ════
 // ══════════════════════════════════════════════════════════════════════════
 function MyWork({orders,stages,workLogs,onStartWork,onEndWork,onPauseWork,onResumeWork,customTasks,onAddTask,onStartTask,onEndTask,onPauseTask,onResumeTask,onDeleteTask,onMarkPartialTask,onMarkDoneTask}){
+  const {toast}=useToast();
   const {currentUser}=useAuth();
   const myAccess=currentUser.stageAccess==="all"?stages.map(s=>s.id):(Array.isArray(currentUser.stageAccess)?currentUser.stageAccess:[]);
   const myActiveLogs=workLogs.filter(w=>w.userId===currentUser.id&&!w.completed);
@@ -1393,13 +1449,13 @@ function MyWork({orders,stages,workLogs,onStartWork,onEndWork,onPauseWork,onResu
   const accessible=orders.filter(o=>(o.stageIds||[]).some(sid=>myAccess.includes(sid)));
 
   const startWork=(serialId,stageId,orderId)=>{
-    if(myActiveLog&&!myActiveLog.paused){alert("יש לך עבודה פעילה. סיים או עצור לפני שמתחיל חדשה.");return}
+    if(myActiveLog&&!myActiveLog.paused){toast("יש לך עבודה פעילה. סיים או עצור לפני שמתחיל חדשה.","warning");return}
     const order=orders.find(o=>o.id===orderId);const serial=(order?.serials||[]).find(s=>s.id===serialId);
     onStartWork({id:uid(),userId:currentUser.id,userName:currentUser.name,serialId,stageId,orderId,serialSn:serial?.sn||"",startTime:nowISO(),endTime:null,completed:false,durationMin:0,paused:false,pauseStart:null,totalPauseMin:0,pauseLog:[]});
   };
 
   const startBulk=(oId)=>{
-    if(myActiveLog&&!myActiveLog.paused){alert("יש עבודה פעילה");return}
+    if(myActiveLog&&!myActiveLog.paused){toast("יש עבודה פעילה","warning");return}
     const order=orders.find(o=>o.id===oId);
     const allStagesOrdered=(order?.stageIds||[]).map(sid=>stages.find(s2=>s2.id===sid)).filter(Boolean).sort((a,b)=>a.order-b.order);
     const groupId=uid();
@@ -1696,6 +1752,7 @@ function ActiveTimer({startTime,pauseMin=0}){
 // ═══ WORKERS DASHBOARD ══════════════════════════════════════════════════
 // ══════════════════════════════════════════════════════════════════════════
 function WorkersDashboard({users,workLogs,orders,stages,customTasks,onAddTask,onDeleteLog,onUpdateTask,onDeleteTask,onMarkPartialTask,onMarkDoneTask}){
+  const {toast}=useToast();
   const [search,setSearch]=useState("");
   const [period,setPeriod]=useState("all");
   const workers=users.filter(u=>u.role!=="admin"&&u.active!==false);
@@ -1742,7 +1799,7 @@ function WorkersDashboard({users,workLogs,orders,stages,customTasks,onAddTask,on
   });
 
   const addTask=()=>{
-    if(!taskName.trim()||!taskWorker)return alert("יש לבחור עובד ושם משימה");
+    if(!taskName.trim()||!taskWorker)return toast("יש לבחור עובד ושם משימה","warning");
     const u=users.find(u2=>u2.id===taskWorker);
     // Use the onAddTask from App (passed via customTasks handler)
     const task={id:uid(),userId:taskWorker,userName:u?.name||"",name:taskName.trim(),description:taskDesc.trim(),price:Number(taskPrice)||0,createdAt:nowISO(),active:false,completed:false,startTime:null,endTime:null,durationMin:0,paused:false,pauseStart:null,totalPauseMin:0,pauseLog:[]};
@@ -1855,6 +1912,7 @@ function WorkersDashboard({users,workLogs,orders,stages,customTasks,onAddTask,on
 // ═══ STAGES MANAGEMENT ══════════════════════════════════════════════════
 // ══════════════════════════════════════════════════════════════════════════
 function StagesManagement({stages,setStages,stageBlocks,setStageBlocks,persist}){
+  const {toast}=useToast();
   const [showForm,setShowForm]=useState(false);
   const [name,setName]=useState("");
   const [color,setColor]=useState("#3b82f6");
@@ -1879,7 +1937,7 @@ function StagesManagement({stages,setStages,stageBlocks,setStageBlocks,persist})
 
   // Block functions
   const addBlock=()=>{
-    if(!blockName.trim()||blockStages.length===0)return alert("יש לתת שם ולבחור לפחות שלב אחד");
+    if(!blockName.trim()||blockStages.length===0)return toast("יש לתת שם ולבחור לפחות שלב אחד","warning");
     const block={id:uid(),name:blockName.trim(),stages:blockStages.map((bs,i)=>({...bs,id:uid(),order:i+1}))};
     const nb=[...(stageBlocks||[]),block];
     setStageBlocks(nb);LS.set("stageBlocks",nb);persist(null,null,null,null,null,nb);
@@ -1997,11 +2055,12 @@ function StagesManagement({stages,setStages,stageBlocks,setStageBlocks,persist})
 // ═══ PROJECTS ═══════════════════════════════════════════════════════════
 // ══════════════════════════════════════════════════════════════════════════
 function Projects({projects,orders,updP,stages,workLogs}){
+  const {toast}=useToast();
   const {canEdit}=useAuth();
   const [showForm,setShowForm]=useState(false);
   const [name,setName]=useState("");
   const add=()=>{if(!name.trim())return;updP(prev=>[...prev,{id:uid(),name:name.trim()}]);setName("");setShowForm(false)};
-  const del=id=>{if(orders.some(o=>o.projectId===id))return alert('לא ניתן למחוק פרויקט עם פק"ע');updP(prev=>prev.filter(p=>p.id!==id))};
+  const del=id=>{if(orders.some(o=>o.projectId===id))return toast('לא ניתן למחוק פרויקט עם פק"ע',"warning");updP(prev=>prev.filter(p=>p.id!==id))};
   return(
     <div className="fade-in">
       <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:14}}>
@@ -2044,6 +2103,7 @@ function Projects({projects,orders,updP,stages,workLogs}){
 // ═══ ADMIN PANEL ════════════════════════════════════════════════════════
 // ══════════════════════════════════════════════════════════════════════════
 function AdminPanel({projects,stages,onClose,lightMode,updO}){
+  const {toast}=useToast();
   const {currentUser}=useAuth();
   const [users,setUsersLocal]=useState(getUsers());
   const [tab,setTab]=useState("users");
@@ -2059,8 +2119,8 @@ function AdminPanel({projects,stages,onClose,lightMode,updO}){
   const inp={background:lm?"#f7f8fa":"#0a0e1a",border:`1px solid ${lm?"#c8cdd6":"#283650"}`,color:text,borderRadius:6,padding:"7px 10px",paddingRight:"30px",fontSize:13,width:"100%",outline:"none",fontFamily:"inherit"};
 
   const addUser=async()=>{
-    if(!newUser.username||!newUser.password||!newUser.name)return alert("כל השדות הם חובה");
-    if(users.find(u=>u.username===newUser.username))return alert("שם משתמש קיים");
+    if(!newUser.username||!newUser.password||!newUser.name)return toast("כל השדות הם חובה","warning");
+    if(users.find(u=>u.username===newUser.username))return toast("שם משתמש קיים","warning");
     const hash=await sha256(newUser.password);
     const u={...newUser,id:uid(),password_hash:hash,password:undefined};
     delete u.password;
@@ -2071,7 +2131,7 @@ function AdminPanel({projects,stages,onClose,lightMode,updO}){
     setAddMode(false);
   };
   const saveUser=async()=>{
-    if(!editUser.username||!editUser.name)return alert("שם משתמש ושם מלא חובה");
+    if(!editUser.username||!editUser.name)return toast("שם משתמש ושם מלא חובה","warning");
     let u={...editUser};
     // If password field was changed (not empty and not a hash), re-hash it
     if(u.password&&u.password.length<60){
@@ -2095,7 +2155,7 @@ function AdminPanel({projects,stages,onClose,lightMode,updO}){
   };
   const undoImport=()=>{
     const snapshot=LS.get("importSnapshot");
-    if(!snapshot)return alert("אין גיבוי לשחזור");
+    if(!snapshot)return toast("אין גיבוי לשחזור","warning");
     if(!confirm(`לשחזר ${snapshot.length} פקעות מלפני הייבוא?`))return;
     updO(snapshot);
     LS.set("importSnapshot",null);
@@ -2410,8 +2470,9 @@ function doImport(file,projects,stages,cb){
 }
 
 function ExcelTab({orders,projects,stages,workLogs,users,updO}){
+  const {toast}=useToast();
   const [preview,setPreview]=useState(null);const[mode,setMode]=useState("replace");const[drag,setDrag]=useState(false);
-  const handleFile=file=>{doImport(file,projects,stages,(data,err)=>{if(err)return alert(err);setPreview(data)})};
+  const handleFile=file=>{doImport(file,projects,stages,(data,err)=>{if(err)return toast(err,"error");setPreview(data)})};
   return(
     <div className="fade-in">
       <h2 style={{margin:"0 0 14px"}}>📂 ייבוא / ייצוא Excel</h2>
@@ -2501,6 +2562,12 @@ function UpdateBanner({onUpdate,onDismiss,lm}){return(
     <div style={{display:"flex",gap:8,flexShrink:0}}><button onClick={onDismiss} style={{background:"none",border:`1px solid ${lm?"#16a34a":"#065f46"}`,borderRadius:7,padding:"5px 10px",color:lm?"#15803d":"#6ee7b7",fontSize:12,fontFamily:"inherit"}}>אחר כך</button><button onClick={onUpdate} style={{background:lm?"#16a34a":"#10b981",border:"none",borderRadius:8,padding:"6px 14px",color:"#fff",fontSize:13,fontWeight:700,fontFamily:"inherit"}}>עדכן →</button></div>
   </div>
 )}
+function OfflineBanner({lm}){return(
+  <div style={{position:"fixed",top:0,left:0,right:0,zIndex:1001,background:lm?"#fef2f2":"linear-gradient(135deg,#450a0a,#7f1d1d)",borderBottom:lm?"2px solid #dc2626":"2px solid #ef4444",padding:"8px 16px",display:"flex",alignItems:"center",gap:10,boxShadow:"0 4px 20px #0003"}}>
+    <div style={{fontSize:20,flexShrink:0}}>📡</div>
+    <div style={{flex:1}}><div style={{fontWeight:700,fontSize:13,color:lm?"#dc2626":"#fca5a5"}}>אין חיבור לאינטרנט</div><div style={{fontSize:11,color:lm?"#ef4444":"#f87171"}}>הנתונים המקומיים זמינים — שינויים יסונכרנו כשהחיבור יחזור</div></div>
+  </div>
+)}
 
 // ══════════════════════════════════════════════════════════════════════════
 // ═══ NAVBAR ═════════════════════════════════════════════════════════════
@@ -2524,8 +2591,8 @@ function Navbar({tab,setTab,tabs,lightMode,toggleLight,sync,onAdmin,onLogout,ale
           {tabs.map(t=>(<button key={t.id} onClick={()=>setTab(t.id)} style={{padding:"0 14px",height:52,background:"none",border:"none",color:tab===t.id?navActive:navMuted,borderBottom:tab===t.id?`3px solid ${navActive}`:"3px solid transparent",fontWeight:tab===t.id?700:400,fontSize:13,whiteSpace:"nowrap",fontFamily:"inherit"}}>{t.label}</button>))}
         </div>
         <div className="hide-mobile" style={{display:"flex",gap:4,alignItems:"center",flexShrink:0}}>
-          <button onClick={onAlerts} style={{background:alertCount>0?"#ef444422":"transparent",border:`1px solid ${alertCount>0?"#ef4444":navBorder}`,borderRadius:8,padding:"5px 10px",fontSize:14,color:alertCount>0?"#ef4444":navMuted,fontFamily:"inherit",position:"relative"}}>🔔{alertCount>0&&<span style={{position:"absolute",top:-4,right:-4,background:"#ef4444",color:"#fff",fontSize:9,fontWeight:700,borderRadius:10,padding:"1px 5px",minWidth:16,textAlign:"center"}}>{alertCount}</span>}</button>
-          <button onClick={toggleLight} style={{background:lm?"#e2e8f0":"#0d1120",border:`1px solid ${navBorder}`,borderRadius:8,padding:"5px 10px",fontSize:13,color:navMuted,fontFamily:"inherit"}}>{lm?"🌙":"☀️"}</button>
+          <button onClick={onAlerts} aria-label={`התראות${alertCount>0?` (${alertCount})`:""}`} style={{background:alertCount>0?"#ef444422":"transparent",border:`1px solid ${alertCount>0?"#ef4444":navBorder}`,borderRadius:8,padding:"5px 10px",fontSize:14,color:alertCount>0?"#ef4444":navMuted,fontFamily:"inherit",position:"relative"}}>🔔{alertCount>0&&<span style={{position:"absolute",top:-4,right:-4,background:"#ef4444",color:"#fff",fontSize:9,fontWeight:700,borderRadius:10,padding:"1px 5px",minWidth:16,textAlign:"center"}}>{alertCount}</span>}</button>
+          <button onClick={toggleLight} aria-label={lm?"מצב כהה":"מצב בהיר"} style={{background:lm?"#e2e8f0":"#0d1120",border:`1px solid ${navBorder}`,borderRadius:8,padding:"5px 10px",fontSize:13,color:navMuted,fontFamily:"inherit"}}>{lm?"🌙":"☀️"}</button>
           <div style={{fontSize:11,padding:"3px 8px",borderRadius:20,background:sync==="ok"?(lm?"#d1fae5":"#052e16"):sync==="saving"?(lm?"#dbeafe":"#1e3a5f"):(lm?"#fee2e2":"#450a0a"),color:sync==="ok"?(lm?"#059669":"#6ee7b7"):sync==="saving"?(lm?"#2563eb":"#93c5fd"):(lm?"#dc2626":"#fca5a5"),whiteSpace:"nowrap",cursor:"pointer",display:"flex",alignItems:"center",gap:4}} onClick={onRefresh} title="לחץ לרענון">
             {sync==="ok"&&<span style={{display:"inline-block",width:6,height:6,borderRadius:"50%",background:"#10b981",animation:"pulse 2s infinite"}}/>}
             {sync==="ok"?"בזמן אמת":sync==="saving"?"⏳":"❌"}
@@ -2556,9 +2623,9 @@ function Navbar({tab,setTab,tabs,lightMode,toggleLight,sync,onAdmin,onLogout,ale
           </div>
         </div>
         <div className="show-mobile-only" style={{display:"flex",gap:6,alignItems:"center",marginRight:"auto"}}>
-          <button onClick={onRefresh} style={{background:"none",border:`1px solid ${navBorder}`,borderRadius:8,padding:"5px 8px",fontSize:13,color:sync==="ok"?"#10b981":sync==="saving"?"#3b82f6":"#ef4444"}} title="רענן">{sync==="saving"?"⏳":"🔄"}</button>
-          <button onClick={onAlerts} style={{background:"none",border:`1px solid ${navBorder}`,borderRadius:8,padding:"5px 8px",fontSize:14,color:alertCount>0?"#ef4444":navMuted,position:"relative"}}>🔔{alertCount>0&&<span style={{position:"absolute",top:-4,right:-4,background:"#ef4444",color:"#fff",fontSize:9,borderRadius:10,padding:"1px 4px"}}>{alertCount}</span>}</button>
-          <button onClick={()=>setMenuOpen(p=>!p)} style={{background:"none",border:`1px solid ${navBorder}`,borderRadius:8,padding:"5px 10px",fontSize:18,color:navMuted,lineHeight:1}}>{menuOpen?"✕":"☰"}</button>
+          <button onClick={onRefresh} aria-label="רענון נתונים" style={{background:"none",border:`1px solid ${navBorder}`,borderRadius:8,padding:"5px 8px",fontSize:13,color:sync==="ok"?"#10b981":sync==="saving"?"#3b82f6":"#ef4444"}} title="רענן">{sync==="saving"?"⏳":"🔄"}</button>
+          <button onClick={onAlerts} aria-label={`התראות${alertCount>0?` (${alertCount})`:""}`} style={{background:"none",border:`1px solid ${navBorder}`,borderRadius:8,padding:"5px 8px",fontSize:14,color:alertCount>0?"#ef4444":navMuted,position:"relative"}}>🔔{alertCount>0&&<span style={{position:"absolute",top:-4,right:-4,background:"#ef4444",color:"#fff",fontSize:9,borderRadius:10,padding:"1px 4px"}}>{alertCount}</span>}</button>
+          <button onClick={()=>setMenuOpen(p=>!p)} aria-label={menuOpen?"סגור תפריט":"פתח תפריט"} style={{background:"none",border:`1px solid ${navBorder}`,borderRadius:8,padding:"5px 10px",fontSize:18,color:navMuted,lineHeight:1}}>{menuOpen?"✕":"☰"}</button>
         </div>
       </div>
       <div className="mob-tabs" style={{borderTop:`1px solid ${navBorder}`}}>
@@ -2881,7 +2948,7 @@ function HistoryPanel({onClose,orders,updO,workLogs,onDeleteLog,onUndoWorkLog,cu
         addAuditEntry({userId:entry.userId,username:entry.username,name:entry.name,action:"ביטול פעולה",target:entry.target,details:`בוטל: ${entry.action}`});
         setAuditLog(prev=>prev.map(e=>e.id===entry.id?{...e,reverted:true}:e));
       }else{
-        alert("לא נמצא רשומת עבודה מתאימה לביטול");
+        toast("לא נמצא רשומת עבודה מתאימה לביטול","warning");
       }
     }else if(entry.action.includes("התחלת עבודה")){
       // Delete the active (uncompleted) work log
@@ -2891,10 +2958,10 @@ function HistoryPanel({onClose,orders,updO,workLogs,onDeleteLog,onUndoWorkLog,cu
         onDeleteLog&&onDeleteLog([log.id]);
         addAuditEntry({userId:entry.userId,username:entry.username,name:entry.name,action:"ביטול פעולה",target:entry.target,details:`בוטל: ${entry.action}`});
         setAuditLog(prev=>prev.map(e=>e.id===entry.id?{...e,reverted:true}:e));
-      }else{alert("לא נמצאה רשומה פעילה לביטול")}
+      }else{toast("לא נמצאה רשומה פעילה לביטול","warning")}
     }else if(entry.canUndo&&entry.action.includes("ייבוא")){
       const snapshot=LS.get("importSnapshot");
-      if(!snapshot)return alert("אין גיבוי לשחזור");
+      if(!snapshot)return toast("אין גיבוי לשחזור","warning");
       if(!confirm(`לשחזר ${snapshot.length} פקעות מלפני הייבוא?`))return;
       updO(snapshot);
       LS.set("importSnapshot",null);
@@ -2955,6 +3022,7 @@ function HistoryPanel({onClose,orders,updO,workLogs,onDeleteLog,onUndoWorkLog,cu
 // ══════════════════════════════════════════════════════════════════════════
 let saveTimer=null;
 function App(){
+  const {toast}=useToast();
   const [lightMode,setLightMode]=useState(()=>{try{return localStorage.getItem(LS_PREFIX+"light")==="1"}catch{return false}});
   const [currentUser,setCurrentUser]=useState(()=>{
     try{const saved=localStorage.getItem(LS_PREFIX+"session");if(saved){const s=JSON.parse(saved);const cached=JSON.parse(localStorage.getItem(LS_PREFIX+"users")||"[]");const found=cached.find(u=>u.id===s.id&&u.username===s.username&&u.active!==false);if(found)return found}return null}catch{return null}
@@ -2978,6 +3046,7 @@ function App(){
   const [installPrompt,setInstallPrompt]=useState(null);
   const [showInstall,setShowInstall]=useState(false);
   const [showUpdate,setShowUpdate]=useState(false);
+  const [isOffline,setIsOffline]=useState(()=>!navigator.onLine);
   const swRegRef=useRef(null);
   const oRef=useRef(orders),pRef=useRef(projects),sRef=useRef(stages),wRef=useRef(workLogs);
 
@@ -3423,8 +3492,8 @@ function App(){
       if(data.customTasks){setCustomTasks(data.customTasks);LS.set("customTasks",data.customTasks)}
       if(freshUsers?.length){LS.set("users",freshUsers)}
       setSync("ok");
-      alert("✅ נתוני דמו נטענו בהצלחה!");
-    }catch(e){console.error(e);setSync("error");alert("שגיאה: "+e.message)}
+      toast("נתוני דמו נטענו בהצלחה!","success");
+    }catch(e){console.error(e);setSync("error");toast("שגיאה: "+e.message,"error")}
   };
 
   const deleteDemoData=async()=>{
@@ -3442,12 +3511,14 @@ function App(){
       if(data.workLogs){setWorkLogs(data.workLogs);LS.set("workLogs",data.workLogs)}
       if(data.customTasks){setCustomTasks(data.customTasks);LS.set("customTasks",data.customTasks)}
       setSync("ok");
-      alert("✅ נתוני דמו נמחקו!");
-    }catch(e){console.error(e);setSync("error");alert("שגיאה: "+e.message)}
+      toast("נתוני דמו נמחקו!","success");
+    }catch(e){console.error(e);setSync("error");toast("שגיאה: "+e.message,"error")}
   };
   useEffect(()=>{const isi=window.matchMedia("(display-mode:standalone)").matches||window.navigator.standalone;if(isi)return;const h=e=>{e.preventDefault();setInstallPrompt(e);setShowInstall(true)};window.addEventListener("beforeinstallprompt",h);window.addEventListener("appinstalled",()=>{setShowInstall(false);setInstallPrompt(null)});return()=>window.removeEventListener("beforeinstallprompt",h)},[]);
   // Service Worker
   useEffect(()=>{if(!("serviceWorker" in navigator))return;navigator.serviceWorker.register("./sw.js?v=4").then(reg=>{swRegRef.current=reg;if(reg.waiting)setShowUpdate(true);reg.addEventListener("updatefound",()=>{const nw=reg.installing;if(!nw)return;nw.addEventListener("statechange",()=>{if(nw.state==="installed"&&navigator.serviceWorker.controller)setShowUpdate(true)})});setInterval(()=>reg.update(),30*60*1000)}).catch(()=>{});navigator.serviceWorker.addEventListener("controllerchange",()=>window.location.reload())},[]);
+  // Network status
+  useEffect(()=>{const on=()=>{setIsOffline(false);toast("החיבור חזר — מסנכרן נתונים...","success");refreshFromDB(true)};const off=()=>{setIsOffline(true)};window.addEventListener("online",on);window.addEventListener("offline",off);return()=>{window.removeEventListener("online",on);window.removeEventListener("offline",off)}},[]);
   // PWA Install
   const handleInstall=async()=>{if(!installPrompt)return;installPrompt.prompt();setInstallPrompt(null);setShowInstall(false)};
   const handleUpdate=()=>{const r=swRegRef.current;if(r?.waiting)r.waiting.postMessage({type:"SKIP_WAITING"});else window.location.reload();setShowUpdate(false)};
@@ -3461,7 +3532,8 @@ function App(){
 
   return(
     <AuthCtx.Provider value={{currentUser,canEdit,canViewProject}}>
-      {showUpdate&&<UpdateBanner onUpdate={handleUpdate} onDismiss={()=>setShowUpdate(false)} lm={lm}/>}
+      {isOffline&&<OfflineBanner lm={lm}/>}
+      {showUpdate&&!isOffline&&<UpdateBanner onUpdate={handleUpdate} onDismiss={()=>setShowUpdate(false)} lm={lm}/>}
       <Navbar tab={tab} setTab={setTab} tabs={TABS} lightMode={lightMode} toggleLight={()=>setLightMode(p=>!p)} sync={sync} onAdmin={()=>setShowAdmin(true)} onLogout={handleLogout} alertCount={alertCount} onAlerts={()=>setShowAlerts(true)} onRefresh={()=>refreshFromDB(true)} onLiveBoard={()=>setShowLiveBoard(true)} onReport={()=>setShowReport(true)} onHistory={()=>setShowHistory(true)} isAdmin={isAdmin} onLoadDemo={loadDemoData} onDeleteDemo={deleteDemoData}/>
       <main className="main-content" style={{maxWidth:1440,margin:"0 auto",padding:"16px 14px",paddingBottom:showInstall?"100px":"calc(16px + env(safe-area-inset-bottom,0px))"}}>
         {tab==="dashboard"&&<Dashboard orders={filteredOrders} projects={filteredProjects} stages={stages} users={getUsers()} workLogs={filteredWorkLogs}/>}
@@ -3484,7 +3556,7 @@ function App(){
   );
 }
 
-ReactDOM.createRoot(document.getElementById("root")).render(<App/>);
+ReactDOM.createRoot(document.getElementById("root")).render(<ToastProvider><App/></ToastProvider>);
 </script>
 </body>
 </html>
