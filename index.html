@@ -2481,21 +2481,36 @@ function Navbar({tab,setTab,tabs,lightMode,toggleLight,sync,onAdmin,onLogout,ale
         <div className="desk-nav" style={{flex:1,overflowX:"auto",scrollbarWidth:"none",justifyContent:"flex-start"}}>
           {tabs.map(t=>(<button key={t.id} onClick={()=>setTab(t.id)} style={{padding:"0 14px",height:52,background:"none",border:"none",color:tab===t.id?navActive:navMuted,borderBottom:tab===t.id?`3px solid ${navActive}`:"3px solid transparent",fontWeight:tab===t.id?700:400,fontSize:13,whiteSpace:"nowrap",fontFamily:"inherit"}}>{t.label}</button>))}
         </div>
-        <div className="hide-mobile" style={{display:"flex",gap:6,alignItems:"center",flexShrink:0}}>
-          {currentUser?.role==="admin"&&<button onClick={onLiveBoard} title="מסך מפעל" style={{background:"#06b6d422",border:"1px solid #06b6d444",color:"#06b6d4",borderRadius:8,padding:"5px 12px",fontSize:12,fontWeight:700,fontFamily:"inherit"}}>📡 מפעל</button>}
-          {currentUser?.role==="admin"&&<button onClick={onReport} title="דוח חודשי" style={{background:"#10b98122",border:"1px solid #10b98144",color:"#10b981",borderRadius:8,padding:"5px 12px",fontSize:12,fontWeight:700,fontFamily:"inherit"}}>📄 דוח</button>}
-          {currentUser?.role==="admin"&&<button onClick={onHistory} title="היסטוריה" style={{background:"#8b5cf622",border:"1px solid #8b5cf644",color:"#8b5cf6",borderRadius:8,padding:"5px 12px",fontSize:12,fontWeight:700,fontFamily:"inherit"}}>📋 היסטוריה</button>}
+        <div className="hide-mobile" style={{display:"flex",gap:4,alignItems:"center",flexShrink:0}}>
           <button onClick={onAlerts} style={{background:alertCount>0?"#ef444422":"transparent",border:`1px solid ${alertCount>0?"#ef4444":navBorder}`,borderRadius:8,padding:"5px 10px",fontSize:14,color:alertCount>0?"#ef4444":navMuted,fontFamily:"inherit",position:"relative"}}>🔔{alertCount>0&&<span style={{position:"absolute",top:-4,right:-4,background:"#ef4444",color:"#fff",fontSize:9,fontWeight:700,borderRadius:10,padding:"1px 5px",minWidth:16,textAlign:"center"}}>{alertCount}</span>}</button>
-          <button onClick={toggleLight} style={{background:lm?"#e2e8f0":"#0d1120",border:`1px solid ${navBorder}`,borderRadius:8,padding:"5px 12px",fontSize:13,color:navMuted,fontFamily:"inherit"}}>{lm?"🌙":"☀️"}</button>
-          {currentUser?.role==="admin"&&<button onClick={onAdmin} style={{background:"#f59e0b22",border:"1px solid #f59e0b44",color:"#f59e0b",borderRadius:8,padding:"5px 12px",fontSize:12,fontWeight:700,fontFamily:"inherit"}}>🛡️</button>}
-          <div style={{fontSize:11,padding:"3px 9px",borderRadius:20,background:sync==="ok"?(lm?"#d1fae5":"#052e16"):sync==="saving"?(lm?"#dbeafe":"#1e3a5f"):(lm?"#fee2e2":"#450a0a"),color:sync==="ok"?(lm?"#059669":"#6ee7b7"):sync==="saving"?(lm?"#2563eb":"#93c5fd"):(lm?"#dc2626":"#fca5a5"),whiteSpace:"nowrap",cursor:"pointer",display:"flex",alignItems:"center",gap:4}} onClick={onRefresh} title="לחץ לרענון">
+          <button onClick={toggleLight} style={{background:lm?"#e2e8f0":"#0d1120",border:`1px solid ${navBorder}`,borderRadius:8,padding:"5px 10px",fontSize:13,color:navMuted,fontFamily:"inherit"}}>{lm?"🌙":"☀️"}</button>
+          <div style={{fontSize:11,padding:"3px 8px",borderRadius:20,background:sync==="ok"?(lm?"#d1fae5":"#052e16"):sync==="saving"?(lm?"#dbeafe":"#1e3a5f"):(lm?"#fee2e2":"#450a0a"),color:sync==="ok"?(lm?"#059669":"#6ee7b7"):sync==="saving"?(lm?"#2563eb":"#93c5fd"):(lm?"#dc2626":"#fca5a5"),whiteSpace:"nowrap",cursor:"pointer",display:"flex",alignItems:"center",gap:4}} onClick={onRefresh} title="לחץ לרענון">
             {sync==="ok"&&<span style={{display:"inline-block",width:6,height:6,borderRadius:"50%",background:"#10b981",animation:"pulse 2s infinite"}}/>}
-            {sync==="ok"?"בזמן אמת":sync==="saving"?"⏳ שומר...":"❌ שגיאה"}
+            {sync==="ok"?"בזמן אמת":sync==="saving"?"⏳":"❌"}
           </div>
+          {isAdmin&&(
+            <div style={{position:"relative"}}>
+              <button onClick={()=>setMenuOpen(p=>!p)} style={{background:"#f59e0b22",border:"1px solid #f59e0b44",color:"#f59e0b",borderRadius:8,padding:"5px 10px",fontSize:13,fontWeight:700,fontFamily:"inherit",display:"flex",alignItems:"center",gap:4}}>
+                🛡️ <span style={{fontSize:11}}>ניהול ▾</span>
+              </button>
+              {menuOpen&&(
+                <div style={{position:"absolute",top:"calc(100% + 6px)",left:0,background:navBg,border:`1px solid ${navBorder}`,borderRadius:10,padding:8,minWidth:160,zIndex:200,boxShadow:"0 8px 24px #0004",display:"flex",flexDirection:"column",gap:4}}>
+                  <button onClick={()=>{onAdmin();setMenuOpen(false)}} style={{background:"transparent",border:"none",color:"#f59e0b",borderRadius:7,padding:"8px 12px",fontSize:13,fontWeight:600,fontFamily:"inherit",textAlign:"right",cursor:"pointer",whiteSpace:"nowrap"}}>🛡️ ניהול מערכת</button>
+                  <button onClick={()=>{onLiveBoard();setMenuOpen(false)}} style={{background:"transparent",border:"none",color:"#06b6d4",borderRadius:7,padding:"8px 12px",fontSize:13,fontWeight:600,fontFamily:"inherit",textAlign:"right",cursor:"pointer",whiteSpace:"nowrap"}}>📡 מסך מפעל</button>
+                  <button onClick={()=>{onReport();setMenuOpen(false)}} style={{background:"transparent",border:"none",color:"#10b981",borderRadius:7,padding:"8px 12px",fontSize:13,fontWeight:600,fontFamily:"inherit",textAlign:"right",cursor:"pointer",whiteSpace:"nowrap"}}>📄 דוח חודשי</button>
+                  <button onClick={()=>{onHistory();setMenuOpen(false)}} style={{background:"transparent",border:"none",color:"#8b5cf6",borderRadius:7,padding:"8px 12px",fontSize:13,fontWeight:600,fontFamily:"inherit",textAlign:"right",cursor:"pointer",whiteSpace:"nowrap"}}>📋 היסטוריה</button>
+                  <div style={{borderTop:`1px solid ${navBorder}`,margin:"4px 0"}}/>
+                  <button onClick={()=>{loadDemoData();setMenuOpen(false)}} style={{background:"transparent",border:"none",color:"#06b6d4",borderRadius:7,padding:"8px 12px",fontSize:13,fontWeight:600,fontFamily:"inherit",textAlign:"right",cursor:"pointer",whiteSpace:"nowrap"}}>🧪 טען נתוני דמו</button>
+                  <button onClick={()=>{deleteDemoData();setMenuOpen(false)}} style={{background:"transparent",border:"none",color:"#ef4444",borderRadius:7,padding:"8px 12px",fontSize:13,fontWeight:600,fontFamily:"inherit",textAlign:"right",cursor:"pointer",whiteSpace:"nowrap"}}>🗑️ מחק נתוני דמו</button>
+                  <div style={{borderTop:`1px solid ${navBorder}`,margin:"4px 0"}}/>
+                  <button onClick={()=>{onLogout();setMenuOpen(false)}} style={{background:"transparent",border:"none",color:"#ef4444",borderRadius:7,padding:"8px 12px",fontSize:13,fontWeight:600,fontFamily:"inherit",textAlign:"right",cursor:"pointer"}}>🚪 יציאה</button>
+                </div>
+              )}
+            </div>
+          )}
           <div style={{display:"flex",alignItems:"center",gap:6,padding:"4px 10px",background:lm?"#e2e8f0":"#0d1120",borderRadius:8,border:`1px solid ${navBorder}`}}>
             <span style={{fontSize:12,color:navActive,fontWeight:700}}>{currentUser?.name}</span>
-            <span style={{color:navMuted}}>·</span>
-            <button onClick={onLogout} style={{background:"none",border:"none",color:"#ef4444",fontSize:12,padding:0,fontWeight:600,fontFamily:"inherit"}}>יציאה</button>
+            {!isAdmin&&<><span style={{color:navMuted}}>·</span><button onClick={onLogout} style={{background:"none",border:"none",color:"#ef4444",fontSize:12,padding:0,fontWeight:600,fontFamily:"inherit"}}>יציאה</button></>}
           </div>
         </div>
         <div className="show-mobile-only" style={{display:"flex",gap:6,alignItems:"center",marginRight:"auto"}}>
@@ -3116,11 +3131,113 @@ function App(){
   // Alert count for badge
   const alertCount=useMemo(()=>{let c=0;filteredOrders.forEach(o=>(o.defects||[]).filter(d=>d.status!=="closed"&&(d.severity==="critical"||d.severity==="high")).forEach(()=>c++));filteredOrders.filter(o=>o.targetDate&&new Date(o.targetDate)<new Date()).forEach(()=>c++);filteredWorkLogs.filter(w=>!w.completed).forEach(w=>{if(Math.round((Date.now()-new Date(w.startTime).getTime())/60000)>120)c++});return c},[filteredOrders,filteredWorkLogs]);
 
-  // PWA Install
+  const [showDemoPanel,setShowDemoPanel]=useState(false);
+
+  // ── Demo Data ───────────────────────────────────────────────────
+  const loadDemoData=async()=>{
+    if(!confirm("זה יטען נתוני דמו לשנה שלמה. להמשיך?"))return;
+    setSync("saving");
+    try{
+      const W={w1:"יוסי כהן",w2:"דנה לוי",w3:"משה אברהם",w4:"רונית שרון",w5:"אבי מזרחי"};
+      const dProj=[{id:"p1",name:"פרויקט אלפא"},{id:"p2",name:"פרויקט בטא"},{id:"p3",name:"פרויקט גמא"},{id:"p4",name:"פרויקט דלתא"}];
+      const dStages=[{id:"s1",name:"קליטה וקלט",stage_order:1,color:"#3b82f6",price:80},{id:"s2",name:"הרכבה",stage_order:2,color:"#8b5cf6",price:150},{id:"s3",name:"בדיקת חשמל",stage_order:3,color:"#06b6d4",price:120},{id:"s4",name:"בדיקת מכנית",stage_order:4,color:"#f59e0b",price:100},{id:"s5",name:"QC סופי",stage_order:5,color:"#10b981",price:90},{id:"s6",name:"אריזה ומשלוח",stage_order:6,color:"#ec4899",price:60}];
+
+      // Generate 12 months of orders
+      const orders=[];const wlogs=[];const tasks=[];
+      const snMap={};
+      const mkSn=(prefix,n)=>Array.from({length:n},(_,i)=>({id:`${prefix}_${i}`,sn:`${prefix}-${String(i+1).padStart(4,"0")}`,createdAt:new Date().toISOString()}));
+      const pns=[["ALF-PCB","לוח PCB ראשי",1200,"p1",8],["BET-SNS","חיישן תעשייתי",850,"p2",6],["GAM-MOT","בקר מנוע",2200,"p3",5],["DEL-CTL","בקר PLC",3500,"p4",4],["ALF-PWR","ספק כוח 48V",680,"p1",4],["BET-VLV","שסתום פנאומטי",420,"p2",10],["GAM-CAM","מצלמת בינה",1800,"p3",3],["DEL-SRV","מנוע סרוו",950,"p4",6]];
+      const defectTitles=["הלחמה קרה","שריטה על לוח","קצר פנימי","כיול סוטה","רעש חריג","חיבור רופף","ממסר פגום","קורוזיה"];
+      const defectTypes=["quality","material","process","equipment","human","other"];
+      const defectSev=["low","medium","high","critical"];
+
+      for(let month=0;month<12;month++){
+        const baseDate=new Date(2025,month,1);
+        pns.forEach(([pn,desc,price,proj,qty],pi)=>{
+          if((month+pi)%3!==0&&month!==0)return; // spread orders across months
+          const oId=`demo_o_${month}_${pi}`;
+          const serials=mkSn(`${pn}_${month}`,qty);
+          serials.forEach(s=>snMap[s.id]=s);
+          const stageIds=["s1","s2","s3","s4","s5","s6"].slice(0,4+(pi%3));
+          const targetDate=new Date(baseDate);targetDate.setMonth(targetDate.getMonth()+1+pi%2);
+          const defects=Math.random()>0.4?[{
+            id:`def_${oId}`,title:defectTitles[pi%defectTitles.length],
+            serialId:serials[0]?.id,type:defectTypes[pi%6],
+            severity:defectSev[pi%4],description:"פגם שזוהה בבדיקה",
+            responsible:W[`w${(pi%5)+1}`],discoveredDate:new Date(baseDate.getTime()+7*864e5).toISOString().slice(0,10),
+            status:month<10?"closed":"open",closedDate:month<10?new Date(baseDate.getTime()+14*864e5).toISOString().slice(0,10):null
+          }]:[];
+          const shortages=pi%4===0?[{id:`sh_${oId}`,item:`רכיב ${pn}-R${pi}`,sku:`SKU-${1000+pi}`,missing:qty,orderedDate:baseDate.toISOString().slice(0,10),received:month<9,receivedDate:month<9?new Date(baseDate.getTime()+10*864e5).toISOString().slice(0,10):null}]:[];
+          orders.push({id:oId,wo_number:`WO-25${String(month+1).padStart(2,"0")}${String(pi+1).padStart(2,"0")}`,pn,description:desc,qty,unit_price:price,project_id:proj,received_date:baseDate.toISOString().slice(0,10),target_date:targetDate.toISOString().slice(0,10),stage_ids:stageIds,block_id:null,serials,shortages,defects,delivered_serials:month<11?serials.map(s=>s.id):[],status:month<11?"complete":"open",updated_at:new Date().toISOString()});
+
+          // Work logs for this order
+          const completedMonths=Math.min(month,10);
+          if(completedMonths>0){
+            serials.slice(0,Math.ceil(serials.length*(completedMonths/10))).forEach((sr,si)=>{
+              stageIds.forEach((sid,stIdx)=>{
+                const wId=`w${((si+stIdx)%5)+1}`;
+                const startT=new Date(baseDate.getTime()+(si*2+stIdx)*864e5+(8*3600000));
+                const dur=20+Math.round(Math.random()*60);
+                const breaks=Math.random()>0.7?[{start:new Date(startT.getTime()+20*60000).toISOString(),end:new Date(startT.getTime()+35*60000).toISOString()}]:[];
+                wlogs.push({id:`wl_${oId}_${sr.id}_${sid}`,user_id:wId,user_name:W[wId],serial_id:sr.id,serial_sn:sr.sn,stage_id:sid,order_id:oId,start_time:startT.toISOString(),end_time:new Date(startT.getTime()+dur*60000).toISOString(),completed:true,duration_min:dur,paused:false,pause_start:null,total_pause_min:breaks.length?15:0,pause_log:breaks,bulk:false,bulk_group_id:null,bulk_count:null});
+              });
+            });
+          }
+        });
+      }
+
+      // Custom tasks - spread across the year
+      const taskNames=["הכנת דוח חודשי","סידור מחסן","ניקוי ציוד","הדרכת עובד חדש","בדיקת מלאי","עדכון נהלים","תיקון כלי עבודה","ביקורת בטיחות"];
+      for(let i=0;i<20;i++){
+        const wId=`w${(i%5)+1}`;
+        const startT=new Date(2025,i%12,1+i*1.5|0,8,0,0);
+        const dur=30+i*7;
+        tasks.push({id:`demo_t_${i}`,user_id:wId,user_name:W[wId],name:taskNames[i%8],description:"משימה שהוקצתה ע״י המנהל",price:100+(i*50),active:false,completed:i<16,partial:i===16||i===17,start_time:startT.toISOString(),end_time:i<16?new Date(startT.getTime()+dur*60000).toISOString():null,duration_min:i<16?dur:0,paused:false,pause_start:null,total_pause_min:0,pause_log:[],updated_at:new Date().toISOString()});
+      }
+
+      // Save to Supabase
+      const CHUNK=50;
+      const chunked=(arr,n)=>Array.from({length:Math.ceil(arr.length/n)},(_,i)=>arr.slice(i*n,(i+1)*n));
+      await SB.upsert("projects",dProj);
+      await SB.upsert("stages",dStages);
+      for(const chunk of chunked(orders,CHUNK))await SB.upsert("orders",chunk);
+      for(const chunk of chunked(wlogs,CHUNK))await SB.upsert("work_logs",chunk);
+      for(const chunk of chunked(tasks,CHUNK))await SB.upsert("custom_tasks",chunk);
+
+      // Reload
+      const data=await dbLoadAll();
+      if(data.orders)setOrders(data.orders);
+      if(data.projects)setProjects(data.projects);
+      if(data.stages)setStages(data.stages);
+      if(data.workLogs)setWorkLogs(data.workLogs);
+      if(data.customTasks)setCustomTasks(data.customTasks);
+      setSync("ok");
+      alert("✅ נתוני דמו נטענו בהצלחה!");
+    }catch(e){console.error(e);setSync("error");alert("שגיאה: "+e.message)}
+  };
+
+  const deleteDemoData=async()=>{
+    if(!confirm("למחוק את כל נתוני הדמו? (פקעות, לוגים, משימות שמתחילות ב-demo_)"))return;
+    setSync("saving");
+    try{
+      // Delete demo records by ID prefix using Supabase like operator
+      await Promise.all([
+        fetch(`${SB_URL}/rest/v1/work_logs?id=like.wl_demo_*`,{method:"DELETE",headers:SB_H}),
+        fetch(`${SB_URL}/rest/v1/custom_tasks?id=like.demo_t_*`,{method:"DELETE",headers:SB_H}),
+      ]);
+      await fetch(`${SB_URL}/rest/v1/orders?id=like.demo_o_*`,{method:"DELETE",headers:SB_H});
+      const data=await dbLoadAll();
+      if(data.orders)setOrders(data.orders);
+      if(data.workLogs)setWorkLogs(data.workLogs);
+      if(data.customTasks)setCustomTasks(data.customTasks);
+      setSync("ok");
+      alert("✅ נתוני דמו נמחקו!");
+    }catch(e){console.error(e);setSync("error");alert("שגיאה: "+e.message)}
+  };
   useEffect(()=>{const isi=window.matchMedia("(display-mode:standalone)").matches||window.navigator.standalone;if(isi)return;const h=e=>{e.preventDefault();setInstallPrompt(e);setShowInstall(true)};window.addEventListener("beforeinstallprompt",h);window.addEventListener("appinstalled",()=>{setShowInstall(false);setInstallPrompt(null)});return()=>window.removeEventListener("beforeinstallprompt",h)},[]);
   // Service Worker
   useEffect(()=>{if(!("serviceWorker" in navigator))return;navigator.serviceWorker.register("./sw.js?v=3").then(reg=>{swRegRef.current=reg;if(reg.waiting)setShowUpdate(true);reg.addEventListener("updatefound",()=>{const nw=reg.installing;if(!nw)return;nw.addEventListener("statechange",()=>{if(nw.state==="installed"&&navigator.serviceWorker.controller)setShowUpdate(true)})});setInterval(()=>reg.update(),30*60*1000)}).catch(()=>{});navigator.serviceWorker.addEventListener("controllerchange",()=>window.location.reload())},[]);
-  const handleInstall=async()=>{if(!installPrompt)return;installPrompt.prompt();setInstallPrompt(null);setShowInstall(false)};
+  // PWA Install
   const handleUpdate=()=>{const r=swRegRef.current;if(r?.waiting)r.waiting.postMessage({type:"SKIP_WAITING"});else window.location.reload();setShowUpdate(false)};
 
   if(!currentUser)return(<AuthCtx.Provider value={{currentUser,canEdit:false,canViewProject:()=>false}}><LoginScreen onLogin={handleLogin} lightMode={lightMode} toggleLight={()=>setLightMode(p=>!p)}/></AuthCtx.Provider>);
