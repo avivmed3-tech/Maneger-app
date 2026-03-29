@@ -1194,7 +1194,7 @@ function OrderDetail({order,projects,stages,onClose,onUpdate,workLogs,onWorkLog}
             <h2 style={{margin:"0 0 3px",color:"#60a5fa"}}>{order.woNumber}</h2>
             {order.pn&&<div style={{color:"#a78bfa",fontSize:13}}>P/N: {order.pn}</div>}
             {order.description&&<div style={{color:"var(--c-muted)"}}>{order.description}</div>}
-            {proj&&<div style={{marginTop:3,fontSize:13,color:"#7eb8ff"}}>📂 {proj.name}</div>}
+            <div style={{marginTop:3,fontSize:13,color:proj?"#7eb8ff":"var(--c-dim)"}}>{proj?`📂 ${proj.name}`:"📂 ללא פרויקט"}</div>
           </div>
           <div style={{display:"flex",gap:8,alignItems:"center",flexWrap:"wrap"}}>
             <span style={{fontSize:14,fontWeight:700,color:"#10b981"}}>{totalCompleted}/{serials.length} הושלמו</span>
@@ -1316,7 +1316,7 @@ function Orders({orders,projects,stages,stageBlocks,updO,workLogs,onWorkLog}){
                 <div style={{display:"flex",alignItems:"center",gap:6,flexWrap:"wrap"}}>
                   <span style={{fontWeight:700,fontSize:15}}>{o.woNumber}</span>
                   {o.pn&&<span style={{fontSize:11,color:"#a78bfa"}}>P/N: {o.pn}</span>}
-                  {proj&&<span style={{fontSize:11,background:"var(--c-tag-blue-bg)",color:"var(--c-tag-blue)",padding:"2px 7px",borderRadius:20}}>{proj.name}</span>}
+                  {proj?<span style={{fontSize:11,background:"var(--c-tag-blue-bg)",color:"var(--c-tag-blue)",padding:"2px 7px",borderRadius:20}}>{proj.name}</span>:<span style={{fontSize:11,background:"var(--c-border)",color:"var(--c-dim)",padding:"2px 7px",borderRadius:20}}>ללא פרויקט</span>}
                   {openDef>0&&<span style={{fontSize:11,background:"#450a0a",color:"#fca5a5",padding:"2px 7px",borderRadius:20}}>🔧 {openDef}</span>}
                 </div>
                 <div style={{display:"flex",gap:4,alignItems:"center"}}>
@@ -2640,32 +2640,31 @@ function ExcelTab({orders,projects,stages,workLogs,users,updO}){
 // ══════════════════════════════════════════════════════════════════════════
 // ═══ ALERTS PANEL ════════════════════════════════════════════════════════
 // ══════════════════════════════════════════════════════════════════════════
-function AlertsPanel({orders,stages,workLogs,users,onClose}){
+function AlertsPanel({orders,stages,workLogs,users,onClose,dismissedAlerts,onDismissAll}){
   const alerts=useMemo(()=>{
     const a=[];
-    // Critical/high defects
     orders.forEach(o=>(o.defects||[]).filter(d=>d.status!=="closed"&&(d.severity==="critical"||d.severity==="high")).forEach(d=>{
-      a.push({sev:d.severity==="critical"?0:1,icon:d.severity==="critical"?"🔴":"🟠",text:`תקלה ${d.severity==="critical"?"קריטית":"גבוהה"}: ${d.title}`,sub:`פק"ע ${o.woNumber}${d.discoveredDate?` | ${fmt(d.discoveredDate)}`:""}`,color:d.severity==="critical"?"#dc2626":"#f97316"})}));
-    // Overdue orders
-    orders.filter(o=>o.targetDate&&new Date(o.targetDate)<new Date()).forEach(o=>{const d=daysBetween(o.targetDate,todays());if(d>0)a.push({sev:1,icon:"🚨",text:`פק"ע ${o.woNumber} באיחור ${d} ימים`,sub:`יעד: ${fmt(o.targetDate)}`,color:"#ef4444"})});
-    // Workers stuck > 2h
-    workLogs.filter(w=>!w.completed).forEach(w=>{const m=Math.round((Date.now()-new Date(w.startTime).getTime())/60000);if(m>120)a.push({sev:2,icon:"⏳",text:`${w.userName} תקוע ${fmtTime(m)} על ${w.serialSn}`,sub:stages.find(s=>s.id===w.stageId)?.name||"",color:"#f59e0b"})});
-    // Low yield
-    orders.forEach(o=>{const sn=(o.serials||[]).length,df=(o.defects||[]).filter(d=>d.status!=="closed").length;if(sn>0&&df/sn>.2)a.push({sev:2,icon:"📉",text:`Yield נמוך ב-${o.woNumber}: ${df}/${sn} תקלות`,sub:`${Math.round(df/sn*100)}% שיעור תקלות`,color:"#f97316"})});
-    // No progress 7+ days
-    orders.forEach(o=>{if(!(o.serials||[]).length)return;const last=workLogs.filter(w=>w.orderId===o.id&&w.completed).sort((x,y)=>(y.endTime||"").localeCompare(x.endTime||""))[0];if(last){const d=daysBetween(last.endTime?.slice(0,10),todays());if(d>7)a.push({sev:3,icon:"💤",text:`אין התקדמות ב-${o.woNumber} כבר ${d} ימים`,sub:`אחרון: ${fmt(last.endTime?.slice(0,10))}`,color:"#8b95a8"})}});
+      a.push({id:`def_${o.id}_${d.id}`,sev:d.severity==="critical"?0:1,icon:d.severity==="critical"?"🔴":"🟠",text:`תקלה ${d.severity==="critical"?"קריטית":"גבוהה"}: ${d.title}`,sub:`פק"ע ${o.woNumber}${d.discoveredDate?` | ${fmt(d.discoveredDate)}`:""}`,color:d.severity==="critical"?"#dc2626":"#f97316"})}));
+    orders.filter(o=>o.targetDate&&new Date(o.targetDate)<new Date()).forEach(o=>{const d=daysBetween(o.targetDate,todays());if(d>0)a.push({id:`late_${o.id}`,sev:1,icon:"🚨",text:`פק"ע ${o.woNumber} באיחור ${d} ימים`,sub:`יעד: ${fmt(o.targetDate)}`,color:"#ef4444"})});
+    workLogs.filter(w=>!w.completed).forEach(w=>{const m=Math.round((Date.now()-new Date(w.startTime).getTime())/60000);if(m>120)a.push({id:`stuck_${w.id}`,sev:2,icon:"⏳",text:`${w.userName} תקוע ${fmtTime(m)} על ${w.serialSn}`,sub:stages.find(s=>s.id===w.stageId)?.name||"",color:"#f59e0b"})});
+    orders.forEach(o=>{const sn=(o.serials||[]).length,df=(o.defects||[]).filter(d=>d.status!=="closed").length;if(sn>0&&df/sn>.2)a.push({id:`yield_${o.id}`,sev:2,icon:"📉",text:`Yield נמוך ב-${o.woNumber}: ${df}/${sn} תקלות`,sub:`${Math.round(df/sn*100)}% שיעור תקלות`,color:"#f97316"})});
+    orders.forEach(o=>{if(!(o.serials||[]).length)return;const last=workLogs.filter(w=>w.orderId===o.id&&w.completed).sort((x,y)=>(y.endTime||"").localeCompare(x.endTime||""))[0];if(last){const d=daysBetween(last.endTime?.slice(0,10),todays());if(d>7)a.push({id:`idle_${o.id}`,sev:3,icon:"💤",text:`אין התקדמות ב-${o.woNumber} כבר ${d} ימים`,sub:`אחרון: ${fmt(last.endTime?.slice(0,10))}`,color:"#8b95a8"})}});
     return a.sort((x,y)=>x.sev-y.sev);
   },[orders,stages,workLogs]);
+  const visible=alerts.filter(a=>!(dismissedAlerts||[]).includes(a.id));
   return(
     <div onClick={onClose} style={{position:"fixed",inset:0,background:"#000c",zIndex:200,display:"flex",justifyContent:"flex-start"}}>
       <div onClick={e=>e.stopPropagation()} style={{background:"var(--c-card)",width:"min(420px,90vw)",height:"100%",overflowY:"auto",borderLeft:"1px solid var(--c-border)",padding:20}}>
         <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:16}}>
-          <div style={{fontWeight:700,fontSize:18}}>🔔 התראות ({alerts.length})</div>
-          <button onClick={onClose} style={{background:"none",border:"none",fontSize:20,color:"var(--c-muted)"}}>✕</button>
+          <div style={{fontWeight:700,fontSize:18}}>🔔 התראות ({visible.length})</div>
+          <div style={{display:"flex",gap:8}}>
+            {visible.length>0&&<button onClick={()=>onDismissAll(alerts.map(a=>a.id))} style={{background:"var(--c-deep)",border:"1px solid var(--c-border)",borderRadius:8,padding:"5px 12px",fontSize:12,color:"var(--c-muted)",fontFamily:"inherit"}}>נקה הכל</button>}
+            <button onClick={onClose} style={{background:"none",border:"none",fontSize:20,color:"var(--c-muted)"}}>✕</button>
+          </div>
         </div>
-        {alerts.length===0?<div style={{textAlign:"center",padding:40,color:"var(--c-dim)"}}><div style={{fontSize:40,marginBottom:10}}>✅</div>הכל תקין!</div>:(
+        {visible.length===0?<EmptyState icon="✅" title="הכל תקין!" subtitle="אין התראות פעילות"/>:(
           <div style={{display:"flex",flexDirection:"column",gap:8}}>
-            {alerts.map((a,i)=>(<div key={i} style={{background:"var(--c-deep)",borderRadius:10,padding:"12px 14px",borderRight:`4px solid ${a.color}`}}>
+            {visible.map((a,i)=>(<div key={a.id} style={{background:"var(--c-deep)",borderRadius:10,padding:"12px 14px",borderRight:`4px solid ${a.color}`}}>
               <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:4}}><span style={{fontSize:16}}>{a.icon}</span><span style={{fontWeight:600,fontSize:13,color:a.color,flex:1}}>{a.text}</span></div>
               {a.sub&&<div style={{fontSize:11,color:"var(--c-dim)",paddingRight:24}}>{a.sub}</div>}
             </div>))}
@@ -3161,6 +3160,7 @@ function App(){
   const [tab,setTab]=useState("dashboard");
   const [showAdmin,setShowAdmin]=useState(false);
   const [showAlerts,setShowAlerts]=useState(false);
+  const [dismissedAlerts,setDismissedAlerts]=useState([]);
   const [showLiveBoard,setShowLiveBoard]=useState(false);
   const [showReport,setShowReport]=useState(false);
   const [showHistory,setShowHistory]=useState(false);
@@ -3218,11 +3218,15 @@ function App(){
       setCurrentUser(null);
     }
 
-    // Load from localStorage for instant display (only useful after Supabase data was cached)
-    const lo=LS.get("orders"),lp=LS.get("projects"),ls=LS.get("stages"),lw=LS.get("workLogs");
-    if(lo)setOrders(lo);if(lp)setProjects(lp);if(ls)setStages(ls);if(lw)setWorkLogs(lw);
-    const lct=LS.get("customTasks");if(lct)setCustomTasks(lct);
-    const lsb=LS.get("stageBlocks");if(lsb)setStageBlocks(lsb);
+    // Load from localStorage ONLY if same company (prevent cross-company data flash)
+    const cachedSession=LS.get("session_company");
+    const sessionCid=cachedSession||DEFAULT_COMPANY_ID;
+    if(sessionCid===_companyId){
+      const lo=LS.get("orders"),lp=LS.get("projects"),ls=LS.get("stages"),lw=LS.get("workLogs");
+      if(lo)setOrders(lo);if(lp)setProjects(lp);if(ls)setStages(ls);if(lw)setWorkLogs(lw);
+      const lct=LS.get("customTasks");if(lct)setCustomTasks(lct);
+      const lsb=LS.get("stageBlocks");if(lsb)setStageBlocks(lsb);
+    }
 
     // Then always load from Supabase (Supabase is the source of truth)
     Promise.all([dbLoadAll(),dbLoadUsers()]).then(async([data,users])=>{
@@ -3234,6 +3238,7 @@ function App(){
         setWorkLogs(data.workLogs||[]);LS.set("workLogs",data.workLogs||[]);
         setCustomTasks(data.customTasks||[]);LS.set("customTasks",data.customTasks||[]);
         setStageBlocks(data.stageBlocks||[]);LS.set("stageBlocks",data.stageBlocks||[]);
+        LS.set("session_company",_companyId);
       }
       if(users?.length){LS.set("users",users)}
 
@@ -3418,11 +3423,16 @@ function App(){
   };
 
   const handleLogin=u=>{
-    setCurrentUser(u);
     const cid=u.companyId||DEFAULT_COMPANY_ID;
-    setCompanyId(cid); // Set for all future SB requests (RLS)
+    const prevCid=_companyId;
+    setCompanyId(cid);
+    // If company changed — clear stale cache immediately so no data leaks between companies
+    if(cid!==prevCid){
+      setOrders([]);setProjects(DEF_PROJ);setStages(DEF_STAGES);setWorkLogs([]);setCustomTasks([]);setStageBlocks([]);
+      ["orders","projects","stages","workLogs","customTasks","stageBlocks"].forEach(k=>{try{localStorage.removeItem(LS_PREFIX+k)}catch{}});
+    }
+    setCurrentUser(u);
     try{localStorage.setItem(LS_PREFIX+"session",JSON.stringify({id:u.id,username:u.username,companyId:cid}))}catch{}
-    // Load company subscription plan
     SB.get("subscriptions",`company_id=eq.${cid}&status=eq.active`).then(rows=>{
       if(rows&&rows.length>0)setCompanyPlan(rows[0].plan||"free");
     }).catch(()=>{});
@@ -3503,7 +3513,10 @@ function App(){
     addAuditEntry({userId:currentUser.id,username:currentUser.username,name:currentUser.name,action:"חזרה מהפסקה",target:"",details:""});
   };
   // Custom tasks
-  const handleAddTask=(task)=>{setCustomTasks(prev=>{const next=[...prev,task];persist(null,null,null,null,next);return next})};
+  const handleAddTask=(task)=>{
+    setCustomTasks(prev=>{const next=[...prev,task];persist(null,null,null,null,next);return next});
+    if(task.userName)PushNotify.send(`משימה חדשה: ${task.name}`,`${task.userName}, הוקצתה לך משימה${task.price?` (₪${task.price})`:""}`,`task_${task.id}`);
+  };
   const handleStartTask=(taskId)=>{setCustomTasks(prev=>{const next=prev.map(t=>t.id===taskId?{...t,active:true,startTime:nowISO()}:t);persist(null,null,null,null,next);return next})};
   const handleEndTask=(taskId)=>{setCustomTasks(prev=>{const next=prev.map(t=>{if(t.id!==taskId)return t;const dur=t.startTime?Math.round((Date.now()-new Date(t.startTime).getTime())/60000)-(t.totalPauseMin||0):0;return{...t,active:false,completed:true,endTime:nowISO(),durationMin:Math.max(0,dur)}});persist(null,null,null,null,next);return next})};
   const handlePauseTask=(taskId)=>{setCustomTasks(prev=>{const next=prev.map(t=>t.id===taskId?{...t,paused:true,pauseStart:nowISO(),pauseLog:[...(t.pauseLog||[]),{start:nowISO()}]}:t);persist(null,null,null,null,next);return next})};
@@ -3560,7 +3573,7 @@ function App(){
   },[isAdmin]);
 
   // Alert count for badge
-  const alertCount=useMemo(()=>{let c=0;filteredOrders.forEach(o=>(o.defects||[]).filter(d=>d.status!=="closed"&&(d.severity==="critical"||d.severity==="high")).forEach(()=>c++));filteredOrders.filter(o=>o.targetDate&&new Date(o.targetDate)<new Date()).forEach(()=>c++);filteredWorkLogs.filter(w=>!w.completed).forEach(w=>{if(Math.round((Date.now()-new Date(w.startTime).getTime())/60000)>120)c++});return c},[filteredOrders,filteredWorkLogs]);
+  const alertCount=useMemo(()=>{let c=0;const dm=dismissedAlerts;filteredOrders.forEach(o=>(o.defects||[]).filter(d=>d.status!=="closed"&&(d.severity==="critical"||d.severity==="high")).forEach(d=>{if(!dm.includes(`def_${o.id}_${d.id}`))c++}));filteredOrders.filter(o=>o.targetDate&&new Date(o.targetDate)<new Date()).forEach(o=>{if(!dm.includes(`late_${o.id}`))c++});filteredWorkLogs.filter(w=>!w.completed).forEach(w=>{if(Math.round((Date.now()-new Date(w.startTime).getTime())/60000)>120&&!dm.includes(`stuck_${w.id}`))c++});return c},[filteredOrders,filteredWorkLogs,dismissedAlerts]);
 
   const [showDemoPanel,setShowDemoPanel]=useState(false);
 
@@ -3675,7 +3688,7 @@ function App(){
   };
   useEffect(()=>{const isi=window.matchMedia("(display-mode:standalone)").matches||window.navigator.standalone;if(isi)return;const h=e=>{e.preventDefault();setInstallPrompt(e);setShowInstall(true)};window.addEventListener("beforeinstallprompt",h);window.addEventListener("appinstalled",()=>{setShowInstall(false);setInstallPrompt(null)});return()=>window.removeEventListener("beforeinstallprompt",h)},[]);
   // Service Worker
-  useEffect(()=>{if(!("serviceWorker" in navigator))return;navigator.serviceWorker.register("./sw.js?v=15").then(reg=>{swRegRef.current=reg;if(reg.waiting)setShowUpdate(true);reg.addEventListener("updatefound",()=>{const nw=reg.installing;if(!nw)return;nw.addEventListener("statechange",()=>{if(nw.state==="installed"&&navigator.serviceWorker.controller)setShowUpdate(true)})});setInterval(()=>reg.update(),30*60*1000)}).catch(()=>{});navigator.serviceWorker.addEventListener("controllerchange",()=>window.location.reload())},[]);
+  useEffect(()=>{if(!("serviceWorker" in navigator))return;navigator.serviceWorker.register("./sw.js?v=17").then(reg=>{swRegRef.current=reg;if(reg.waiting)setShowUpdate(true);reg.addEventListener("updatefound",()=>{const nw=reg.installing;if(!nw)return;nw.addEventListener("statechange",()=>{if(nw.state==="installed"&&navigator.serviceWorker.controller)setShowUpdate(true)})});setInterval(()=>reg.update(),30*60*1000)}).catch(()=>{});navigator.serviceWorker.addEventListener("controllerchange",()=>window.location.reload())},[]);
   // Network status
   useEffect(()=>{const on=()=>{setIsOffline(false);toast("החיבור חזר — מסנכרן נתונים...","success");refreshFromDB(true)};const off=()=>{setIsOffline(true)};window.addEventListener("online",on);window.addEventListener("offline",off);return()=>{window.removeEventListener("online",on);window.removeEventListener("offline",off)}},[]);
   // PWA Install
@@ -3713,7 +3726,7 @@ function App(){
       </main>
       {showInstall&&<InstallBanner onInstall={handleInstall} onDismiss={()=>setShowInstall(false)} lm={lm}/>}
       {showAdmin&&isAdmin&&<AdminPanel projects={projects} stages={stages} onClose={()=>setShowAdmin(false)} lightMode={lightMode} updO={updO}/>}
-      {showAlerts&&<AlertsPanel orders={filteredOrders} stages={stages} workLogs={filteredWorkLogs} users={getUsers()} onClose={()=>setShowAlerts(false)}/>}
+      {showAlerts&&<AlertsPanel orders={filteredOrders} stages={stages} workLogs={filteredWorkLogs} users={getUsers()} onClose={()=>setShowAlerts(false)} dismissedAlerts={dismissedAlerts} onDismissAll={ids=>setDismissedAlerts(prev=>[...new Set([...prev,...ids])])}/>}
       {showLiveBoard&&isAdmin&&(canUseFeature("live_board")?<LiveFactoryBoard orders={filteredOrders} workLogs={filteredWorkLogs} stages={stages} customTasks={customTasks} users={getUsers()} onClose={()=>setShowLiveBoard(false)} lightMode={lightMode}/>:<Modal onClose={()=>setShowLiveBoard(false)}><UpgradePrompt feature="לוח חי"/></Modal>)}
       {showReport&&isAdmin&&(canUseFeature("pdf_reports")?<MonthlyReportModal orders={filteredOrders} workLogs={filteredWorkLogs} stages={stages} projects={filteredProjects} users={getUsers()} onClose={()=>setShowReport(false)}/>:<Modal onClose={()=>setShowReport(false)}><UpgradePrompt feature="דוחות PDF"/></Modal>)}
       {showHistory&&isAdmin&&<HistoryPanel orders={filteredOrders} updO={updO} onClose={()=>setShowHistory(false)} workLogs={filteredWorkLogs} onDeleteLog={handleDeleteLog} onUndoWorkLog={handleUndoWorkLog} customTasks={customTasks} onDeleteTask={handleDeleteTask}/>}
