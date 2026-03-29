@@ -80,7 +80,7 @@ button{font-family:inherit;cursor:pointer}
 const {useState,useEffect,useCallback,useRef,useMemo}=React;
 
 // ── Config ─────────────────────────────────────────────────────────────────
-const APP_VERSION="3.0.0";const APP_DATE="2026-03-28";
+const APP_VERSION="3.1.0";const APP_DATE="2026-03-29";
 const SB_URL="https://lwiurzkiojctwzllpnmr.supabase.co";
 const SB_KEY="eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imx3aXVyemtpb2pjdHd6bGxwbm1yIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzQ2MjU4NTAsImV4cCI6MjA5MDIwMTg1MH0.jWOnAtsjbefoY18ofSd46WMdgY47Vv4k7LgcHdOrj6Q";
 const SB_H={"Content-Type":"application/json","apikey":SB_KEY,"Authorization":"Bearer "+SB_KEY};
@@ -98,7 +98,9 @@ const SB={
     if(!r.ok)throw new Error(await r.text());return r.json();
   },
   async upsert(table,data){
-    const r=await fetch(`${SB_URL}/rest/v1/${table}`,{method:"POST",headers:{...SB_H,"Prefer":"resolution=merge-duplicates,return=minimal"},body:JSON.stringify(Array.isArray(data)?data:[data])});
+    const arr=Array.isArray(data)?data:[data];
+    if(arr.length===0)return; // Skip empty upserts
+    const r=await fetch(`${SB_URL}/rest/v1/${table}`,{method:"POST",headers:{...SB_H,"Prefer":"resolution=merge-duplicates,return=minimal"},body:JSON.stringify(arr)});
     if(!r.ok)throw new Error(await r.text());
   },
   async del(table,match){
@@ -1840,10 +1842,10 @@ function StagesManagement({stages,setStages,stageBlocks,setStageBlocks,persist})
     if(!blockName.trim()||blockStages.length===0)return alert("יש לתת שם ולבחור לפחות שלב אחד");
     const block={id:uid(),name:blockName.trim(),stages:blockStages.map((bs,i)=>({...bs,id:uid(),order:i+1}))};
     const nb=[...(stageBlocks||[]),block];
-    setStageBlocks(nb);LS.set("stageBlocks",nb);persist(null,null,null,null,nb);
+    setStageBlocks(nb);LS.set("stageBlocks",nb);persist(null,null,null,null,null,nb);
     setBlockName("");setBlockStages([]);setShowBlockForm(false);
   };
-  const delBlock=id=>{const nb=(stageBlocks||[]).filter(b=>b.id!==id);setStageBlocks(nb);LS.set("stageBlocks",nb);persist(null,null,null,null,nb)};
+  const delBlock=id=>{const nb=(stageBlocks||[]).filter(b=>b.id!==id);setStageBlocks(nb);LS.set("stageBlocks",nb);persist(null,null,null,null,null,nb)};
   const addStageToBlock=stageId=>{
     const st=stages.find(s=>s.id===stageId);if(!st)return;
     if(blockStages.some(bs=>bs.sourceId===stageId))return;
@@ -2869,28 +2871,56 @@ function App(){
   },[lightMode]);
 
   useEffect(()=>{
-    // Load from localStorage first for instant display
+    // Check if we migrated to Supabase already — if not, clear old Google Sheets localStorage
+    const migrated=LS.get("sb_migrated");
+    if(!migrated){
+      // Clear any stale data from Google Sheets era
+      ["orders","projects","stages","workLogs","customTasks","stageBlocks","users","session"].forEach(k=>{
+        try{localStorage.removeItem(LS_PREFIX+k)}catch{}
+      });
+      LS.set("sb_migrated",true);
+      setCurrentUser(null);
+    }
+
+    // Load from localStorage for instant display (only useful after Supabase data was cached)
     const lo=LS.get("orders"),lp=LS.get("projects"),ls=LS.get("stages"),lw=LS.get("workLogs");
     if(lo)setOrders(lo);if(lp)setProjects(lp);if(ls)setStages(ls);if(lw)setWorkLogs(lw);
     const lct=LS.get("customTasks");if(lct)setCustomTasks(lct);
     const lsb=LS.get("stageBlocks");if(lsb)setStageBlocks(lsb);
 
-    // Then load from Supabase
-    Promise.all([dbLoadAll(),dbLoadUsers()]).then(([data,users])=>{
+    // Then always load from Supabase (Supabase is the source of truth)
+    Promise.all([dbLoadAll(),dbLoadUsers()]).then(async([data,users])=>{
       if(data){
-        if(data.orders?.length||!lo){setOrders(data.orders);LS.set("orders",data.orders)}
-        if(data.projects?.length||!lp){setProjects(data.projects);LS.set("projects",data.projects)}
-        if(data.stages?.length||!ls){setStages(data.stages);LS.set("stages",data.stages)}
-        if(data.workLogs?.length||!lw){setWorkLogs(data.workLogs);LS.set("workLogs",data.workLogs)}
-        if(data.customTasks){setCustomTasks(data.customTasks);LS.set("customTasks",data.customTasks)}
-        if(data.stageBlocks){setStageBlocks(data.stageBlocks);LS.set("stageBlocks",data.stageBlocks)}
+        // Always prefer Supabase data — update state and cache
+        setOrders(data.orders||[]);LS.set("orders",data.orders||[]);
+        setProjects(data.projects?.length?data.projects:DEF_PROJ);LS.set("projects",data.projects?.length?data.projects:DEF_PROJ);
+        setStages(data.stages?.length?data.stages:DEF_STAGES);LS.set("stages",data.stages?.length?data.stages:DEF_STAGES);
+        setWorkLogs(data.workLogs||[]);LS.set("workLogs",data.workLogs||[]);
+        setCustomTasks(data.customTasks||[]);LS.set("customTasks",data.customTasks||[]);
+        setStageBlocks(data.stageBlocks||[]);LS.set("stageBlocks",data.stageBlocks||[]);
       }
       if(users?.length){LS.set("users",users)}
-      // Seed demo projects/stages if DB is empty
-      if(data&&!data.orders?.length&&!lo){
+
+      // Seed default projects/stages/users if DB is empty
+      if(!data?.projects?.length){
         SB.upsert("projects",DEF_PROJ.map(projectToDb)).catch(()=>{});
+      }
+      if(!data?.stages?.length){
         SB.upsert("stages",DEF_STAGES.map(stageToDb)).catch(()=>{});
       }
+      // Seed fallback users with hashed passwords if no users in DB
+      if(!users?.length){
+        try{
+          const seeded=[];
+          for(const fu of FALLBACK_USERS){
+            const h=await sha256(fu.password);
+            seeded.push(userToDb({...fu,password_hash:h,password:undefined}));
+          }
+          await SB.upsert("app_users",seeded);
+          LS.set("users",FALLBACK_USERS.map(fu=>({...fu,password:undefined})));
+        }catch(e){console.warn("Seed users error",e)}
+      }
+
       // Restore session from fresh user list
       try{
         const saved=localStorage.getItem(LS_PREFIX+"session");
@@ -2898,7 +2928,7 @@ function App(){
           const s3=JSON.parse(saved);
           const freshUsers=users?.length?users:getUsers();
           const found=freshUsers.find(u=>u.id===s3.id&&u.username===s3.username&&u.active!==false);
-          if(found)setCurrentUser(found);else localStorage.removeItem(LS_PREFIX+"session");
+          if(found)setCurrentUser(found);else{localStorage.removeItem(LS_PREFIX+"session");setCurrentUser(null)}
         }
       }catch{}
       setLoading(false);
@@ -2922,12 +2952,12 @@ function App(){
     try{
       const [data,users]=await Promise.all([dbLoadAll(),dbLoadUsers()]);
       if(data){
-        if(data.orders)setOrders(data.orders);
-        if(data.projects)setProjects(data.projects);
-        if(data.stages)setStages(data.stages);
-        if(data.workLogs)setWorkLogs(data.workLogs);
-        if(data.customTasks)setCustomTasks(data.customTasks);
-        if(data.stageBlocks)setStageBlocks(data.stageBlocks);
+        if(data.orders){setOrders(data.orders);LS.set("orders",data.orders)}
+        if(data.projects){setProjects(data.projects);LS.set("projects",data.projects)}
+        if(data.stages){setStages(data.stages);LS.set("stages",data.stages)}
+        if(data.workLogs){setWorkLogs(data.workLogs);LS.set("workLogs",data.workLogs)}
+        if(data.customTasks){setCustomTasks(data.customTasks);LS.set("customTasks",data.customTasks)}
+        if(data.stageBlocks){setStageBlocks(data.stageBlocks);LS.set("stageBlocks",data.stageBlocks)}
       }
       if(users?.length)LS.set("users",users);
       setSync("ok");
@@ -3198,6 +3228,13 @@ function App(){
       // Save to Supabase
       const CHUNK=50;
       const chunked=(arr,n)=>Array.from({length:Math.ceil(arr.length/n)},(_,i)=>arr.slice(i*n,(i+1)*n));
+      // Seed demo users with hashed passwords
+      const demoUsers=[];
+      for(const fu of FALLBACK_USERS){
+        const h=await sha256(fu.password);
+        demoUsers.push(userToDb({...fu,password_hash:h,password:undefined}));
+      }
+      await SB.upsert("app_users",demoUsers);
       await SB.upsert("projects",dProj);
       await SB.upsert("stages",dStages);
       for(const chunk of chunked(orders,CHUNK))await SB.upsert("orders",chunk);
@@ -3205,12 +3242,13 @@ function App(){
       for(const chunk of chunked(tasks,CHUNK))await SB.upsert("custom_tasks",chunk);
 
       // Reload
-      const data=await dbLoadAll();
-      if(data.orders)setOrders(data.orders);
-      if(data.projects)setProjects(data.projects);
-      if(data.stages)setStages(data.stages);
-      if(data.workLogs)setWorkLogs(data.workLogs);
-      if(data.customTasks)setCustomTasks(data.customTasks);
+      const [data,freshUsers]=await Promise.all([dbLoadAll(),dbLoadUsers()]);
+      if(data.orders){setOrders(data.orders);LS.set("orders",data.orders)}
+      if(data.projects){setProjects(data.projects);LS.set("projects",data.projects)}
+      if(data.stages){setStages(data.stages);LS.set("stages",data.stages)}
+      if(data.workLogs){setWorkLogs(data.workLogs);LS.set("workLogs",data.workLogs)}
+      if(data.customTasks){setCustomTasks(data.customTasks);LS.set("customTasks",data.customTasks)}
+      if(freshUsers?.length){LS.set("users",freshUsers)}
       setSync("ok");
       alert("✅ נתוני דמו נטענו בהצלחה!");
     }catch(e){console.error(e);setSync("error");alert("שגיאה: "+e.message)}
@@ -3227,16 +3265,16 @@ function App(){
       ]);
       await fetch(`${SB_URL}/rest/v1/orders?id=like.demo_o_*`,{method:"DELETE",headers:SB_H});
       const data=await dbLoadAll();
-      if(data.orders)setOrders(data.orders);
-      if(data.workLogs)setWorkLogs(data.workLogs);
-      if(data.customTasks)setCustomTasks(data.customTasks);
+      if(data.orders){setOrders(data.orders);LS.set("orders",data.orders)}
+      if(data.workLogs){setWorkLogs(data.workLogs);LS.set("workLogs",data.workLogs)}
+      if(data.customTasks){setCustomTasks(data.customTasks);LS.set("customTasks",data.customTasks)}
       setSync("ok");
       alert("✅ נתוני דמו נמחקו!");
     }catch(e){console.error(e);setSync("error");alert("שגיאה: "+e.message)}
   };
   useEffect(()=>{const isi=window.matchMedia("(display-mode:standalone)").matches||window.navigator.standalone;if(isi)return;const h=e=>{e.preventDefault();setInstallPrompt(e);setShowInstall(true)};window.addEventListener("beforeinstallprompt",h);window.addEventListener("appinstalled",()=>{setShowInstall(false);setInstallPrompt(null)});return()=>window.removeEventListener("beforeinstallprompt",h)},[]);
   // Service Worker
-  useEffect(()=>{if(!("serviceWorker" in navigator))return;navigator.serviceWorker.register("./sw.js?v=3").then(reg=>{swRegRef.current=reg;if(reg.waiting)setShowUpdate(true);reg.addEventListener("updatefound",()=>{const nw=reg.installing;if(!nw)return;nw.addEventListener("statechange",()=>{if(nw.state==="installed"&&navigator.serviceWorker.controller)setShowUpdate(true)})});setInterval(()=>reg.update(),30*60*1000)}).catch(()=>{});navigator.serviceWorker.addEventListener("controllerchange",()=>window.location.reload())},[]);
+  useEffect(()=>{if(!("serviceWorker" in navigator))return;navigator.serviceWorker.register("./sw.js?v=4").then(reg=>{swRegRef.current=reg;if(reg.waiting)setShowUpdate(true);reg.addEventListener("updatefound",()=>{const nw=reg.installing;if(!nw)return;nw.addEventListener("statechange",()=>{if(nw.state==="installed"&&navigator.serviceWorker.controller)setShowUpdate(true)})});setInterval(()=>reg.update(),30*60*1000)}).catch(()=>{});navigator.serviceWorker.addEventListener("controllerchange",()=>window.location.reload())},[]);
   // PWA Install
   const handleInstall=async()=>{if(!installPrompt)return;installPrompt.prompt();setInstallPrompt(null);setShowInstall(false)};
   const handleUpdate=()=>{const r=swRegRef.current;if(r?.waiting)r.waiting.postMessage({type:"SKIP_WAITING"});else window.location.reload();setShowUpdate(false)};
