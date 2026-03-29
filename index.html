@@ -522,11 +522,60 @@ function DonutChart({data,size=180}){
 
 // ── Login Screen ───────────────────────────────────────────────────────────
 function LoginScreen({onLogin,lightMode,toggleLight}){
+  const {toast}=useToast();
+  const [mode,setMode]=useState("login"); // "login" | "register"
   const [username,setUsername]=useState("");
   const [password,setPassword]=useState("");
   const [err,setErr]=useState("");
   const [showPass,setShowPass]=useState(false);
   const [loading,setLoading]=useState(false);
+  // Registration fields
+  const [regStep,setRegStep]=useState(1);
+  const [companyName,setCompanyName]=useState("");
+  const [adminName,setAdminName]=useState("");
+  const [regUser,setRegUser]=useState("");
+  const [regPass,setRegPass]=useState("");
+  const [regPass2,setRegPass2]=useState("");
+
+  const doRegister=async()=>{
+    if(regStep===1){
+      if(!companyName.trim())return setErr("יש להזין שם חברה");
+      if(!adminName.trim())return setErr("יש להזין שם מלא");
+      setErr("");setRegStep(2);return;
+    }
+    if(!regUser.trim()||!regPass.trim())return setErr("יש למלא שם משתמש וסיסמה");
+    if(regPass!==regPass2)return setErr("הסיסמאות לא תואמות");
+    const pwErrors=validatePassword(regPass);
+    if(pwErrors.length>0)return setErr("הסיסמה חייבת לכלול: "+pwErrors.join(", "));
+    setLoading(true);setErr("");
+    try{
+      // Check if username exists
+      const existing=await SB.get("app_users",`username=eq.${encodeURIComponent(regUser.trim())}`);
+      if(existing&&existing.length>0){setErr("שם משתמש תפוס");setLoading(false);return}
+      // Create company
+      const compId=uid();
+      await SB.upsert("companies",[{id:compId,name:companyName.trim(),slug:companyName.trim().toLowerCase().replace(/\s+/g,"-").replace(/[^a-z0-9\u0590-\u05ff-]/g,"")}]);
+      // Create free subscription
+      await SB.upsert("subscriptions",[{id:uid(),company_id:compId,plan:"free",status:"trial",trial_ends_at:new Date(Date.now()+14*24*3600000).toISOString(),max_users:3,max_orders:10}]);
+      // Create admin user
+      const hash=await sha256(regPass);
+      const adminUser={id:uid(),username:regUser.trim(),password_hash:hash,role:"admin",name:adminName.trim(),project_access:"all",stage_access:"all",can_edit:true,can_view:true,active:true,hourly_rate:0,company_id:compId};
+      await SB.upsert("app_users",[adminUser]);
+      // Create default stages for this company
+      const defStages=DEF_STAGES.map(s=>({...stageToDb(s),company_id:compId}));
+      await SB.upsert("stages",defStages);
+      // Create default projects
+      const defProjects=DEF_PROJ.map(p=>({...projectToDb(p),company_id:compId}));
+      await SB.upsert("projects",defProjects);
+      toast("החברה נוצרה בהצלחה! 14 יום ניסיון חינם","success",5000);
+      // Auto login
+      const u=dbToUser({...adminUser,login_attempts:0,locked_until:null,last_login:new Date().toISOString()});
+      LS.set("users",[u]);
+      onLogin(u);
+    }catch(e){setErr("שגיאה ביצירת חשבון: "+(e.message||e))}
+    setLoading(false);
+  };
+
   const attempt=async()=>{
     if(!username.trim()||!password.trim()){setErr("יש למלא שם משתמש וסיסמה");return}
     setLoading(true);setErr("");
@@ -535,13 +584,11 @@ function LoginScreen({onLogin,lightMode,toggleLight}){
       const rows=await SB.get("app_users",`username=eq.${encodeURIComponent(username.trim())}&active=eq.true`);
       if(!rows||rows.length===0){setErr("שם משתמש לא נמצא במערכת");setLoading(false);return}
       const row=rows[0];
-      // Rate limiting — check if locked
       if(row.locked_until&&new Date(row.locked_until)>new Date()){
         const minsLeft=Math.ceil((new Date(row.locked_until)-new Date())/60000);
         setErr(`החשבון נעול. נסה שוב בעוד ${minsLeft} דקות`);setLoading(false);return;
       }
       if(row.password_hash!==hash){
-        // Increment login attempts
         const attempts=(row.login_attempts||0)+1;
         const lockData={login_attempts:attempts};
         if(attempts>=MAX_LOGIN_ATTEMPTS){
@@ -553,7 +600,6 @@ function LoginScreen({onLogin,lightMode,toggleLight}){
         try{await SB.patch("app_users",{id:row.id},lockData)}catch{}
         setLoading(false);return;
       }
-      // Success — reset attempts + update last_login
       try{await SB.patch("app_users",{id:row.id},{login_attempts:0,locked_until:null,last_login:new Date().toISOString()})}catch{}
       const u=dbToUser(row);
       const cached=getUsers();
@@ -562,7 +608,6 @@ function LoginScreen({onLogin,lightMode,toggleLight}){
       addAuditEntry({userId:u.id,username:u.username,name:u.name,action:"התחברות",target:"",details:""});
       onLogin(u);
     }catch(e){
-      // Offline fallback
       try{
         const hash=await sha256(password);
         const users=getUsers();
@@ -581,15 +626,48 @@ function LoginScreen({onLogin,lightMode,toggleLight}){
         <button onClick={toggleLight} style={{background:lm?"#e2e8f0":"#131829",border:`1px solid ${lm?"#e2e8f0":"#1e2a42"}`,borderRadius:8,padding:"7px 14px",fontSize:15,color:lm?"#1a1f2e":"#8b95a8"}}>{lm?"🌙":"☀️"}</button>
       </div>
       <div style={{background:lm?"#ffffff":"#131829",borderRadius:20,padding:"clamp(24px,6vw,44px) clamp(20px,6vw,40px)",maxWidth:420,width:"100%",border:`1px solid ${lm?"#dde1e8":"#1e2a42"}`,boxShadow:lm?"0 8px 40px #0001":"0 20px 60px #000a"}}>
-        <div style={{textAlign:"center",marginBottom:32}}><div style={{fontSize:52,marginBottom:10}}>⚙️</div><div style={{fontSize:24,fontWeight:800,color:lm?"#1a1f2e":"#e2e8f0",letterSpacing:-.5}}>ניהול קו ייצור</div><div style={{fontSize:13,color:lm?"#5a6478":"#8b95a8",marginTop:6}}>כניסה למערכת</div></div>
-        <div style={{display:"flex",flexDirection:"column",gap:16}}>
-          <div><label htmlFor="login-user" style={{fontSize:12,color:"var(--c-muted)",fontWeight:600,display:"block",marginBottom:5}}>שם משתמש</label><input id="login-user" autoComplete="username" value={username} onChange={e=>setUsername(e.target.value)} onKeyDown={e=>e.key==="Enter"&&attempt()} placeholder="הכנס שם משתמש"/></div>
-          <div><label htmlFor="login-pass" style={{fontSize:12,color:"var(--c-muted)",fontWeight:600,display:"block",marginBottom:5}}>סיסמה</label>
-            <div style={{position:"relative"}}><input id="login-pass" autoComplete="current-password" type={showPass?"text":"password"} value={password} onChange={e=>setPassword(e.target.value)} onKeyDown={e=>e.key==="Enter"&&attempt()} placeholder="הכנס סיסמה" style={{paddingLeft:44}}/><button onClick={()=>setShowPass(p=>!p)} aria-label={showPass?"הסתר סיסמה":"הצג סיסמה"} style={{position:"absolute",left:12,top:"50%",transform:"translateY(-50%)",background:"none",border:"none",fontSize:18,color:"var(--c-muted)",lineHeight:1}}>{showPass?"🙈":"👁️"}</button></div>
+        <div style={{textAlign:"center",marginBottom:32}}><div style={{fontSize:52,marginBottom:10}}>⚙️</div><div style={{fontSize:24,fontWeight:800,color:lm?"#1a1f2e":"#e2e8f0",letterSpacing:-.5}}>ניהול קו ייצור</div><div style={{fontSize:13,color:lm?"#5a6478":"#8b95a8",marginTop:6}}>{mode==="login"?"כניסה למערכת":"הרשמת חברה חדשה"}</div></div>
+
+        {mode==="login"?(
+          <div style={{display:"flex",flexDirection:"column",gap:16}}>
+            <div><label htmlFor="login-user" style={{fontSize:12,color:"var(--c-muted)",fontWeight:600,display:"block",marginBottom:5}}>שם משתמש</label><input id="login-user" autoComplete="username" value={username} onChange={e=>setUsername(e.target.value)} onKeyDown={e=>e.key==="Enter"&&attempt()} placeholder="הכנס שם משתמש"/></div>
+            <div><label htmlFor="login-pass" style={{fontSize:12,color:"var(--c-muted)",fontWeight:600,display:"block",marginBottom:5}}>סיסמה</label>
+              <div style={{position:"relative"}}><input id="login-pass" autoComplete="current-password" type={showPass?"text":"password"} value={password} onChange={e=>setPassword(e.target.value)} onKeyDown={e=>e.key==="Enter"&&attempt()} placeholder="הכנס סיסמה" style={{paddingLeft:44}}/><button onClick={()=>setShowPass(p=>!p)} aria-label={showPass?"הסתר סיסמה":"הצג סיסמה"} style={{position:"absolute",left:12,top:"50%",transform:"translateY(-50%)",background:"none",border:"none",fontSize:18,color:"var(--c-muted)",lineHeight:1}}>{showPass?"🙈":"👁️"}</button></div>
+            </div>
+            {err&&<div style={{background:lm?"#fee2e2":"#450a0a",color:lm?"#dc2626":"#fca5a5",borderRadius:8,padding:"10px 14px",fontSize:13,border:lm?"1px solid #fecaca":"1px solid #7f1d1d"}}>❌ {err}</div>}
+            <button onClick={attempt} disabled={loading} style={{background:loading?"#2563eb99":"var(--c-accent)",color:"#fff",border:"none",borderRadius:10,padding:"13px",fontWeight:700,fontSize:16,marginTop:4,fontFamily:"inherit"}}>{loading?"⏳ מתחבר...":"כניסה למערכת"}</button>
+            <div style={{textAlign:"center",marginTop:4}}><span style={{fontSize:13,color:lm?"#5a6478":"#8b95a8"}}>אין לך חשבון? </span><button onClick={()=>{setMode("register");setErr("");setRegStep(1)}} style={{background:"none",border:"none",color:"var(--c-accent)",fontSize:13,fontWeight:700,fontFamily:"inherit",cursor:"pointer",textDecoration:"underline"}}>הרשמה חינם</button></div>
+            <div style={{position:"relative",textAlign:"center",margin:"8px 0"}}><div style={{position:"absolute",top:"50%",left:0,right:0,height:1,background:lm?"#dde1e8":"#1e2a42"}}/><span style={{position:"relative",padding:"0 12px",background:lm?"#ffffff":"#131829",fontSize:11,color:lm?"#9ca3af":"#5a6478"}}>או</span></div>
+            <button onClick={()=>onLogin({id:"demo_user",username:"demo",role:"admin",name:"משתמש דמו",projectAccess:"all",stageAccess:"all",canEdit:true,canView:true,active:true,hourlyRate:0,companyId:DEFAULT_COMPANY_ID,isDemo:true})} style={{background:"none",border:`1px solid ${lm?"#06b6d4":"#06b6d433"}`,borderRadius:10,padding:"11px",color:lm?"#0891b2":"#06b6d4",fontWeight:600,fontSize:14,fontFamily:"inherit"}}>🔍 נסה דמו — בלי הרשמה</button>
           </div>
-          {err&&<div style={{background:lm?"#fee2e2":"#450a0a",color:lm?"#dc2626":"#fca5a5",borderRadius:8,padding:"10px 14px",fontSize:13,border:lm?"1px solid #fecaca":"1px solid #7f1d1d"}}>❌ {err}</div>}
-          <button onClick={attempt} disabled={loading} style={{background:loading?"#2563eb99":"var(--c-accent)",color:"#fff",border:"none",borderRadius:10,padding:"13px",fontWeight:700,fontSize:16,marginTop:4,fontFamily:"inherit"}}>{loading?"⏳ מתחבר...":"כניסה למערכת"}</button>
-        </div>
+        ):(
+          <div style={{display:"flex",flexDirection:"column",gap:16}}>
+            {/* Step indicator */}
+            <div style={{display:"flex",justifyContent:"center",gap:8,marginBottom:4}}>
+              <div style={{width:32,height:4,borderRadius:2,background:regStep>=1?"var(--c-accent)":"var(--c-border)"}}/>
+              <div style={{width:32,height:4,borderRadius:2,background:regStep>=2?"var(--c-accent)":"var(--c-border)"}}/>
+            </div>
+            {regStep===1?(
+              <>
+                <div><label style={{fontSize:12,color:"var(--c-muted)",fontWeight:600,display:"block",marginBottom:5}}>שם החברה / המפעל</label><input value={companyName} onChange={e=>setCompanyName(e.target.value)} placeholder='למשל: "תעשיות אלפא בע"מ"'/></div>
+                <div><label style={{fontSize:12,color:"var(--c-muted)",fontWeight:600,display:"block",marginBottom:5}}>השם המלא שלך</label><input value={adminName} onChange={e=>setAdminName(e.target.value)} placeholder="שם פרטי ומשפחה"/></div>
+              </>
+            ):(
+              <>
+                <div><label style={{fontSize:12,color:"var(--c-muted)",fontWeight:600,display:"block",marginBottom:5}}>שם משתמש (לכניסה)</label><input value={regUser} onChange={e=>setRegUser(e.target.value)} placeholder="בחר שם משתמש" autoComplete="username"/></div>
+                <div><label style={{fontSize:12,color:"var(--c-muted)",fontWeight:600,display:"block",marginBottom:5}}>סיסמה</label><input type="password" value={regPass} onChange={e=>setRegPass(e.target.value)} placeholder="מינימום 8 תווים, אות גדולה, ספרה, תו מיוחד" autoComplete="new-password"/></div>
+                <div><label style={{fontSize:12,color:"var(--c-muted)",fontWeight:600,display:"block",marginBottom:5}}>אימות סיסמה</label><input type="password" value={regPass2} onChange={e=>setRegPass2(e.target.value)} placeholder="הזן שוב" autoComplete="new-password"/></div>
+              </>
+            )}
+            {err&&<div style={{background:lm?"#fee2e2":"#450a0a",color:lm?"#dc2626":"#fca5a5",borderRadius:8,padding:"10px 14px",fontSize:13,border:lm?"1px solid #fecaca":"1px solid #7f1d1d"}}>❌ {err}</div>}
+            <div style={{display:"flex",gap:10}}>
+              {regStep===2&&<button onClick={()=>{setRegStep(1);setErr("")}} style={{flex:1,background:"var(--c-card)",color:"var(--c-text)",border:"1px solid var(--c-border)",borderRadius:10,padding:"13px",fontWeight:600,fontSize:14,fontFamily:"inherit"}}>→ חזרה</button>}
+              <button onClick={doRegister} disabled={loading} style={{flex:1,background:loading?"#2563eb99":"var(--c-accent)",color:"#fff",border:"none",borderRadius:10,padding:"13px",fontWeight:700,fontSize:16,fontFamily:"inherit"}}>{loading?"⏳ יוצר חשבון...":regStep===1?"← המשך":"צור חשבון"}</button>
+            </div>
+            <div style={{textAlign:"center",marginTop:4}}><span style={{fontSize:13,color:lm?"#5a6478":"#8b95a8"}}>כבר יש לך חשבון? </span><button onClick={()=>{setMode("login");setErr("")}} style={{background:"none",border:"none",color:"var(--c-accent)",fontSize:13,fontWeight:700,fontFamily:"inherit",cursor:"pointer",textDecoration:"underline"}}>כניסה</button></div>
+            <div style={{textAlign:"center",fontSize:11,color:lm?"#9ca3af":"#5a6478"}}>🎁 14 יום ניסיון חינם — ללא כרטיס אשראי</div>
+          </div>
+        )}
       </div>
     </div>
   );
@@ -3587,7 +3665,7 @@ function App(){
   };
   useEffect(()=>{const isi=window.matchMedia("(display-mode:standalone)").matches||window.navigator.standalone;if(isi)return;const h=e=>{e.preventDefault();setInstallPrompt(e);setShowInstall(true)};window.addEventListener("beforeinstallprompt",h);window.addEventListener("appinstalled",()=>{setShowInstall(false);setInstallPrompt(null)});return()=>window.removeEventListener("beforeinstallprompt",h)},[]);
   // Service Worker
-  useEffect(()=>{if(!("serviceWorker" in navigator))return;navigator.serviceWorker.register("./sw.js?v=12").then(reg=>{swRegRef.current=reg;if(reg.waiting)setShowUpdate(true);reg.addEventListener("updatefound",()=>{const nw=reg.installing;if(!nw)return;nw.addEventListener("statechange",()=>{if(nw.state==="installed"&&navigator.serviceWorker.controller)setShowUpdate(true)})});setInterval(()=>reg.update(),30*60*1000)}).catch(()=>{});navigator.serviceWorker.addEventListener("controllerchange",()=>window.location.reload())},[]);
+  useEffect(()=>{if(!("serviceWorker" in navigator))return;navigator.serviceWorker.register("./sw.js?v=14").then(reg=>{swRegRef.current=reg;if(reg.waiting)setShowUpdate(true);reg.addEventListener("updatefound",()=>{const nw=reg.installing;if(!nw)return;nw.addEventListener("statechange",()=>{if(nw.state==="installed"&&navigator.serviceWorker.controller)setShowUpdate(true)})});setInterval(()=>reg.update(),30*60*1000)}).catch(()=>{});navigator.serviceWorker.addEventListener("controllerchange",()=>window.location.reload())},[]);
   // Network status
   useEffect(()=>{const on=()=>{setIsOffline(false);toast("החיבור חזר — מסנכרן נתונים...","success");refreshFromDB(true)};const off=()=>{setIsOffline(true)};window.addEventListener("online",on);window.addEventListener("offline",off);return()=>{window.removeEventListener("online",on);window.removeEventListener("offline",off)}},[]);
   // PWA Install
@@ -3606,6 +3684,12 @@ function App(){
       {isOffline&&<OfflineBanner lm={lm}/>}
       {showUpdate&&!isOffline&&<UpdateBanner onUpdate={handleUpdate} onDismiss={()=>setShowUpdate(false)} lm={lm}/>}
       <Navbar tab={tab} setTab={setTab} tabs={TABS} lightMode={lightMode} toggleLight={()=>setLightMode(p=>!p)} sync={sync} onAdmin={()=>setShowAdmin(true)} onLogout={handleLogout} alertCount={alertCount} onAlerts={()=>setShowAlerts(true)} onRefresh={()=>refreshFromDB(true)} onLiveBoard={()=>setShowLiveBoard(true)} onReport={()=>setShowReport(true)} onHistory={()=>setShowHistory(true)} isAdmin={isAdmin} onLoadDemo={loadDemoData} onDeleteDemo={deleteDemoData}/>
+      {currentUser?.isDemo&&(
+        <div style={{background:lm?"#eff6ff":"#0c1e3a",borderBottom:`1px solid ${lm?"#bfdbfe":"#1e3a5f"}`,padding:"8px 16px",display:"flex",alignItems:"center",justifyContent:"center",gap:10,flexWrap:"wrap"}}>
+          <span style={{fontSize:13,color:lm?"#1d4ed8":"#93c5fd"}}>🔍 מצב דמו — הנתונים לא נשמרים</span>
+          <button onClick={()=>{handleLogout();}} style={{background:"var(--c-accent)",color:"#fff",border:"none",borderRadius:6,padding:"4px 14px",fontSize:12,fontWeight:700,fontFamily:"inherit"}}>הירשם עכשיו</button>
+        </div>
+      )}
       <main className="main-content" style={{maxWidth:1440,margin:"0 auto",padding:"16px 14px",paddingBottom:showInstall?"100px":"calc(16px + env(safe-area-inset-bottom,0px))"}}>
         {tab==="dashboard"&&<Dashboard orders={filteredOrders} projects={filteredProjects} stages={stages} users={getUsers()} workLogs={filteredWorkLogs}/>}
         {tab==="orders"&&<Orders orders={filteredOrders} projects={filteredProjects} stages={stages} stageBlocks={stageBlocks} updO={updO} workLogs={filteredWorkLogs} onWorkLog={handleStartWork}/>}
