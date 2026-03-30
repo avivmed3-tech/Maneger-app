@@ -2762,17 +2762,32 @@ function Navbar({tab,setTab,tabs,lightMode,toggleLight,sync,onAdmin,onLogout,ale
         {tabs.map(t=>(<button key={t.id} onClick={()=>{setTab(t.id);setMenuOpen(false)}} style={{flex:"0 0 auto",padding:"8px 12px",background:"none",border:"none",color:tab===t.id?navActive:navMuted,borderBottom:tab===t.id?`3px solid ${navActive}`:"3px solid transparent",fontWeight:tab===t.id?700:400,fontSize:12,fontFamily:"inherit",whiteSpace:"nowrap"}}>{t.label}</button>))}
       </div>
       {menuOpen&&(
-        <div style={{background:navBg,borderBottom:`1px solid ${navBorder}`,padding:"12px 16px",display:"flex",flexDirection:"column",gap:10}}>
-          <div style={{display:"flex",alignItems:"center",gap:8}}>
-            <span style={{fontSize:13,color:navActive,fontWeight:700}}>👤 {currentUser?.name}</span>
-            <button onClick={()=>{onLogout();setMenuOpen(false)}} style={{marginRight:"auto",background:"#450a0a",color:"#fca5a5",border:"none",borderRadius:6,padding:"4px 10px",fontSize:12,fontFamily:"inherit"}}>יציאה</button>
-          </div>
-          <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
-            <button onClick={()=>{toggleLight();setMenuOpen(false)}} style={{background:lm?"#e2e8f0":"#0d1120",border:`1px solid ${navBorder}`,borderRadius:8,padding:"7px 14px",fontSize:13,color:navMuted,fontFamily:"inherit"}}>{lm?"🌙 כהה":"☀️ בהיר"}</button>
-            {currentUser?.role==="admin"&&<button onClick={()=>{onAdmin();setMenuOpen(false)}} style={{background:"#f59e0b22",border:"1px solid #f59e0b44",color:"#f59e0b",borderRadius:8,padding:"7px 14px",fontSize:13,fontWeight:700,fontFamily:"inherit"}}>🛡️ ניהול</button>}
-            {currentUser?.role==="admin"&&<button onClick={()=>{onLiveBoard();setMenuOpen(false)}} style={{background:"#06b6d422",border:"1px solid #06b6d444",color:"#06b6d4",borderRadius:8,padding:"7px 14px",fontSize:13,fontWeight:700,fontFamily:"inherit"}}>📡 מפעל</button>}
-            {currentUser?.role==="admin"&&<button onClick={()=>{onReport();setMenuOpen(false)}} style={{background:"#10b98122",border:"1px solid #10b98144",color:"#10b981",borderRadius:8,padding:"7px 14px",fontSize:13,fontWeight:700,fontFamily:"inherit"}}>📄 דוח</button>}
-            {currentUser?.role==="admin"&&<button onClick={()=>{onHistory();setMenuOpen(false)}} style={{background:"#8b5cf622",border:"1px solid #8b5cf644",color:"#8b5cf6",borderRadius:8,padding:"7px 14px",fontSize:13,fontWeight:700,fontFamily:"inherit"}}>📋 היסטוריה</button>}
+        <div onClick={()=>setMenuOpen(false)} style={{position:"fixed",inset:0,background:"#000c",zIndex:300}}>
+          <div onClick={e=>e.stopPropagation()} className="fade-in" style={{position:"absolute",top:0,right:0,bottom:0,width:"min(300px,80vw)",background:navBg,borderLeft:`1px solid ${navBorder}`,padding:"20px 0",overflowY:"auto",boxShadow:"-8px 0 30px #0006"}}>
+            <div style={{padding:"0 20px 16px",borderBottom:`1px solid ${navBorder}`,marginBottom:8}}>
+              <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:12}}>
+                <span style={{fontSize:16,fontWeight:700,color:navActive}}>⚙️ תפריט</span>
+                <button onClick={()=>setMenuOpen(false)} style={{background:"none",border:"none",fontSize:20,color:navMuted,lineHeight:1}}>✕</button>
+              </div>
+              <div style={{background:lm?"#e2e8f0":"#0d1120",borderRadius:10,padding:"12px 14px",display:"flex",alignItems:"center",gap:10}}>
+                <div style={{width:36,height:36,borderRadius:"50%",background:"var(--c-accent)22",display:"flex",alignItems:"center",justifyContent:"center",fontSize:16,fontWeight:700,color:"var(--c-accent)"}}>{currentUser?.name?.charAt(0)||"?"}</div>
+                <div><div style={{fontWeight:700,fontSize:14,color:navActive}}>{currentUser?.name}</div><div style={{fontSize:11,color:navMuted}}>{currentUser?.role==="admin"?"מנהל מערכת":"עובד"}</div></div>
+              </div>
+            </div>
+            <div style={{display:"flex",flexDirection:"column",gap:2,padding:"0 8px"}}>
+              <button onClick={()=>{toggleLight();setMenuOpen(false)}} style={{background:"transparent",border:"none",borderRadius:8,padding:"10px 14px",fontSize:14,color:navMuted,fontFamily:"inherit",textAlign:"right",display:"flex",alignItems:"center",gap:10}}><span style={{fontSize:18}}>{lm?"🌙":"☀️"}</span>{lm?"מצב כהה":"מצב בהיר"}</button>
+              {isAdmin&&<><div style={{padding:"8px 14px",fontSize:11,color:navMuted,fontWeight:700,textTransform:"uppercase",letterSpacing:".05em"}}>ניהול</div>
+              <button onClick={()=>{onAdmin();setMenuOpen(false)}} style={{background:"transparent",border:"none",borderRadius:8,padding:"10px 14px",fontSize:14,color:navMuted,fontFamily:"inherit",textAlign:"right",display:"flex",alignItems:"center",gap:10}}><span style={{fontSize:18}}>🛡️</span>ניהול מערכת</button>
+              <button onClick={()=>{onLiveBoard();setMenuOpen(false)}} style={{background:"transparent",border:"none",borderRadius:8,padding:"10px 14px",fontSize:14,color:navMuted,fontFamily:"inherit",textAlign:"right",display:"flex",alignItems:"center",gap:10}}><span style={{fontSize:18}}>📡</span>מסך מפעל חי</button>
+              <button onClick={()=>{onReport();setMenuOpen(false)}} style={{background:"transparent",border:"none",borderRadius:8,padding:"10px 14px",fontSize:14,color:navMuted,fontFamily:"inherit",textAlign:"right",display:"flex",alignItems:"center",gap:10}}><span style={{fontSize:18}}>📄</span>דוח חודשי</button>
+              <button onClick={()=>{onHistory();setMenuOpen(false)}} style={{background:"transparent",border:"none",borderRadius:8,padding:"10px 14px",fontSize:14,color:navMuted,fontFamily:"inherit",textAlign:"right",display:"flex",alignItems:"center",gap:10}}><span style={{fontSize:18}}>📋</span>היסטוריה</button>
+              <div style={{borderTop:`1px solid ${navBorder}`,margin:"6px 8px"}}/>
+              <div style={{padding:"8px 14px",fontSize:11,color:navMuted,fontWeight:700,textTransform:"uppercase",letterSpacing:".05em"}}>נתונים</div>
+              <button onClick={()=>{onLoadDemo();setMenuOpen(false)}} style={{background:"transparent",border:"none",borderRadius:8,padding:"10px 14px",fontSize:14,color:"#06b6d4",fontFamily:"inherit",textAlign:"right",display:"flex",alignItems:"center",gap:10}}><span style={{fontSize:18}}>🧪</span>טען נתוני דמו</button>
+              <button onClick={()=>{onDeleteDemo();setMenuOpen(false)}} style={{background:"transparent",border:"none",borderRadius:8,padding:"10px 14px",fontSize:14,color:"#ef4444",fontFamily:"inherit",textAlign:"right",display:"flex",alignItems:"center",gap:10}}><span style={{fontSize:18}}>🗑️</span>מחק נתוני דמו</button></>}
+              <div style={{borderTop:`1px solid ${navBorder}`,margin:"6px 8px"}}/>
+              <button onClick={()=>{onLogout();setMenuOpen(false)}} style={{background:"transparent",border:"none",borderRadius:8,padding:"10px 14px",fontSize:14,color:"#ef4444",fontFamily:"inherit",textAlign:"right",display:"flex",alignItems:"center",gap:10}}><span style={{fontSize:18}}>🚪</span>יציאה מהמערכת</button>
+            </div>
           </div>
         </div>
       )}
@@ -2948,13 +2963,18 @@ function LiveFactoryBoard({orders,workLogs,stages,customTasks,users,onClose,ligh
 // ═══ MONTHLY PDF REPORT ════════════════════════════════════════════════
 // ══════════════════════════════════════════════════════════════════════════
 function MonthlyReportModal({orders,workLogs,stages,projects,users,onClose}){
-  const [month,setMonth]=useState(()=>new Date().toISOString().slice(0,7));
+  const now=new Date();
+  const [selYear,setSelYear]=useState(now.getFullYear());
+  const [selMonth,setSelMonth]=useState(now.getMonth()+1);
   const [generating,setGenerating]=useState(false);
+  const monthNames=["ינואר","פברואר","מרץ","אפריל","מאי","יוני","יולי","אוגוסט","ספטמבר","אוקטובר","נובמבר","דצמבר"];
+  const years=Array.from({length:5},(_,i)=>now.getFullYear()-i);
+  const month=`${selYear}-${String(selMonth).padStart(2,"0")}`;
 
   const generate=()=>{
     setGenerating(true);
     try{
-      const [y,m]=month.split("-").map(Number);
+      const [y,m]=[selYear,selMonth];
       const fLogs=workLogs.filter(w=>{if(!w.completed||!w.endTime)return false;const d=new Date(w.endTime);return d.getFullYear()===y&&d.getMonth()+1===m});
       const fOrders=orders.filter(o=>o.receivedDate&&new Date(o.receivedDate).getFullYear()===y&&new Date(o.receivedDate).getMonth()+1===m);
 
@@ -3011,8 +3031,15 @@ ${Object.values(workerStats).sort((a,b)=>b.min-a.min).map(w=>`<tr><td>${w.name}<
     <Modal onClose={onClose}>
       <div style={{fontWeight:700,fontSize:18,color:"#60a5fa",marginBottom:20}}>📄 דוח חודשי</div>
       <div style={{marginBottom:16}}>
-        <label style={{fontSize:12,color:"var(--c-dim)",display:"block",marginBottom:6}}>בחר חודש</label>
-        <input type="month" value={month} onChange={e=>setMonth(e.target.value)} style={{maxWidth:200}}/>
+        <label style={{fontSize:12,color:"var(--c-dim)",display:"block",marginBottom:8}}>בחר תקופה</label>
+        <div style={{display:"flex",gap:10}}>
+          <select value={selMonth} onChange={e=>setSelMonth(Number(e.target.value))} style={{flex:1,padding:"10px 12px",fontSize:15,fontWeight:600}}>
+            {monthNames.map((n,i)=><option key={i} value={i+1}>{n}</option>)}
+          </select>
+          <select value={selYear} onChange={e=>setSelYear(Number(e.target.value))} style={{width:100,padding:"10px 12px",fontSize:15,fontWeight:600}}>
+            {years.map(y=><option key={y} value={y}>{y}</option>)}
+          </select>
+        </div>
       </div>
       <div style={{background:"var(--c-deep)",borderRadius:10,padding:14,marginBottom:16,fontSize:13,color:"var(--c-muted)"}}>
         הדוח יכלול: פקעות שנפתחו, פעולות עבודה, ביצועי עובדים, ו-KPI של החודש. ייפתח כקובץ HTML שניתן להדפסה.
@@ -3688,7 +3715,7 @@ function App(){
   };
   useEffect(()=>{const isi=window.matchMedia("(display-mode:standalone)").matches||window.navigator.standalone;if(isi)return;const h=e=>{e.preventDefault();setInstallPrompt(e);setShowInstall(true)};window.addEventListener("beforeinstallprompt",h);window.addEventListener("appinstalled",()=>{setShowInstall(false);setInstallPrompt(null)});return()=>window.removeEventListener("beforeinstallprompt",h)},[]);
   // Service Worker
-  useEffect(()=>{if(!("serviceWorker" in navigator))return;navigator.serviceWorker.register("./sw.js?v=17").then(reg=>{swRegRef.current=reg;if(reg.waiting)setShowUpdate(true);reg.addEventListener("updatefound",()=>{const nw=reg.installing;if(!nw)return;nw.addEventListener("statechange",()=>{if(nw.state==="installed"&&navigator.serviceWorker.controller)setShowUpdate(true)})});setInterval(()=>reg.update(),30*60*1000)}).catch(()=>{});navigator.serviceWorker.addEventListener("controllerchange",()=>window.location.reload())},[]);
+  useEffect(()=>{if(!("serviceWorker" in navigator))return;navigator.serviceWorker.register("./sw.js?v=18").then(reg=>{swRegRef.current=reg;if(reg.waiting)setShowUpdate(true);reg.addEventListener("updatefound",()=>{const nw=reg.installing;if(!nw)return;nw.addEventListener("statechange",()=>{if(nw.state==="installed"&&navigator.serviceWorker.controller)setShowUpdate(true)})});setInterval(()=>reg.update(),30*60*1000)}).catch(()=>{});navigator.serviceWorker.addEventListener("controllerchange",()=>window.location.reload())},[]);
   // Network status
   useEffect(()=>{const on=()=>{setIsOffline(false);toast("החיבור חזר — מסנכרן נתונים...","success");refreshFromDB(true)};const off=()=>{setIsOffline(true)};window.addEventListener("online",on);window.addEventListener("offline",off);return()=>{window.removeEventListener("online",on);window.removeEventListener("offline",off)}},[]);
   // PWA Install
