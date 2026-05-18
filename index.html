@@ -3244,7 +3244,7 @@ function App(){
   const [isOffline,setIsOffline]=useState(()=>!navigator.onLine);
   const [companyPlan,setCompanyPlan]=useState("free");
   const lastActivityRef=useRef(Date.now());
-  const canUseFeature=useCallback((key)=>{const f=PLAN_FEATURES[companyPlan]||PLAN_FEATURES.free;return f[key]===true||(typeof f[key]==="number"&&f[key]>0)},[companyPlan]);
+  const canUseFeature=useCallback((key)=>{if(currentUser?.role==="admin")return true;const f=PLAN_FEATURES[companyPlan]||PLAN_FEATURES.free;return f[key]===true||(typeof f[key]==="number"&&f[key]>0)},[companyPlan,currentUser]);
   const swRegRef=useRef(null);
   const oRef=useRef(orders),pRef=useRef(projects),sRef=useRef(stages),wRef=useRef(workLogs);
 
