@@ -1403,9 +1403,24 @@ function Shortages({orders,updO,projects}){
 // ══════════════════════════════════════════════════════════════════════════
 // ═══ ADMIN TASKS BOARD ══════════════════════════════════════════════════
 // ══════════════════════════════════════════════════════════════════════════
-function AdminTasksBoard({customTasks,onDeleteTask,onMarkPartialTask,onMarkDoneTask}){
+function AdminTasksBoard({workers,customTasks,onAddTask,onDeleteTask,onMarkPartialTask,onMarkDoneTask}){
+  const {toast}=useToast();
   const [taskView,setTaskView]=useState("board");
   const [detailTask,setDetailTask]=useState(null);
+  const [showTaskForm,setShowTaskForm]=useState(false);
+  const [taskName,setTaskName]=useState("");
+  const [taskDesc,setTaskDesc]=useState("");
+  const [taskWorker,setTaskWorker]=useState("");
+  const [taskPrice,setTaskPrice]=useState("");
+
+  const addTask=()=>{
+    if(!taskName.trim()||!taskWorker)return toast("יש לבחור עובד ושם משימה","warning");
+    const u=(workers||[]).find(u2=>u2.id===taskWorker);
+    const task={id:uid(),userId:taskWorker,userName:u?.name||"",name:taskName.trim(),description:taskDesc.trim(),price:Number(taskPrice)||0,createdAt:nowISO(),active:false,completed:false,startTime:null,endTime:null,durationMin:0,paused:false,pauseStart:null,totalPauseMin:0,pauseLog:[]};
+    onAddTask(task);
+    toast("משימה הוקצתה בהצלחה","success");
+    setTaskName("");setTaskDesc("");setTaskWorker("");setTaskPrice("");setShowTaskForm(false);
+  };
   const openTasks=(customTasks||[]).filter(t=>!t.completed&&!t.partial);
   const partialTasks=(customTasks||[]).filter(t=>!t.completed&&t.partial);
   const doneTasks=(customTasks||[]).filter(t=>t.completed);
@@ -1451,6 +1466,7 @@ function AdminTasksBoard({customTasks,onDeleteTask,onMarkPartialTask,onMarkDoneT
           <span style={{fontSize:12,background:"#3b82f622",color:"#60a5fa",padding:"3px 10px",borderRadius:12}}>{partialTasks.length} חלקיות</span>
           <span style={{fontSize:12,background:"#10b98122",color:"#10b981",padding:"3px 10px",borderRadius:12}}>{doneTasks.length} הושלמו</span>
           <SegBtn options={[["board","כרטיסים"],["summary","סיכום"]]} value={taskView} onChange={setTaskView}/>
+          <Btn small color="#a78bfa" onClick={()=>setShowTaskForm(true)}>+ הקצה משימה</Btn>
         </div>
       </div>
 
@@ -1517,6 +1533,42 @@ function AdminTasksBoard({customTasks,onDeleteTask,onMarkPartialTask,onMarkDoneT
               </div>
             </details>
           )}
+        </div>
+      )}
+
+      {showTaskForm&&(
+        <div onClick={()=>setShowTaskForm(false)} style={{position:"fixed",inset:0,background:"#000000cc",zIndex:200,display:"flex",alignItems:"center",justifyContent:"center",padding:16}}>
+          <div onClick={e=>e.stopPropagation()} style={{background:"var(--c-card)",borderRadius:14,padding:24,maxWidth:440,width:"100%",border:"1px solid #a78bfa55"}}>
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:16}}>
+              <div style={{fontWeight:700,fontSize:16,color:"#a78bfa"}}>📌 הקצאת משימה לעובד</div>
+              <IBtn onClick={()=>setShowTaskForm(false)}>✕</IBtn>
+            </div>
+            <div style={{display:"flex",flexDirection:"column",gap:10}}>
+              <div style={{display:"flex",flexDirection:"column",gap:3}}>
+                <label style={{fontSize:11,color:"var(--c-dim)"}}>עובד *</label>
+                <select value={taskWorker} onChange={e=>setTaskWorker(e.target.value)}>
+                  <option value="">-- בחר עובד --</option>
+                  {(workers||[]).map(w=><option key={w.id} value={w.id}>{w.name}</option>)}
+                </select>
+              </div>
+              <div style={{display:"flex",flexDirection:"column",gap:3}}>
+                <label style={{fontSize:11,color:"var(--c-dim)"}}>שם משימה *</label>
+                <input value={taskName} onChange={e=>setTaskName(e.target.value)} placeholder="לדוגמה: הכנת דוח..."/>
+              </div>
+              <div style={{display:"flex",flexDirection:"column",gap:3}}>
+                <label style={{fontSize:11,color:"var(--c-dim)"}}>תיאור (אופציונלי)</label>
+                <input value={taskDesc} onChange={e=>setTaskDesc(e.target.value)} placeholder="פרטים נוספים..."/>
+              </div>
+              <div style={{display:"flex",flexDirection:"column",gap:3}}>
+                <label style={{fontSize:11,color:"var(--c-dim)"}}>תמחור ₪ (אופציונלי)</label>
+                <input type="number" value={taskPrice} onChange={e=>setTaskPrice(e.target.value)} placeholder="0" min="0"/>
+              </div>
+              <div style={{display:"flex",gap:8,marginTop:4}}>
+                <Btn color="#a78bfa" onClick={addTask} style={{flex:1}}>הקצה משימה</Btn>
+                <Btn onClick={()=>setShowTaskForm(false)}>ביטול</Btn>
+              </div>
+            </div>
+          </div>
         </div>
       )}
 
@@ -1927,15 +1979,6 @@ function WorkersDashboard({users,workLogs,orders,stages,customTasks,onAddTask,on
     return{...u,totalMin,units,cost,revenue:revenue+taskRev,profit:(revenue+taskRev)-cost,uph:totalMin>0?(units/(totalMin/60)):0,active,totalBreaks,totalBreakMin,completedTasks:completedTasks.length,taskMin};
   });
 
-  const addTask=()=>{
-    if(!taskName.trim()||!taskWorker)return toast("יש לבחור עובד ושם משימה","warning");
-    const u=users.find(u2=>u2.id===taskWorker);
-    // Use the onAddTask from App (passed via customTasks handler)
-    const task={id:uid(),userId:taskWorker,userName:u?.name||"",name:taskName.trim(),description:taskDesc.trim(),price:Number(taskPrice)||0,createdAt:nowISO(),active:false,completed:false,startTime:null,endTime:null,durationMin:0,paused:false,pauseStart:null,totalPauseMin:0,pauseLog:[]};
-    onAddTask(task);
-    setTaskName("");setTaskDesc("");setTaskWorker("");setTaskPrice("");setShowTaskForm(false);
-  };
-
   return(
     <div className="fade-in">
       <h2 style={{margin:"0 0 14px"}}>👥 ביצועי עובדים</h2>
@@ -1951,7 +1994,7 @@ function WorkersDashboard({users,workLogs,orders,stages,customTasks,onAddTask,on
       </Card>
 
       {/* Tasks Board */}
-      <AdminTasksBoard workers={workers} customTasks={customTasks||[]} onAddTask={onAddTask} onUpdateTask={onUpdateTask} onDeleteTask={onDeleteTask} filterByPeriod={filterByPeriod}/>
+      <AdminTasksBoard workers={workers} customTasks={customTasks||[]} onAddTask={onAddTask} onDeleteTask={onDeleteTask} onMarkPartialTask={onMarkPartialTask} onMarkDoneTask={onMarkDoneTask}/>
 
       {/* Worker cards with detailed stats */}
       <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(300px,1fr))",gap:10,marginBottom:14}}>
