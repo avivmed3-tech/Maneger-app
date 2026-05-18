@@ -1403,9 +1403,23 @@ function Shortages({orders,updO,projects}){
 // ══════════════════════════════════════════════════════════════════════════
 // ═══ ADMIN TASKS BOARD ══════════════════════════════════════════════════
 // ══════════════════════════════════════════════════════════════════════════
-function AdminTasksBoard({customTasks,onDeleteTask,onMarkPartialTask,onMarkDoneTask}){
+function AdminTasksBoard({customTasks,onDeleteTask,onMarkPartialTask,onMarkDoneTask,workers,onAddTask}){
+  const {toast}=useToast();
   const [taskView,setTaskView]=useState("board");
   const [detailTask,setDetailTask]=useState(null);
+  const [showTaskForm,setShowTaskForm]=useState(false);
+  const [taskName,setTaskName]=useState("");
+  const [taskDesc,setTaskDesc]=useState("");
+  const [taskWorker,setTaskWorker]=useState("");
+  const [taskPrice,setTaskPrice]=useState("");
+  const canAssign=!!(onAddTask&&Array.isArray(workers)&&workers.length>0);
+  const submitTask=()=>{
+    if(!taskName.trim()||!taskWorker){toast&&toast("יש לבחור עובד ושם משימה","warning");return}
+    const u=(workers||[]).find(w=>w.id===taskWorker);
+    onAddTask({id:uid(),userId:taskWorker,userName:u?.name||"",name:taskName.trim(),description:taskDesc.trim(),price:Number(taskPrice)||0,createdAt:nowISO(),active:false,completed:false,startTime:null,endTime:null,durationMin:0,paused:false,pauseStart:null,totalPauseMin:0,pauseLog:[]});
+    setTaskName("");setTaskDesc("");setTaskWorker("");setTaskPrice("");setShowTaskForm(false);
+    toast&&toast("המשימה הוקצתה בהצלחה","success");
+  };
   const openTasks=(customTasks||[]).filter(t=>!t.completed&&!t.partial);
   const partialTasks=(customTasks||[]).filter(t=>!t.completed&&t.partial);
   const doneTasks=(customTasks||[]).filter(t=>t.completed);
@@ -1451,8 +1465,40 @@ function AdminTasksBoard({customTasks,onDeleteTask,onMarkPartialTask,onMarkDoneT
           <span style={{fontSize:12,background:"#3b82f622",color:"#60a5fa",padding:"3px 10px",borderRadius:12}}>{partialTasks.length} חלקיות</span>
           <span style={{fontSize:12,background:"#10b98122",color:"#10b981",padding:"3px 10px",borderRadius:12}}>{doneTasks.length} הושלמו</span>
           <SegBtn options={[["board","כרטיסים"],["summary","סיכום"]]} value={taskView} onChange={setTaskView}/>
+          {canAssign&&<Btn color="#a78bfa" small onClick={()=>setShowTaskForm(p=>!p)}>{showTaskForm?"✕ סגור":"➕ הקצה משימה"}</Btn>}
         </div>
       </div>
+
+      {canAssign&&showTaskForm&&(
+        <div style={{background:"var(--c-deep)",borderRadius:10,padding:14,marginBottom:12,border:"1px solid #a78bfa44"}}>
+          <div style={{fontWeight:700,fontSize:13,color:"#a78bfa",marginBottom:10}}>➕ הקצאת משימה חדשה</div>
+          <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(180px,1fr))",gap:10}}>
+            <div style={{display:"flex",flexDirection:"column",gap:3}}>
+              <label style={{fontSize:11,color:"var(--c-dim)"}}>עובד *</label>
+              <select value={taskWorker} onChange={e=>setTaskWorker(e.target.value)}>
+                <option value="">— בחר עובד —</option>
+                {workers.map(w=><option key={w.id} value={w.id}>{w.name}</option>)}
+              </select>
+            </div>
+            <div style={{display:"flex",flexDirection:"column",gap:3}}>
+              <label style={{fontSize:11,color:"var(--c-dim)"}}>שם המשימה *</label>
+              <input value={taskName} onChange={e=>setTaskName(e.target.value)} placeholder="לדוגמה: סידור מחסן"/>
+            </div>
+            <div style={{display:"flex",flexDirection:"column",gap:3}}>
+              <label style={{fontSize:11,color:"var(--c-dim)"}}>תמחור (₪)</label>
+              <input type="number" min="0" value={taskPrice} onChange={e=>setTaskPrice(e.target.value)} placeholder="0"/>
+            </div>
+            <div style={{display:"flex",flexDirection:"column",gap:3,gridColumn:"1 / -1"}}>
+              <label style={{fontSize:11,color:"var(--c-dim)"}}>תיאור (לא חובה)</label>
+              <input value={taskDesc} onChange={e=>setTaskDesc(e.target.value)} placeholder="פרטים נוספים..."/>
+            </div>
+          </div>
+          <div style={{display:"flex",gap:8,marginTop:10,justifyContent:"flex-end"}}>
+            <Btn small onClick={()=>{setTaskName("");setTaskDesc("");setTaskWorker("");setTaskPrice("");setShowTaskForm(false)}}>ביטול</Btn>
+            <Btn color="#a78bfa" small onClick={submitTask}>✅ הקצה</Btn>
+          </div>
+        </div>
+      )}
 
       {taskView==="summary"&&(
         <div>
@@ -1563,7 +1609,7 @@ function AdminTasksBoard({customTasks,onDeleteTask,onMarkPartialTask,onMarkDoneT
 // ══════════════════════════════════════════════════════════════════════════
 // ═══ MY WORK (Worker View) — Enhanced with Break, Bulk, Custom Tasks ════
 // ══════════════════════════════════════════════════════════════════════════
-function MyWork({orders,stages,workLogs,onStartWork,onEndWork,onPauseWork,onResumeWork,customTasks,onAddTask,onStartTask,onEndTask,onPauseTask,onResumeTask,onDeleteTask,onMarkPartialTask,onMarkDoneTask}){
+function MyWork({orders,stages,workLogs,onStartWork,onEndWork,onPauseWork,onResumeWork,customTasks,onAddTask,onStartTask,onEndTask,onPauseTask,onResumeTask,onDeleteTask,onMarkPartialTask,onMarkDoneTask,users}){
   const {toast}=useToast();
   const {currentUser}=useAuth();
   const myAccess=currentUser.stageAccess==="all"?stages.map(s=>s.id):(Array.isArray(currentUser.stageAccess)?currentUser.stageAccess:[]);
@@ -1686,7 +1732,7 @@ function MyWork({orders,stages,workLogs,onStartWork,onEndWork,onPauseWork,onResu
           })()}
 
           {/* Admin tasks section — full task board */}
-          <AdminTasksBoard customTasks={customTasks} onDeleteTask={onDeleteTask} onMarkPartialTask={onMarkPartialTask} onMarkDoneTask={onMarkDoneTask}/>
+          <AdminTasksBoard customTasks={customTasks} onDeleteTask={onDeleteTask} onMarkPartialTask={onMarkPartialTask} onMarkDoneTask={onMarkDoneTask} workers={(users||[]).filter(u=>u.role!=="admin"&&u.active!==false)} onAddTask={onAddTask}/>
         </div>
       ):(
       <div>
@@ -1926,15 +1972,6 @@ function WorkersDashboard({users,workLogs,orders,stages,customTasks,onAddTask,on
     const taskRev=completedTasks.reduce((s,t)=>s+Number(t.price||0),0);
     return{...u,totalMin,units,cost,revenue:revenue+taskRev,profit:(revenue+taskRev)-cost,uph:totalMin>0?(units/(totalMin/60)):0,active,totalBreaks,totalBreakMin,completedTasks:completedTasks.length,taskMin};
   });
-
-  const addTask=()=>{
-    if(!taskName.trim()||!taskWorker)return toast("יש לבחור עובד ושם משימה","warning");
-    const u=users.find(u2=>u2.id===taskWorker);
-    // Use the onAddTask from App (passed via customTasks handler)
-    const task={id:uid(),userId:taskWorker,userName:u?.name||"",name:taskName.trim(),description:taskDesc.trim(),price:Number(taskPrice)||0,createdAt:nowISO(),active:false,completed:false,startTime:null,endTime:null,durationMin:0,paused:false,pauseStart:null,totalPauseMin:0,pauseLog:[]};
-    onAddTask(task);
-    setTaskName("");setTaskDesc("");setTaskWorker("");setTaskPrice("");setShowTaskForm(false);
-  };
 
   return(
     <div className="fade-in">
@@ -3744,7 +3781,7 @@ function App(){
         {tab==="dashboard"&&<Dashboard orders={filteredOrders} projects={filteredProjects} stages={stages} users={getUsers()} workLogs={filteredWorkLogs}/>}
         {tab==="orders"&&<Orders orders={filteredOrders} projects={filteredProjects} stages={stages} stageBlocks={stageBlocks} updO={updO} workLogs={filteredWorkLogs} onWorkLog={handleStartWork}/>}
         {tab==="shortages"&&<Shortages orders={filteredOrders} updO={updO} projects={filteredProjects}/>}
-        {tab==="mywork"&&<MyWork orders={filteredOrders} stages={stages} workLogs={filteredWorkLogs} onStartWork={handleStartWork} onEndWork={handleEndWork} onPauseWork={handlePauseWork} onResumeWork={handleResumeWork} customTasks={customTasks} onAddTask={handleAddTask} onStartTask={handleStartTask} onEndTask={handleEndTask} onPauseTask={handlePauseTask} onResumeTask={handleResumeTask} onDeleteTask={handleDeleteTask} onMarkPartialTask={handleMarkPartialTask} onMarkDoneTask={handleMarkDoneTask}/>}
+        {tab==="mywork"&&<MyWork orders={filteredOrders} stages={stages} workLogs={filteredWorkLogs} onStartWork={handleStartWork} onEndWork={handleEndWork} onPauseWork={handlePauseWork} onResumeWork={handleResumeWork} customTasks={customTasks} onAddTask={handleAddTask} onStartTask={handleStartTask} onEndTask={handleEndTask} onPauseTask={handlePauseTask} onResumeTask={handleResumeTask} onDeleteTask={handleDeleteTask} onMarkPartialTask={handleMarkPartialTask} onMarkDoneTask={handleMarkDoneTask} users={getUsers()}/>}
         {tab==="workers"&&isAdmin&&<WorkersDashboard users={getUsers()} workLogs={filteredWorkLogs} orders={filteredOrders} stages={stages} customTasks={customTasks} onAddTask={handleAddTask} onDeleteLog={handleDeleteLog} onDeleteTask={handleDeleteTask} onMarkPartialTask={handleMarkPartialTask} onMarkDoneTask={handleMarkDoneTask}/>}
         {tab==="yield"&&<YieldDashboard orders={filteredOrders} projects={filteredProjects} stages={stages} workLogs={filteredWorkLogs}/>}
         {tab==="stages"&&isAdmin&&<StagesManagement stages={stages} setStages={setStages} stageBlocks={stageBlocks} setStageBlocks={setStageBlocks} persist={persist}/>}
