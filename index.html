@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8"/>
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"/>
-<meta http-equiv="Content-Security-Policy" content="default-src 'self' 'unsafe-inline' 'unsafe-eval'; connect-src 'self' https://*.supabase.co wss://*.supabase.co https://cdnjs.cloudflare.com https://cdn.jsdelivr.net; script-src 'self' 'unsafe-inline' 'unsafe-eval' https://cdnjs.cloudflare.com https://cdn.jsdelivr.net; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:;"/>
+<meta http-equiv="Content-Security-Policy" content="default-src 'self' 'unsafe-inline' 'unsafe-eval'; connect-src 'self' https://*.supabase.co wss://*.supabase.co https://cdnjs.cloudflare.com https://cdn.jsdelivr.net; script-src 'self' 'unsafe-inline' 'unsafe-eval' https://cdnjs.cloudflare.com https://cdn.jsdelivr.net; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; img-src 'self' data: blob:; font-src 'self' data: https://fonts.gstatic.com;"/>
 <meta name="theme-color" content="#0a0e1a" id="tcm"/>
 <meta name="apple-mobile-web-app-capable" content="yes"/>
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent"/>
@@ -12,6 +12,9 @@
 <link rel="manifest" href="manifest.json"/>
 <link rel="apple-touch-icon" href="icon-192.png"/>
 <link rel="icon" type="image/png" sizes="192x192" href="icon-192.png"/>
+<link rel="preconnect" href="https://fonts.googleapis.com"/>
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin/>
+<link href="https://fonts.googleapis.com/css2?family=Heebo:wght@400;500;600;700;800;900&display=swap" rel="stylesheet"/>
 <meta name="description" content="מערכת SaaS לניהול רצפת ייצור — מעקב הזמנות, שלבי עבודה, מספרים סידוריים, ביצועי עובדים ודוחות בזמן אמת"/>
 <meta name="keywords" content="ניהול ייצור, מפעל, קו ייצור, מעקב הזמנות, SaaS, production management"/>
 <meta name="author" content="Production Line Manager"/>
@@ -37,17 +40,22 @@
   --c-table-border:#151d32;--c-tag-blue-bg:#152240;--c-tag-blue:#7eb8ff;
   --c-accent:#3b82f6;--c-accent2:#06b6d4;--c-green:#10b981;--c-amber:#f59e0b;--c-red:#ef4444;
   --c-chart-label:#8b95a8;--c-chart-grid:#283650;--c-chart-tooltip:#0d1120;
+  --shadow-sm:0 1px 2px rgba(0,0,0,.35),0 4px 16px rgba(0,0,0,.18);
+  --shadow-md:0 4px 12px rgba(0,0,0,.4),0 12px 32px rgba(0,0,0,.25);
   --safe-top:env(safe-area-inset-top,0px);
   --safe-bottom:env(safe-area-inset-bottom,0px);
 }
 body.light-mode{
-  --c-bg:#f0f2f5;--c-card:#ffffff;--c-deep:#f7f8fa;
-  --c-border:#dde1e8;--c-border2:#c8cdd6;--c-text:#1a1f2e;--c-muted:#5a6478;--c-dim:#8b95a8;
+  --c-bg:#f3f4f7;--c-card:#ffffff;--c-deep:#f7f8fa;
+  --c-border:#e3e6ec;--c-border2:#c8cdd6;--c-text:#1a1f2e;--c-muted:#5a6478;--c-dim:#8b95a8;
   --c-input-bg:#ffffff;--c-input-border:#c8cdd6;--c-row-hover:#f7f8fa;
   --c-table-border:#ebeef2;--c-tag-blue-bg:#dbeafe;--c-tag-blue:#2563eb;
   --c-chart-label:#374151;--c-chart-grid:#d1d5db;--c-chart-tooltip:#1e293b;
+  --shadow-sm:0 1px 2px rgba(16,24,40,.04),0 4px 16px rgba(16,24,40,.06);
+  --shadow-md:0 4px 12px rgba(16,24,40,.08),0 12px 32px rgba(16,24,40,.08);
 }
-body{background:var(--c-bg);font-family:'Segoe UI',Tahoma,Arial,sans-serif;color:var(--c-text);direction:rtl;transition:background .25s,color .25s;min-height:100vh;min-height:100dvh;overflow-x:hidden}
+body{background:var(--c-bg);font-family:'Heebo','Segoe UI',Tahoma,Arial,sans-serif;color:var(--c-text);direction:rtl;transition:background .25s,color .25s;min-height:100vh;min-height:100dvh;overflow-x:hidden;-webkit-font-smoothing:antialiased}
+h1,h2,h3,h4{letter-spacing:-.02em;font-weight:700}
 input,select,textarea{background:var(--c-input-bg);border:1px solid var(--c-input-border);border-radius:8px;padding:9px 12px;color:var(--c-text);font-size:14px;font-family:inherit;width:100%;outline:none;transition:background .25s,color .25s,border-color .2s;-webkit-appearance:none;appearance:none}
 input[type=checkbox]{width:auto!important;-webkit-appearance:checkbox!important;appearance:checkbox!important;accent-color:var(--c-accent);min-width:16px;min-height:16px}
 input[type=color]{-webkit-appearance:auto!important;appearance:auto!important;padding:2px}
@@ -98,7 +106,7 @@ button{font-family:inherit;cursor:pointer}
 const {useState,useEffect,useCallback,useRef,useMemo}=React;
 
 // ── Config ─────────────────────────────────────────────────────────────────
-const APP_VERSION="3.3.0";const APP_DATE="2026-03-29";
+const APP_VERSION="4.0.0";const APP_DATE="2026-06-12";
 const SB_URL="https://lwiurzkiojctwzllpnmr.supabase.co";
 const SB_KEY="eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imx3aXVyemtpb2pjdHd6bGxwbm1yIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzQ2MjU4NTAsImV4cCI6MjA5MDIwMTg1MH0.jWOnAtsjbefoY18ofSd46WMdgY47Vv4k7LgcHdOrj6Q";
 const SB_H={"Content-Type":"application/json","apikey":SB_KEY,"Authorization":"Bearer "+SB_KEY};
@@ -120,6 +128,18 @@ function validatePassword(pw){
   if(p.requireSpecial&&!/[!@#$%^&*()_+\-=\[\]{};':"|,.<>?]/.test(pw))errors.push("תו מיוחד (!@#$...)");
   return errors;
 }
+
+// ── Roles & hierarchy ───────────────────────────────────────────────────────
+const ROLES={
+  admin:{label:"מנהל מערכת",icon:"🛡️",color:"#f59e0b"},
+  dept_manager:{label:"מנהל מחלקה",icon:"💼",color:"#06b6d4"},
+  team_lead:{label:"ראש צוות",icon:"⭐",color:"#a78bfa"},
+  editor:{label:"עורך",icon:"✏️",color:"#3b82f6"},
+  worker:{label:"עובד",icon:"👷",color:"#10b981"},
+  viewer:{label:"צופה",icon:"👁️",color:"#8b95a8"}
+};
+const roleLabel=r=>ROLES[r]?`${ROLES[r].icon} ${ROLES[r].label}`:r;
+const isLeadRole=r=>r==="team_lead"||r==="dept_manager";
 
 // ── SHA-256 password hashing ────────────────────────────────────────────────
 async function sha256(str){
@@ -159,10 +179,12 @@ const SB={
 const dbToUser=r=>({id:r.id,username:r.username,password_hash:r.password_hash,role:r.role,name:r.name,
   projectAccess:r.project_access,stageAccess:r.stage_access,
   canEdit:r.can_edit,canView:r.can_view,active:r.active,hourlyRate:r.hourly_rate,
+  departmentId:r.department_id||"",managerId:r.manager_id||"",
   companyId:r.company_id||DEFAULT_COMPANY_ID,loginAttempts:r.login_attempts||0,lockedUntil:r.locked_until,lastLogin:r.last_login});
 const userToDb=u=>({id:u.id,username:u.username,password_hash:u.password_hash||u.passwordHash||"",
   role:u.role,name:u.name,project_access:u.projectAccess,stage_access:u.stageAccess,
   can_edit:u.canEdit,can_view:u.canView,active:u.active!==false,hourly_rate:Number(u.hourlyRate||0),
+  department_id:u.departmentId||null,manager_id:u.managerId||null,
   company_id:u.companyId||DEFAULT_COMPANY_ID});
 const dbToOrder=r=>({id:r.id,woNumber:r.wo_number,pn:r.pn,description:r.description,qty:r.qty,
   unitPrice:r.unit_price,projectId:r.project_id,receivedDate:r.received_date,targetDate:r.target_date,
@@ -203,23 +225,27 @@ const dbToBlock=r=>({id:r.id,name:r.name,stages:r.stages});
 const blockToDb=b=>({id:b.id,name:b.name,stages:b.stages||[],company_id:b.companyId||DEFAULT_COMPANY_ID});
 const dbToProject=r=>({id:r.id,name:r.name});
 const projectToDb=p=>({id:p.id,name:p.name,company_id:p.companyId||DEFAULT_COMPANY_ID});
+const dbToDept=r=>({id:r.id,name:r.name,color:r.color||"#3b82f6",managerId:r.manager_id||""});
+const deptToDb=d=>({id:d.id,name:d.name,color:d.color||"#3b82f6",manager_id:d.managerId||null,company_id:d.companyId||DEFAULT_COMPANY_ID});
 
 // ── DB load all ────────────────────────────────────────────────────────────
 async function dbLoadAll(){
   const cid=_companyId||DEFAULT_COMPANY_ID;
   const cf=`company_id=eq.${cid}&`;
-  const [orders,projects,stages,blocks,logs,tasks]=await Promise.all([
+  const [orders,projects,stages,blocks,logs,tasks,depts]=await Promise.all([
     SB.get("orders",cf+"order=created_at.asc"),
     SB.get("projects",cf+"order=name.asc"),
     SB.get("stages",cf+"order=stage_order.asc"),
     SB.get("stage_blocks",cf+"order=created_at.asc"),
     SB.get("work_logs",cf+"order=created_at.asc"),
     SB.get("custom_tasks",cf+"order=created_at.asc"),
+    SB.get("departments",cf+"order=name.asc").catch(()=>[]),
   ]);
   return{
     orders:orders.map(dbToOrder),projects:projects.map(dbToProject),
     stages:stages.map(dbToStage),stageBlocks:blocks.map(dbToBlock),
-    workLogs:logs.map(dbToLog),customTasks:tasks.map(dbToTask)
+    workLogs:logs.map(dbToLog),customTasks:tasks.map(dbToTask),
+    departments:depts.map(dbToDept)
   };
 }
 async function dbLoadUsers(){
@@ -290,6 +316,15 @@ const AuthCtx=React.createContext(null);
 const useAuth=()=>React.useContext(AuthCtx);
 
 // ── Shared UI ──────────────────────────────────────────────────────────────
+const Logo=({size=32})=>(
+  <svg width={size} height={size} viewBox="0 0 40 40" style={{flexShrink:0,display:"block"}}>
+    <defs><linearGradient id="pmlLogoG" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stopColor="#3b82f6"/><stop offset="1" stopColor="#06b6d4"/></linearGradient></defs>
+    <rect x="2" y="2" width="36" height="36" rx="11" fill="url(#pmlLogoG)"/>
+    <path d="M10 28V17.5l6.2 4.1v-4.1l6.2 4.1v-4.1l7.6 5V28z" fill="#fff" opacity=".96"/>
+    <rect x="11.5" y="11.5" width="3.6" height="4.5" rx="1" fill="#fff" opacity=".75"/>
+    <rect x="17" y="13.5" width="3.6" height="2.5" rx="1" fill="#fff" opacity=".5"/>
+  </svg>
+);
 const Btn=({children,color="#374151",onClick,style={},disabled,small})=>(
   <button onClick={onClick} disabled={disabled} style={{background:disabled?"#374151":color,color:"#fff",border:"none",borderRadius:8,padding:small?"6px 12px":"9px 16px",fontWeight:600,fontSize:small?12:14,opacity:disabled?.5:1,transition:"opacity .15s, filter .15s",whiteSpace:"nowrap",...style}}
     onMouseEnter={e=>{if(!disabled)e.currentTarget.style.filter="brightness(1.15)"}}
@@ -309,7 +344,7 @@ const Field=({label,value,onChange,type="text",style={},placeholder,disabled})=>
   </div>
 );
 const Card=({children,style={}})=>(
-  <div style={{background:"var(--c-card)",borderRadius:12,padding:20,border:"1px solid var(--c-border)",...style}}>{children}</div>
+  <div style={{background:"var(--c-card)",borderRadius:14,padding:20,border:"1px solid var(--c-border)",boxShadow:"var(--shadow-sm)",...style}}>{children}</div>
 );
 const Badge=({status,large})=>{const c=SC[status]||"#8b95a8";return(
   <span style={{background:c+"22",color:c,padding:large?"5px 14px":"3px 10px",borderRadius:20,fontSize:large?14:12,fontWeight:700,border:`1px solid ${c}55`,whiteSpace:"nowrap"}}>{SL[status]||status}</span>
@@ -325,13 +360,39 @@ const PBar=({pct,h=6,color})=>{const bg=color||(pct>=100?"#10b981":pct>50?"#3b82
   </div>
 )};
 const KpiBox=({i,v,label,c,sub})=>(
-  <div style={{background:"var(--c-card)",borderRadius:12,padding:"14px 12px",border:`1px solid ${c}33`}}>
-    <div style={{fontSize:20,marginBottom:4}}>{i}</div>
-    <div style={{fontSize:20,fontWeight:700,color:c,wordBreak:"break-word"}}>{v}</div>
-    <div style={{fontSize:11,color:"var(--c-muted)",marginTop:2}}>{label}</div>
-    {sub&&<div style={{fontSize:10,color:"var(--c-dim)",marginTop:2}}>{sub}</div>}
+  <div style={{background:"var(--c-card)",borderRadius:14,padding:"13px 14px",border:"1px solid var(--c-border)",boxShadow:"var(--shadow-sm)",position:"relative",overflow:"hidden"}}>
+    <div style={{position:"absolute",top:0,right:0,left:0,height:3,background:`linear-gradient(270deg,${c},transparent)`,opacity:.85}}/>
+    <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:8}}>
+      <div style={{width:30,height:30,borderRadius:9,background:c+"1c",display:"flex",alignItems:"center",justifyContent:"center",fontSize:15,flexShrink:0}}>{i}</div>
+      <div style={{fontSize:11,color:"var(--c-muted)",fontWeight:600,lineHeight:1.25}}>{label}</div>
+    </div>
+    <div style={{fontSize:21,fontWeight:800,color:c,wordBreak:"break-word",letterSpacing:"-.02em",lineHeight:1.1}}>{v}</div>
+    {sub&&<div style={{fontSize:10,color:"var(--c-dim)",marginTop:4}}>{sub}</div>}
   </div>
 );
+// ── Horizontal Bar Chart (clean, label+bar rows) ─────────────────────────
+function HBarChart({data,formatVal=v=>v}){
+  if(!data||!data.length)return<div style={{padding:"24px 0",textAlign:"center",color:"var(--c-dim)",fontSize:13}}>אין נתונים להצגה</div>;
+  const maxV=Math.max(...data.map(d=>d.value),1);
+  return(
+    <div style={{display:"flex",flexDirection:"column",gap:11}}>
+      {data.map((d,i)=>(
+        <div key={i}>
+          <div style={{display:"flex",justifyContent:"space-between",alignItems:"baseline",fontSize:12,marginBottom:4,gap:8}}>
+            <span style={{fontWeight:600,color:"var(--c-text)",display:"flex",alignItems:"center",gap:7,minWidth:0}}>
+              <span style={{width:8,height:8,borderRadius:2,background:d.color||"var(--c-accent)",flexShrink:0}}/>
+              <span style={{overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{d.label}</span>
+            </span>
+            <span style={{fontWeight:700,color:d.color||"var(--c-accent)",whiteSpace:"nowrap"}}>{formatVal(d.value)}{d.sub&&<span style={{fontWeight:400,color:"var(--c-dim)",fontSize:10.5,marginRight:6}}>{d.sub}</span>}</span>
+          </div>
+          <div style={{height:8,background:"var(--c-border)",borderRadius:4,overflow:"hidden"}}>
+            <div style={{width:`${Math.max(2,d.value/maxV*100)}%`,height:"100%",borderRadius:4,background:`linear-gradient(270deg,${d.color||"#3b82f6"},${(d.color||"#3b82f6")}88)`,transition:"width .5s ease"}}/>
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+}
 const Tile=({icon,label,value,sub,color="#60a5fa",warn})=>(
   <div style={{background:"var(--c-deep)",borderRadius:10,padding:"11px 12px",border:`1px solid ${warn?"#ef444444":color+"33"}`}}>
     <div style={{fontSize:16,marginBottom:2}}>{icon}</div>
@@ -634,7 +695,12 @@ function LoginScreen({onLogin,lightMode,toggleLight}){
         <button onClick={toggleLight} style={{background:lm?"#e2e8f0":"#131829",border:`1px solid ${lm?"#e2e8f0":"#1e2a42"}`,borderRadius:8,padding:"7px 14px",fontSize:15,color:lm?"#1a1f2e":"#8b95a8"}}>{lm?"🌙":"☀️"}</button>
       </div>
       <div style={{background:lm?"#ffffff":"#131829",borderRadius:20,padding:"clamp(24px,6vw,44px) clamp(20px,6vw,40px)",maxWidth:420,width:"100%",border:`1px solid ${lm?"#dde1e8":"#1e2a42"}`,boxShadow:lm?"0 8px 40px #0001":"0 20px 60px #000a"}}>
-        <div style={{textAlign:"center",marginBottom:32}}><div style={{fontSize:52,marginBottom:10}}>⚙️</div><div style={{fontSize:24,fontWeight:800,color:lm?"#1a1f2e":"#e2e8f0",letterSpacing:-.5}}>ניהול קו ייצור</div><div style={{fontSize:13,color:lm?"#5a6478":"#8b95a8",marginTop:6}}>{mode==="login"?"כניסה למערכת":"הרשמת חברה חדשה"}</div></div>
+        <div style={{textAlign:"center",marginBottom:32}}>
+          <div style={{display:"flex",justifyContent:"center",marginBottom:14}}><Logo size={60}/></div>
+          <div style={{fontSize:25,fontWeight:800,color:lm?"#1a1f2e":"#e2e8f0",letterSpacing:"-.03em"}}>ניהול קו ייצור</div>
+          <div style={{fontSize:11,fontWeight:600,color:lm?"#94a3b8":"#5a6478",letterSpacing:".18em",marginTop:2}}>PRODUCTION CONTROL</div>
+          <div style={{fontSize:13,color:lm?"#5a6478":"#8b95a8",marginTop:10}}>{mode==="login"?"כניסה למערכת":"הרשמת חברה חדשה"}</div>
+        </div>
 
         {mode==="login"?(
           <div style={{display:"flex",flexDirection:"column",gap:16}}>
@@ -682,13 +748,117 @@ function LoginScreen({onLogin,lightMode,toggleLight}){
 }
 
 // ══════════════════════════════════════════════════════════════════════════
+// ═══ ORG STRUCTURE (מחלקות וצוותים) ══════════════════════════════════════
+// ══════════════════════════════════════════════════════════════════════════
+function OrgStructure({users,departments,workLogs,customTasks}){
+  const activeLogs=workLogs.filter(w=>!w.completed);
+  const activeTasks=(customTasks||[]).filter(t=>t.active&&!t.completed);
+  const statusOf=u=>{
+    const logs=activeLogs.filter(w=>w.userId===u.id);
+    const tasks=activeTasks.filter(t=>t.userId===u.id);
+    if(logs.some(l=>!l.paused)||tasks.some(t=>!t.paused))return{label:"עובד כעת",color:"#10b981",pulse:true};
+    if(logs.length||tasks.length)return{label:"בהפסקה",color:"#f59e0b"};
+    return{label:"לא פעיל",color:"#5a6478"};
+  };
+  const staff=users.filter(u=>u.active!==false&&u.role!=="admin"&&u.role!=="viewer");
+  if(staff.length===0)return null;
+  const PersonChip=({u,lead})=>{
+    const st=statusOf(u);const rc=ROLES[u.role]?.color||"#3b82f6";
+    return(
+      <div style={{display:"flex",alignItems:"center",gap:9,background:lead?rc+"10":"var(--c-deep)",border:`1px solid ${lead?rc+"55":"var(--c-border)"}`,borderRadius:10,padding:"8px 11px"}}>
+        <div style={{width:28,height:28,borderRadius:"50%",background:rc+"22",color:rc,display:"flex",alignItems:"center",justifyContent:"center",fontSize:12,fontWeight:800,flexShrink:0}}>{u.name?.charAt(0)||"?"}</div>
+        <div style={{flex:1,minWidth:0}}>
+          <div style={{fontSize:12.5,fontWeight:lead?700:600,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>{u.name}</div>
+          <div style={{fontSize:10,color:rc,fontWeight:600}}>{ROLES[u.role]?.label||u.role}</div>
+        </div>
+        <span style={{fontSize:10,color:st.color,fontWeight:700,display:"flex",alignItems:"center",gap:4,flexShrink:0}}>
+          <span style={{width:6,height:6,borderRadius:"50%",background:st.color,display:"inline-block",animation:st.pulse?"pulse 1.6s infinite":"none"}}/>{st.label}
+        </span>
+      </div>
+    );
+  };
+  // Render one pool of members: leads with their direct reports, then unattached members
+  const TeamBlock=({members})=>{
+    const leads=members.filter(m=>isLeadRole(m.role));
+    const leadIds=new Set(leads.map(l=>l.id));
+    const unattached=members.filter(m=>!isLeadRole(m.role)&&!leadIds.has(m.managerId));
+    return(
+      <div style={{display:"flex",flexDirection:"column",gap:10}}>
+        {leads.map(lead=>{
+          const reports=staff.filter(w=>w.managerId===lead.id);
+          return(
+            <div key={lead.id}>
+              <PersonChip u={lead} lead/>
+              {reports.length>0&&(
+                <div style={{marginRight:18,marginTop:6,paddingRight:14,borderRight:`2px solid ${(ROLES[lead.role]?.color||"#3b82f6")}44`,display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(190px,1fr))",gap:6}}>
+                  {reports.map(w=><PersonChip key={w.id} u={w}/>)}
+                </div>
+              )}
+              {reports.length===0&&<div style={{marginRight:18,marginTop:4,fontSize:11,color:"var(--c-dim)"}}>אין עובדים משויכים</div>}
+            </div>
+          );
+        })}
+        {unattached.length>0&&(
+          <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(190px,1fr))",gap:6}}>
+            {unattached.map(w=><PersonChip key={w.id} u={w}/>)}
+          </div>
+        )}
+      </div>
+    );
+  };
+  const assignedDeptIds=new Set(departments.map(d=>d.id));
+  const noDept=staff.filter(u=>!u.departmentId||!assignedDeptIds.has(u.departmentId));
+  return(
+    <Card style={{marginBottom:14}}>
+      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:4,flexWrap:"wrap",gap:8}}>
+        <div style={{fontWeight:700,fontSize:15}}>🏢 מבנה ארגוני — מחלקות וצוותים</div>
+        <div style={{fontSize:11.5,color:"var(--c-dim)"}}>{staff.length} אנשי צוות · {departments.length} מחלקות</div>
+      </div>
+      <div style={{fontSize:11.5,color:"var(--c-dim)",marginBottom:14}}>כל עובד מוצג תחת ראש הצוות / מנהל המחלקה שלו, כולל סטטוס בזמן אמת</div>
+      <div style={{display:"flex",flexDirection:"column",gap:12}}>
+        {departments.map(d=>{
+          const members=staff.filter(u=>u.departmentId===d.id);
+          const mgr=users.find(u=>u.id===d.managerId);
+          return(
+            <div key={d.id} style={{background:"var(--c-card)",border:"1px solid var(--c-border)",borderRadius:12,overflow:"hidden"}}>
+              <div style={{padding:"10px 14px",background:d.color+"12",borderBottom:`1px solid ${d.color}33`,display:"flex",justifyContent:"space-between",alignItems:"center",flexWrap:"wrap",gap:6}}>
+                <div style={{display:"flex",alignItems:"center",gap:8}}>
+                  <span style={{width:10,height:10,borderRadius:3,background:d.color,display:"inline-block"}}/>
+                  <span style={{fontWeight:700,fontSize:14}}>{d.name}</span>
+                  {mgr&&<span style={{fontSize:11,color:"var(--c-muted)"}}>· מנהל/ת: <b style={{color:d.color}}>{mgr.name}</b></span>}
+                </div>
+                <span style={{fontSize:11,background:d.color+"22",color:d.color,padding:"2px 10px",borderRadius:12,fontWeight:700}}>{members.length} חברי צוות</span>
+              </div>
+              <div style={{padding:12}}>
+                {members.length===0?<div style={{fontSize:12,color:"var(--c-dim)",textAlign:"center",padding:8}}>אין עובדים במחלקה זו עדיין</div>:<TeamBlock members={members}/>}
+              </div>
+            </div>
+          );
+        })}
+        {noDept.length>0&&(
+          <div style={{background:"var(--c-card)",border:"1px dashed var(--c-border2)",borderRadius:12,overflow:"hidden"}}>
+            <div style={{padding:"10px 14px",borderBottom:"1px solid var(--c-border)",display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+              <span style={{fontWeight:700,fontSize:13,color:"var(--c-muted)"}}>ללא מחלקה</span>
+              <span style={{fontSize:11,color:"var(--c-dim)"}}>{noDept.length} עובדים — ניתן לשייך דרך ניהול מערכת</span>
+            </div>
+            <div style={{padding:12}}><TeamBlock members={noDept}/></div>
+          </div>
+        )}
+        {departments.length===0&&noDept.length===0&&<EmptyState icon="🏢" title="אין מחלקות מוגדרות" subtitle="צור מחלקות והקצה ראשי צוות במסך ניהול המערכת"/>}
+      </div>
+    </Card>
+  );
+}
+
+// ══════════════════════════════════════════════════════════════════════════
 // ═══ DASHBOARD ═══════════════════════════════════════════════════════════
 // ══════════════════════════════════════════════════════════════════════════
-function Dashboard({orders,projects,stages,users,workLogs}){
+function Dashboard({orders,projects,stages,users,workLogs,departments,customTasks}){
   const [period,setPeriod]=useState("month");
   const [selYear,setSelYear]=useState("all");
   const [selProj,setSelProj]=useState("all");
   const [donutSlice,setDonutSlice]=useState("status");
+  const [barMetric,setBarMetric]=useState("rev");
 
   // Compute all years from workLogs
   const allYears=useMemo(()=>[...new Set(workLogs.filter(w=>w.completed&&w.endTime).map(w=>yK(w.endTime)).filter(Boolean))].sort().reverse(),[workLogs]);
@@ -765,6 +935,31 @@ function Dashboard({orders,projects,stages,users,workLogs}){
   // Overdue
   const overdue=fOrders.filter(o=>o.targetDate&&new Date(o.targetDate)<new Date()&&(o.serials||[]).some(s=>!isSerDone(o,s)));
 
+  // On-time delivery rate: orders with a target that are either done or not yet late
+  const datedOrders=fOrders.filter(o=>o.targetDate&&(o.serials||[]).length>0);
+  const onTimeCount=datedOrders.filter(o=>(o.serials||[]).every(sr=>isSerDone(o,sr))?true:new Date(o.targetDate)>=new Date()).length;
+  const onTimePct=datedOrders.length?Math.round(onTimeCount/datedOrders.length*100):null;
+  // Average net work time per completed unit
+  const avgPerUnit=completedSerials>0?totalWorkMins/completedSerials:0;
+
+  // Stage bottleneck analysis: average duration per stage
+  const stagePerf=stages.map(st=>{
+    const logs=fLogs.filter(w=>w.stageId===st.id&&w.durationMin>0);
+    const tot=logs.reduce((s,w)=>s+w.durationMin,0);
+    return{label:st.name,value:logs.length?tot/logs.length:0,color:st.color,sub:`${logs.length} פעולות`};
+  }).filter(d=>d.value>0).sort((a,b)=>b.value-a.value);
+
+  // WIP: where unfinished units are currently waiting (their next stage)
+  const wipByStage={};
+  fOrders.forEach(o=>{
+    const ost=(o.stageIds||[]).map(sid=>stages.find(s=>s.id===sid)).filter(Boolean).sort((a,b)=>a.order-b.order);
+    (o.serials||[]).forEach(sr=>{
+      const next=ost.find(st=>!workLogs.some(w=>w.serialId===sr.id&&w.stageId===st.id&&w.completed));
+      if(next)wipByStage[next.id]=(wipByStage[next.id]||0)+1;
+    });
+  });
+  const wipData=stages.filter(st=>wipByStage[st.id]).map(st=>({label:st.name,value:wipByStage[st.id],color:st.color})).sort((a,b)=>b.value-a.value);
+
   return(
     <div className="fade-in">
       {/* Filter bar */}
@@ -779,13 +974,13 @@ function Dashboard({orders,projects,stages,users,workLogs}){
       </div>
 
       {/* KPIs */}
-      <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(120px,1fr))",gap:9,marginBottom:14}}>
+      <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(140px,1fr))",gap:9,marginBottom:14}}>
         <KpiBox i="📋" v={openOrders} label='פק"ע פתוחות' c="#f59e0b"/>
-        <KpiBox i="🔢" v={totalSerials.toLocaleString()} label='סה"כ יחידות' c="#60a5fa"/>
-        <KpiBox i="✅" v={completedSerials.toLocaleString()} label="הושלמו" c="#10b981"/>
+        <KpiBox i="🔢" v={totalSerials.toLocaleString()} label='סה"כ יחידות' c="#60a5fa" sub={`${completedSerials.toLocaleString()} הושלמו`}/>
+        <KpiBox i="🎯" v={onTimePct!=null?onTimePct+"%":"—"} label="עמידה בלוחות זמנים" c={onTimePct==null?"#8b95a8":onTimePct>=85?"#10b981":onTimePct>=60?"#f59e0b":"#ef4444"} sub={datedOrders.length?`${onTimeCount}/${datedOrders.length} פק"ע בזמן`:null}/>
         <KpiBox i="💰" v={fmtMoney(actualRev)} label="הכנסה ממומשת" c="#a78bfa"/>
         <KpiBox i="🔮" v={fmtMoney(forecastRev)} label="צפי הכנסות" c="#06b6d4"/>
-        <KpiBox i="⏱️" v={fmtTime(totalWorkMins)} label="שעות עבודה" c="#3b82f6"/>
+        <KpiBox i="⏱️" v={fmtTime(totalWorkMins)} label="שעות עבודה" c="#3b82f6" sub={completedSerials>0?`${fmtTime(Math.round(avgPerUnit))} ליחידה`:null}/>
         <KpiBox i="💵" v={fmtMoney(totalWorkCost)} label="עלות עבודה" c="#f97316"/>
         <KpiBox i="🔧" v={openDefects} label="תקלות פתוחות" c="#ef4444"/>
         <KpiBox i="⚠️" v={openShortages} label="חוסרים פתוחים" c="#dc2626"/>
@@ -804,12 +999,21 @@ function Dashboard({orders,projects,stages,users,workLogs}){
         </Card>
       )}
 
+      {/* Org structure — who reports to whom */}
+      <OrgStructure users={users} departments={departments||[]} workLogs={workLogs} customTasks={customTasks||[]}/>
+
       {/* Worker Productivity */}
       <Card style={{marginBottom:14}}>
         <div style={{fontWeight:700,fontSize:15,marginBottom:12}}>👥 הספק עובדים</div>
         {workerStats.length===0?<EmptyState icon="👥" title="אין נתוני עובדים" subtitle="נתונים יופיעו כאן אחרי שעובדים ירשמו עבודה"/>:(
-          <div style={{overflowX:"auto"}}><table><thead><tr><th>עובד</th><th>יחידות</th><th>שעות</th><th>יח'/שעה</th><th>עלות</th><th>הכנסה</th><th>רווח</th></tr></thead><tbody>
-            {workerStats.map(w=>(<tr key={w.id}><td style={{fontWeight:600}}>{w.name}</td><td style={{color:"#60a5fa"}}>{w.units}</td><td>{fmtTime(w.totalMin)}</td><td style={{fontWeight:700,color:"#06b6d4"}}>{w.uph.toFixed(1)}</td><td style={{color:"#f97316"}}>{fmtMoney(w.cost)}</td><td style={{color:"#a78bfa"}}>{fmtMoney(w.revenue)}</td><td style={{fontWeight:700,color:w.profit>=0?"#10b981":"#ef4444"}}>{fmtMoney(w.profit)}</td></tr>))}
+          <div style={{overflowX:"auto"}}><table><thead><tr><th>עובד</th><th>שיוך</th><th>יחידות</th><th>שעות</th><th>יח'/שעה</th><th>עלות</th><th>הכנסה</th><th>רווח</th></tr></thead><tbody>
+            {workerStats.map(w=>{
+              const dept=(departments||[]).find(d=>d.id===w.departmentId);
+              const mgr=users.find(m=>m.id===w.managerId);
+              return(<tr key={w.id}><td style={{fontWeight:600}}>{w.name}<div style={{fontSize:10,color:ROLES[w.role]?.color||"var(--c-dim)"}}>{ROLES[w.role]?.label||""}</div></td>
+              <td style={{fontSize:11.5}}>{dept?<span style={{color:dept.color,fontWeight:600}}>{dept.name}</span>:<span style={{color:"var(--c-dim)"}}>—</span>}{mgr&&<div style={{fontSize:10.5,color:"var(--c-muted)"}}>תחת {mgr.name}</div>}</td>
+              <td style={{color:"#60a5fa"}}>{w.units}</td><td>{fmtTime(w.totalMin)}</td><td style={{fontWeight:700,color:"#06b6d4"}}>{w.uph.toFixed(1)}</td><td style={{color:"#f97316"}}>{fmtMoney(w.cost)}</td><td style={{color:"#a78bfa"}}>{fmtMoney(w.revenue)}</td><td style={{fontWeight:700,color:w.profit>=0?"#10b981":"#ef4444"}}>{fmtMoney(w.profit)}</td></tr>);
+            })}
           </tbody></table></div>
         )}
       </Card>
@@ -817,8 +1021,11 @@ function Dashboard({orders,projects,stages,users,workLogs}){
       {/* Charts */}
       <div style={{display:"grid",gridTemplateColumns:"minmax(0,1.6fr) minmax(0,1fr)",gap:12,marginBottom:12}} className="chart-grid">
         <Card>
-          <div style={{fontWeight:700,fontSize:14,marginBottom:12}}>💰 הכנסות לפי {period==="month"?"חודש":period==="quarter"?"רבעון":"שנה"}</div>
-          <BarChart data={pKeys.map(k=>({label:k,value:revByPeriod[k].rev}))} color="#a78bfa" formatVal={v=>fmtMoney(v)} height={130}/>
+          <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:12,flexWrap:"wrap",gap:8}}>
+            <div style={{fontWeight:700,fontSize:14}}>{barMetric==="rev"?"💰 הכנסות":"📦 תפוקה (יחידות)"} לפי {period==="month"?"חודש":period==="quarter"?"רבעון":"שנה"}</div>
+            <SegBtn options={[["rev","הכנסות"],["qty","תפוקה"]]} value={barMetric} onChange={setBarMetric}/>
+          </div>
+          <BarChart data={pKeys.map(k=>({label:k,value:barMetric==="rev"?revByPeriod[k].rev:revByPeriod[k].qty}))} color={barMetric==="rev"?"#a78bfa":"#06b6d4"} formatVal={v=>barMetric==="rev"?fmtMoney(v):v.toLocaleString()+" יח'"} height={130}/>
         </Card>
         <Card style={{display:"flex",flexDirection:"column"}}>
           <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:10}}><div style={{fontWeight:700,fontSize:14}}>📊 התפלגות</div><select value={donutSlice} onChange={e=>setDonutSlice(e.target.value)} style={{padding:"3px 6px",fontSize:11,width:"auto"}}><option value="status">סטטוס</option><option value="project">פרויקטים</option><option value="stage">שלבים</option></select></div>
@@ -843,6 +1050,20 @@ function Dashboard({orders,projects,stages,users,workLogs}){
           <span>רווח: <b style={{color:pKeys.reduce((s,k)=>s+revByPeriod[k].rev-revByPeriod[k].cost,0)>=0?"#10b981":"#ef4444"}}>{fmtMoney(pKeys.reduce((s,k)=>s+revByPeriod[k].rev-revByPeriod[k].cost,0))}</b></span>
         </div>
       </Card>
+
+      {/* Bottlenecks & WIP */}
+      <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:12,marginBottom:12}} className="chart-grid">
+        <Card>
+          <div style={{fontWeight:700,fontSize:14,marginBottom:4}}>⏱️ צווארי בקבוק — זמן ממוצע לשלב</div>
+          <div style={{fontSize:11.5,color:"var(--c-dim)",marginBottom:14}}>השלבים האיטיים ביותר בתהליך — כאן כדאי לתגבר</div>
+          <HBarChart data={stagePerf.slice(0,8)} formatVal={v=>fmtTime(Math.round(v))}/>
+        </Card>
+        <Card>
+          <div style={{fontWeight:700,fontSize:14,marginBottom:4}}>📦 יחידות ממתינות לפי שלב (WIP)</div>
+          <div style={{fontSize:11.5,color:"var(--c-dim)",marginBottom:14}}>איפה "נתקעות" היחידות שעדיין בתהליך</div>
+          <HBarChart data={wipData} formatVal={v=>v.toLocaleString()+" יח'"}/>
+        </Card>
+      </div>
 
       {/* Project progress */}
       <Card>
@@ -2075,6 +2296,133 @@ function WorkersDashboard({users,workLogs,orders,stages,customTasks,onAddTask,on
 }
 
 // ══════════════════════════════════════════════════════════════════════════
+// ═══ TEAM DASHBOARD (ראש צוות / מנהל מחלקה) ══════════════════════════════
+// ══════════════════════════════════════════════════════════════════════════
+function TeamDashboard({users,workLogs,orders,stages,customTasks,departments,onAddTask,onDeleteTask,onMarkPartialTask,onMarkDoneTask}){
+  const {currentUser}=useAuth();
+  const isDeptMgr=currentUser.role==="dept_manager";
+  const myDept=(departments||[]).find(d=>d.id===currentUser.departmentId||d.managerId===currentUser.id);
+  // Dept managers see their whole department; team leads see their direct reports
+  const team=users.filter(u=>u.active!==false&&u.id!==currentUser.id&&(
+    u.managerId===currentUser.id||
+    (isDeptMgr&&myDept&&u.departmentId===myDept.id)
+  ));
+  const teamIds=new Set(team.map(u=>u.id));
+  const today=new Date().toDateString();
+  const activeLogs=workLogs.filter(w=>!w.completed&&teamIds.has(w.userId));
+  const activeTasks=(customTasks||[]).filter(t=>t.active&&!t.completed&&teamIds.has(t.userId));
+  const todayLogs=workLogs.filter(w=>w.completed&&w.endTime&&new Date(w.endTime).toDateString()===today&&teamIds.has(w.userId));
+  const todayMin=todayLogs.reduce((s,w)=>s+(w.durationMin||0),0);
+  const workingNow=team.filter(u=>activeLogs.some(l=>l.userId===u.id&&!l.paused)||activeTasks.some(t=>t.userId===u.id&&!t.paused)).length;
+  const onBreak=team.filter(u=>{
+    const ls=activeLogs.filter(l=>l.userId===u.id),ts=activeTasks.filter(t=>t.userId===u.id);
+    return(ls.length||ts.length)&&ls.every(l=>l.paused)&&ts.every(t=>t.paused);
+  }).length;
+  const openTeamTasks=(customTasks||[]).filter(t=>!t.completed&&teamIds.has(t.userId)).length;
+
+  return(
+    <div className="fade-in">
+      <div style={{display:"flex",alignItems:"center",gap:10,marginBottom:4,flexWrap:"wrap"}}>
+        <h2 style={{margin:0}}>{ROLES[currentUser.role]?.icon} הצוות שלי</h2>
+        {myDept&&<span style={{fontSize:12,background:myDept.color+"22",color:myDept.color,padding:"3px 12px",borderRadius:14,fontWeight:700,border:`1px solid ${myDept.color}44`}}>{myDept.name}</span>}
+      </div>
+      <div style={{fontSize:12.5,color:"var(--c-muted)",marginBottom:14}}>{isDeptMgr?"כל העובדים במחלקה שלך":"העובדים שמשויכים אליך"} — סטטוס, ביצועים ומשימות</div>
+
+      <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(130px,1fr))",gap:9,marginBottom:14}}>
+        <KpiBox i="👥" v={team.length} label="חברי צוות" c="#3b82f6"/>
+        <KpiBox i="🔄" v={workingNow} label="עובדים כעת" c="#10b981"/>
+        <KpiBox i="⏸️" v={onBreak} label="בהפסקה" c="#f59e0b"/>
+        <KpiBox i="✅" v={todayLogs.length} label="פעולות שהושלמו היום" c="#a78bfa"/>
+        <KpiBox i="⏱️" v={fmtTime(todayMin)} label="שעות עבודה היום" c="#06b6d4"/>
+        <KpiBox i="📌" v={openTeamTasks} label="משימות פתוחות" c="#ec4899"/>
+      </div>
+
+      {team.length===0?(
+        <Card><EmptyState icon="👥" title="עדיין לא שויכו אליך עובדים" subtitle="מנהל המערכת יכול לשייך עובדים אליך במסך ניהול המערכת (מנהל ישיר / מחלקה)"/></Card>
+      ):(
+        <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(290px,1fr))",gap:10,marginBottom:14}}>
+          {team.map(u=>{
+            const myActive=activeLogs.filter(l=>l.userId===u.id);
+            const myTask=activeTasks.find(t=>t.userId===u.id);
+            const act=myActive.find(l=>!l.paused)||myActive[0];
+            const myToday=todayLogs.filter(w=>w.userId===u.id);
+            const myTodayMin=myToday.reduce((s,w)=>s+(w.durationMin||0),0);
+            const working=(act&&!act.paused)||(myTask&&!myTask.paused);
+            const paused=!working&&(act||myTask);
+            const sc=working?"#10b981":paused?"#f59e0b":"var(--c-border)";
+            const stage=act?stages.find(s=>s.id===act.stageId):null;
+            const order=act?orders.find(o=>o.id===act.orderId):null;
+            return(
+              <Card key={u.id} style={{border:`1px solid ${working?"#10b98155":paused?"#f59e0b55":"var(--c-border)"}`,padding:16}}>
+                <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:10}}>
+                  <div style={{display:"flex",alignItems:"center",gap:9}}>
+                    <div style={{width:34,height:34,borderRadius:"50%",background:(ROLES[u.role]?.color||"#3b82f6")+"22",color:ROLES[u.role]?.color||"#3b82f6",display:"flex",alignItems:"center",justifyContent:"center",fontWeight:800,fontSize:14}}>{u.name?.charAt(0)}</div>
+                    <div><div style={{fontWeight:700,fontSize:14}}>{u.name}</div><div style={{fontSize:10.5,color:"var(--c-dim)"}}>{ROLES[u.role]?.label||u.role}</div></div>
+                  </div>
+                  <span style={{fontSize:11,fontWeight:700,color:working?"#10b981":paused?"#f59e0b":"var(--c-dim)",display:"flex",alignItems:"center",gap:5}}>
+                    <span style={{width:7,height:7,borderRadius:"50%",background:working?"#10b981":paused?"#f59e0b":"#5a6478",display:"inline-block",animation:working?"pulse 1.6s infinite":"none"}}/>
+                    {working?"עובד כעת":paused?"בהפסקה":"לא פעיל"}
+                  </span>
+                </div>
+                {(act||myTask)&&(
+                  <div style={{background:"var(--c-deep)",borderRadius:9,padding:"9px 12px",marginBottom:10,borderRight:`3px solid ${sc}`}}>
+                    {act?(
+                      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",gap:8}}>
+                        <div style={{minWidth:0}}>
+                          <div style={{fontSize:12,fontWeight:600,color:stage?.color||"var(--c-text)"}}>{stage?.name||"—"}</div>
+                          <div style={{fontSize:10.5,color:"var(--c-dim)",whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>{order?.woNumber||""} · {act.serialSn}{myActive.length>1?` +${myActive.length-1}`:""}</div>
+                        </div>
+                        {!act.paused?<ActiveTimer startTime={act.startTime} pauseMin={act.totalPauseMin||0}/>:<span style={{color:"#f59e0b",fontWeight:700}}>⏸️</span>}
+                      </div>
+                    ):(
+                      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",gap:8}}>
+                        <div style={{fontSize:12,fontWeight:600,color:"#a78bfa"}}>📌 {myTask.name}</div>
+                        {!myTask.paused?<ActiveTimer startTime={myTask.startTime} pauseMin={myTask.totalPauseMin||0}/>:<span style={{color:"#f59e0b",fontWeight:700}}>⏸️</span>}
+                      </div>
+                    )}
+                  </div>
+                )}
+                <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:6}}>
+                  <div style={{background:"var(--c-deep)",borderRadius:7,padding:"6px 9px"}}><div style={{fontSize:9.5,color:"var(--c-dim)"}}>פעולות היום</div><div style={{fontWeight:700,color:"#60a5fa",fontSize:14}}>{myToday.length}</div></div>
+                  <div style={{background:"var(--c-deep)",borderRadius:7,padding:"6px 9px"}}><div style={{fontSize:9.5,color:"var(--c-dim)"}}>זמן עבודה היום</div><div style={{fontWeight:700,fontSize:14}}>{fmtTime(myTodayMin)}</div></div>
+                </div>
+              </Card>
+            );
+          })}
+        </div>
+      )}
+
+      {/* Task assignment to my team */}
+      {team.length>0&&<AdminTasksBoard customTasks={(customTasks||[]).filter(t=>teamIds.has(t.userId))} onDeleteTask={onDeleteTask} onMarkPartialTask={onMarkPartialTask} onMarkDoneTask={onMarkDoneTask} workers={team} onAddTask={onAddTask}/>}
+
+      {/* Recent team activity */}
+      {team.length>0&&(
+        <Card>
+          <div style={{fontWeight:700,fontSize:14,marginBottom:10}}>📋 פעילות אחרונה של הצוות</div>
+          {(()=>{
+            const recent=workLogs.filter(w=>w.completed&&teamIds.has(w.userId)).sort((a,b)=>(b.endTime||"").localeCompare(a.endTime||"")).slice(0,20);
+            if(!recent.length)return<EmptyState icon="📋" title="אין פעילות עדיין" subtitle="פעולות שהצוות ישלים יופיעו כאן"/>;
+            return(
+              <div style={{overflowX:"auto"}}><table><thead><tr><th>עובד</th><th>S/N</th><th>שלב</th><th>זמן</th><th>סיום</th></tr></thead><tbody>
+                {recent.map(w=>{const stage=stages.find(s=>s.id===w.stageId);return(
+                  <tr key={w.id}>
+                    <td style={{fontWeight:600}}>{w.userName}</td>
+                    <td style={{color:"#7eb8ff",fontSize:12}}>{w.serialSn}</td>
+                    <td><span style={{color:stage?.color||"var(--c-muted)"}}>{stage?.name||"—"}</span></td>
+                    <td>{fmtTime(w.durationMin)}</td>
+                    <td style={{fontSize:11,color:"var(--c-dim)"}}>{w.endTime?new Date(w.endTime).toLocaleString("he-IL",{day:"2-digit",month:"2-digit",hour:"2-digit",minute:"2-digit"}):""}</td>
+                  </tr>
+                )})}
+              </tbody></table></div>
+            );
+          })()}
+        </Card>
+      )}
+    </div>
+  );
+}
+
+// ══════════════════════════════════════════════════════════════════════════
 // ═══ STAGES MANAGEMENT ══════════════════════════════════════════════════
 // ══════════════════════════════════════════════════════════════════════════
 function StagesManagement({stages,setStages,stageBlocks,setStageBlocks,persist}){
@@ -2268,7 +2616,7 @@ function Projects({projects,orders,updP,stages,workLogs}){
 // ══════════════════════════════════════════════════════════════════════════
 // ═══ ADMIN PANEL ════════════════════════════════════════════════════════
 // ══════════════════════════════════════════════════════════════════════════
-function AdminPanel({projects,stages,onClose,lightMode,updO}){
+function AdminPanel({projects,stages,onClose,lightMode,updO,departments,updD}){
   const {toast}=useToast();
   const {currentUser}=useAuth();
   const [users,setUsersLocal]=useState(getUsers());
@@ -2276,7 +2624,27 @@ function AdminPanel({projects,stages,onClose,lightMode,updO}){
   const [auditLog]=useState(getAuditLog());
   const [editUser,setEditUser]=useState(null);
   const [addMode,setAddMode]=useState(false);
-  const [newUser,setNewUser]=useState({username:"",password:"",name:"",role:"worker",projectAccess:"all",stageAccess:"all",canEdit:false,canView:true,active:true,hourlyRate:0});
+  const [newUser,setNewUser]=useState({username:"",password:"",name:"",role:"worker",projectAccess:"all",stageAccess:"all",canEdit:false,canView:true,active:true,hourlyRate:0,departmentId:"",managerId:""});
+  // Departments form
+  const [deptName,setDeptName]=useState("");
+  const [deptColor,setDeptColor]=useState("#3b82f6");
+  const [deptManager,setDeptManager]=useState("");
+  const leadOptions=users.filter(u=>u.active!==false&&(isLeadRole(u.role)||u.role==="admin"));
+  const addDept=()=>{
+    if(!deptName.trim())return toast("יש להזין שם מחלקה","warning");
+    updD(prev=>[...prev,{id:uid(),name:deptName.trim(),color:deptColor,managerId:deptManager}]);
+    addAuditEntry({userId:currentUser.id,username:currentUser.username,name:currentUser.name,action:"הוספת מחלקה",target:deptName.trim(),details:""});
+    setDeptName("");setDeptManager("");
+  };
+  const delDept=(d)=>{
+    const members=users.filter(u=>u.departmentId===d.id);
+    if(members.length>0)return toast(`לא ניתן למחוק — ${members.length} עובדים משויכים למחלקה`,"warning");
+    if(!confirm(`למחוק את מחלקת "${d.name}"?`))return;
+    updD(prev=>prev.filter(x=>x.id!==d.id));
+    SB.del("departments",{id:d.id}).catch(()=>{});
+    addAuditEntry({userId:currentUser.id,username:currentUser.username,name:currentUser.name,action:"מחיקת מחלקה",target:d.name,details:""});
+  };
+  const setDeptMgr=(deptId,mgrId)=>{updD(prev=>prev.map(d=>d.id===deptId?{...d,managerId:mgrId}:d))};
   const lm=lightMode;
   const card=lm?"#ffffff":"#131829";
   const border=lm?"#dde1e8":"#1e2a42";
@@ -2295,7 +2663,7 @@ function AdminPanel({projects,stages,onClose,lightMode,updO}){
     const updated=[...users,u];
     saveUsers(updated);setUsersLocal(updated);
     addAuditEntry({userId:currentUser.id,username:currentUser.username,name:currentUser.name,action:"הוספת משתמש",target:newUser.username,details:newUser.name});
-    setNewUser({username:"",password:"",name:"",role:"worker",projectAccess:"all",stageAccess:"all",canEdit:false,canView:true,active:true,hourlyRate:0});
+    setNewUser({username:"",password:"",name:"",role:"worker",projectAccess:"all",stageAccess:"all",canEdit:false,canView:true,active:true,hourlyRate:0,departmentId:"",managerId:""});
     setAddMode(false);
   };
   const saveUser=async()=>{
@@ -2339,7 +2707,7 @@ function AdminPanel({projects,stages,onClose,lightMode,updO}){
         </div>
         <div style={{padding:"0 24px 24px"}}>
           <div style={{display:"flex",gap:6,margin:"14px 0",flexWrap:"wrap"}}>
-            {[["users","👥 משתמשים"],["audit","📋 יומן"]].map(([k,l])=>(
+            {[["users","👥 משתמשים"],["departments","🏢 מחלקות"],["audit","📋 יומן"]].map(([k,l])=>(
               <button key={k} onClick={()=>setTab(k)} style={{background:tab===k?"var(--c-accent)":"transparent",border:`1px solid ${tab===k?"var(--c-accent)":border}`,color:tab===k?"#fff":muted,borderRadius:8,padding:"7px 14px",fontSize:13,fontWeight:600,fontFamily:"inherit"}}>{l}</button>
             ))}
           </div>
@@ -2358,11 +2726,24 @@ function AdminPanel({projects,stages,onClose,lightMode,updO}){
                       <div key={k}><label style={{fontSize:11,color:muted,display:"block",marginBottom:3}}>{l}</label><input style={inp} type={t} value={newUser[k]||""} onChange={e=>setNewUser(p=>({...p,[k]:t==="number"?Number(e.target.value):e.target.value}))}/></div>
                     ))}
                     <div><label style={{fontSize:11,color:muted,display:"block",marginBottom:3}}>תפקיד</label>
-                      <select style={inp} value={newUser.role} onChange={e=>setNewUser(p=>({...p,role:e.target.value,canEdit:e.target.value!=="viewer"}))}>
-                        <option value="worker">👷 עובד</option><option value="editor">✏️ עורך</option><option value="admin">🛡️ מנהל</option><option value="viewer">👁️ צופה</option>
+                      <select style={inp} value={newUser.role} onChange={e=>setNewUser(p=>({...p,role:e.target.value,canEdit:["admin","editor","dept_manager"].includes(e.target.value)}))}>
+                        {Object.entries(ROLES).map(([k,r])=><option key={k} value={k}>{r.icon} {r.label}</option>)}
+                      </select>
+                    </div>
+                    <div><label style={{fontSize:11,color:muted,display:"block",marginBottom:3}}>מחלקה</label>
+                      <select style={inp} value={newUser.departmentId||""} onChange={e=>setNewUser(p=>({...p,departmentId:e.target.value}))}>
+                        <option value="">— ללא מחלקה —</option>
+                        {(departments||[]).map(d=><option key={d.id} value={d.id}>{d.name}</option>)}
+                      </select>
+                    </div>
+                    <div><label style={{fontSize:11,color:muted,display:"block",marginBottom:3}}>מנהל ישיר (ראש צוות)</label>
+                      <select style={inp} value={newUser.managerId||""} onChange={e=>setNewUser(p=>({...p,managerId:e.target.value}))}>
+                        <option value="">— ללא —</option>
+                        {users.filter(u=>u.active!==false&&isLeadRole(u.role)).map(u=><option key={u.id} value={u.id}>{ROLES[u.role]?.icon} {u.name}</option>)}
                       </select>
                     </div>
                   </div>
+                  {isLeadRole(newUser.role)&&<div style={{background:"#a78bfa15",border:"1px solid #a78bfa33",borderRadius:8,padding:"8px 12px",fontSize:12,color:"#a78bfa",marginBottom:10}}>⭐ משתמש זה יוכל לראות את כל העובדים שישויכו אליו, להקצות להם משימות ולעקוב אחרי הביצועים שלהם</div>}
                   {/* Project Access */}
                   <div style={{marginBottom:10}}>
                     <label style={{fontSize:11,color:muted,display:"block",marginBottom:3}}>גישה לפרויקטים</label>
@@ -2404,7 +2785,9 @@ function AdminPanel({projects,stages,onClose,lightMode,updO}){
                     <div>
                       <div style={{fontWeight:600,color:text}}>{u.name} <span style={{fontSize:11,color:muted}}>({u.username})</span></div>
                       <div style={{fontSize:11,color:muted,display:"flex",gap:8,flexWrap:"wrap",marginTop:2}}>
-                        <span>{u.role==="admin"?"🛡️ מנהל":u.role==="editor"?"✏️ עורך":u.role==="worker"?"👷 עובד":"👁️ צופה"}</span>
+                        <span style={{color:ROLES[u.role]?.color||muted,fontWeight:600}}>{roleLabel(u.role)}</span>
+                        {u.departmentId&&(departments||[]).find(d=>d.id===u.departmentId)&&<span style={{color:(departments||[]).find(d=>d.id===u.departmentId)?.color}}>🏢 {(departments||[]).find(d=>d.id===u.departmentId)?.name}</span>}
+                        {u.managerId&&users.find(m=>m.id===u.managerId)&&<span>⭐ תחת: {users.find(m=>m.id===u.managerId)?.name}</span>}
                         {u.hourlyRate>0&&<span>💰 {fmtMoney(u.hourlyRate)}/שעה</span>}
                         <span>פרויקטים: {u.projectAccess==="all"?"הכל":Array.isArray(u.projectAccess)?u.projectAccess.length:"1"}</span>
                         <span>שלבים: {u.stageAccess==="all"?"הכל":Array.isArray(u.stageAccess)?u.stageAccess.length:"1"}</span>
@@ -2418,6 +2801,56 @@ function AdminPanel({projects,stages,onClose,lightMode,updO}){
                   </div>
                 ))}
               </div>
+            </div>
+          )}
+
+          {tab==="departments"&&(
+            <div>
+              <div style={{fontSize:13,color:muted,marginBottom:12,lineHeight:1.5}}>חלק את העובדים למחלקות וקבע מנהל לכל מחלקה. עובדים משויכים למחלקה ולמנהל ישיר דרך כרטיס המשתמש (לשונית "משתמשים").</div>
+              <div style={{background:lm?"#f7f8fa":"#0d1120",borderRadius:10,padding:14,marginBottom:14,border:`1px solid ${border}`}}>
+                <div style={{fontWeight:700,marginBottom:10,color:text,fontSize:13}}>➕ מחלקה חדשה</div>
+                <div style={{display:"flex",gap:10,flexWrap:"wrap",alignItems:"flex-end"}}>
+                  <div style={{flex:"1 1 160px"}}><label style={{fontSize:11,color:muted,display:"block",marginBottom:3}}>שם המחלקה</label><input style={inp} value={deptName} onChange={e=>setDeptName(e.target.value)} placeholder='למשל: הרכבה, בדיקות, אריזה'/></div>
+                  <div style={{flex:"1 1 160px"}}><label style={{fontSize:11,color:muted,display:"block",marginBottom:3}}>מנהל מחלקה</label>
+                    <select style={inp} value={deptManager} onChange={e=>setDeptManager(e.target.value)}>
+                      <option value="">— ללא —</option>
+                      {leadOptions.map(u=><option key={u.id} value={u.id}>{ROLES[u.role]?.icon} {u.name}</option>)}
+                    </select>
+                  </div>
+                  <div><label style={{fontSize:11,color:muted,display:"block",marginBottom:3}}>צבע</label><input type="color" value={deptColor} onChange={e=>setDeptColor(e.target.value)} style={{width:38,height:36,padding:2,border:`1px solid ${border}`,borderRadius:6,background:"transparent"}}/></div>
+                  <Btn color="#10b981" onClick={addDept}>✅ הוסף</Btn>
+                </div>
+              </div>
+              {(departments||[]).length===0?<EmptyState icon="🏢" title="אין מחלקות עדיין" subtitle="צור מחלקה ראשונה כדי להתחיל לארגן את הצוות"/>:(
+                <div style={{display:"flex",flexDirection:"column",gap:8}}>
+                  {(departments||[]).map(d=>{
+                    const members=users.filter(u=>u.departmentId===d.id&&u.active!==false);
+                    return(
+                      <div key={d.id} style={{background:lm?"#f7f8fa":"#0d1120",borderRadius:10,padding:"12px 14px",border:`1px solid ${d.color}33`}}>
+                        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",flexWrap:"wrap",gap:8}}>
+                          <div style={{display:"flex",alignItems:"center",gap:9}}>
+                            <span style={{width:11,height:11,borderRadius:3,background:d.color,display:"inline-block"}}/>
+                            <span style={{fontWeight:700,color:text,fontSize:14}}>{d.name}</span>
+                            <span style={{fontSize:11,background:d.color+"22",color:d.color,padding:"2px 9px",borderRadius:12,fontWeight:700}}>{members.length} עובדים</span>
+                          </div>
+                          <div style={{display:"flex",gap:8,alignItems:"center"}}>
+                            <select style={{...inp,width:"auto",minWidth:150,padding:"5px 10px",paddingRight:"28px",fontSize:12}} value={d.managerId||""} onChange={e=>setDeptMgr(d.id,e.target.value)}>
+                              <option value="">— ללא מנהל —</option>
+                              {leadOptions.map(u=><option key={u.id} value={u.id}>{ROLES[u.role]?.icon} {u.name}</option>)}
+                            </select>
+                            <IBtn onClick={()=>delDept(d)} title="מחק מחלקה">🗑️</IBtn>
+                          </div>
+                        </div>
+                        {members.length>0&&(
+                          <div style={{display:"flex",gap:5,flexWrap:"wrap",marginTop:9}}>
+                            {members.map(m=><span key={m.id} style={{fontSize:11,background:lm?"#fff":"#131829",border:`1px solid ${border}`,color:text,padding:"3px 10px",borderRadius:14}}>{ROLES[m.role]?.icon} {m.name}</span>)}
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
             </div>
           )}
 
@@ -2455,8 +2888,20 @@ function AdminPanel({projects,stages,onClose,lightMode,updO}){
                 <div key={k}><label style={{fontSize:11,color:muted,display:"block",marginBottom:3}}>{l}</label><input style={inp} type={t} value={editUser[k]||""} onChange={e=>setEditUser(p=>({...p,[k]:t==="number"?Number(e.target.value):e.target.value}))}/></div>
               ))}
               <div><label style={{fontSize:11,color:muted,display:"block",marginBottom:3}}>תפקיד</label>
-                <select style={inp} value={editUser.role} onChange={e=>setEditUser(p=>({...p,role:e.target.value,canEdit:e.target.value!=="viewer"&&e.target.value!=="worker"}))}>
-                  <option value="worker">👷 עובד</option><option value="editor">✏️ עורך</option><option value="admin">🛡️ מנהל</option><option value="viewer">👁️ צופה</option>
+                <select style={inp} value={editUser.role} onChange={e=>setEditUser(p=>({...p,role:e.target.value,canEdit:["admin","editor","dept_manager"].includes(e.target.value)}))}>
+                  {Object.entries(ROLES).map(([k,r])=><option key={k} value={k}>{r.icon} {r.label}</option>)}
+                </select>
+              </div>
+              <div><label style={{fontSize:11,color:muted,display:"block",marginBottom:3}}>מחלקה</label>
+                <select style={inp} value={editUser.departmentId||""} onChange={e=>setEditUser(p=>({...p,departmentId:e.target.value}))}>
+                  <option value="">— ללא מחלקה —</option>
+                  {(departments||[]).map(d=><option key={d.id} value={d.id}>{d.name}</option>)}
+                </select>
+              </div>
+              <div><label style={{fontSize:11,color:muted,display:"block",marginBottom:3}}>מנהל ישיר (ראש צוות)</label>
+                <select style={inp} value={editUser.managerId||""} onChange={e=>setEditUser(p=>({...p,managerId:e.target.value}))}>
+                  <option value="">— ללא —</option>
+                  {users.filter(u=>u.active!==false&&isLeadRole(u.role)&&u.id!==editUser.id).map(u=><option key={u.id} value={u.id}>{ROLES[u.role]?.icon} {u.name}</option>)}
                 </select>
               </div>
             </div>
@@ -2750,9 +3195,12 @@ function Navbar({tab,setTab,tabs,lightMode,toggleLight,sync,onAdmin,onLogout,ale
   return(
     <div className="nav-wrapper" style={{background:navBg,borderBottom:`1px solid ${navBorder}`,position:"sticky",top:0,zIndex:50,transition:"background .3s"}}>
       <div style={{maxWidth:1440,margin:"0 auto",padding:"0 16px",display:"flex",alignItems:"center",gap:0,height:52}}>
-        <div style={{display:"flex",alignItems:"center",gap:6,flexShrink:0,paddingLeft:8}}>
-          <div style={{fontWeight:800,fontSize:15,color:navActive,whiteSpace:"nowrap"}}>⚙️ קו ייצור</div>
-          <span style={{fontSize:9,background:navActive+"22",color:navActive,padding:"2px 6px",borderRadius:10,border:`1px solid ${navActive}44`,fontWeight:700}}>v{APP_VERSION}</span>
+        <div style={{display:"flex",alignItems:"center",gap:8,flexShrink:0,paddingLeft:10}}>
+          <Logo size={28}/>
+          <div style={{display:"flex",flexDirection:"column",lineHeight:1.05}}>
+            <span style={{fontWeight:800,fontSize:14,color:lm?"#1a1f2e":"#e2e8f0",whiteSpace:"nowrap",letterSpacing:"-.02em"}}>קו ייצור</span>
+            <span style={{fontSize:8.5,color:navMuted,fontWeight:600,letterSpacing:".14em"}}>PRODUCTION</span>
+          </div>
         </div>
         <div className="desk-nav" style={{flex:1,overflowX:"auto",scrollbarWidth:"none",justifyContent:"flex-start"}}>
           {tabs.map(t=>(<button key={t.id} onClick={()=>setTab(t.id)} style={{padding:"0 14px",height:52,background:"none",border:"none",color:tab===t.id?navActive:navMuted,borderBottom:tab===t.id?`3px solid ${navActive}`:"3px solid transparent",fontWeight:tab===t.id?700:400,fontSize:13,whiteSpace:"nowrap",fontFamily:"inherit"}}>{t.label}</button>))}
@@ -2808,7 +3256,7 @@ function Navbar({tab,setTab,tabs,lightMode,toggleLight,sync,onAdmin,onLogout,ale
               </div>
               <div style={{background:lm?"#e2e8f0":"#0d1120",borderRadius:10,padding:"12px 14px",display:"flex",alignItems:"center",gap:10}}>
                 <div style={{width:36,height:36,borderRadius:"50%",background:"var(--c-accent)22",display:"flex",alignItems:"center",justifyContent:"center",fontSize:16,fontWeight:700,color:"var(--c-accent)"}}>{currentUser?.name?.charAt(0)||"?"}</div>
-                <div><div style={{fontWeight:700,fontSize:14,color:navActive}}>{currentUser?.name}</div><div style={{fontSize:11,color:navMuted}}>{currentUser?.role==="admin"?"מנהל מערכת":"עובד"}</div></div>
+                <div><div style={{fontWeight:700,fontSize:14,color:navActive}}>{currentUser?.name}</div><div style={{fontSize:11,color:navMuted}}>{ROLES[currentUser?.role]?.label||"עובד"}</div></div>
               </div>
             </div>
             <div style={{display:"flex",flexDirection:"column",gap:2,padding:"0 8px"}}>
@@ -3235,6 +3683,7 @@ function App(){
   const [stageBlocks,setStageBlocks]=useState([]);
   const [workLogs,setWorkLogs]=useState([]);
   const [customTasks,setCustomTasks]=useState([]);
+  const [departments,setDepartments]=useState([]);
   const [loading,setLoading]=useState(true);
   const [sync,setSync]=useState("ok");
   // PWA state
@@ -3290,6 +3739,7 @@ function App(){
       if(lo)setOrders(lo);if(lp)setProjects(lp);if(ls)setStages(ls);if(lw)setWorkLogs(lw);
       const lct=LS.get("customTasks");if(lct)setCustomTasks(lct);
       const lsb=LS.get("stageBlocks");if(lsb)setStageBlocks(lsb);
+      const ldp=LS.get("departments");if(ldp)setDepartments(ldp);
     }
 
     // Then always load from Supabase (Supabase is the source of truth)
@@ -3302,6 +3752,7 @@ function App(){
         setWorkLogs(data.workLogs||[]);LS.set("workLogs",data.workLogs||[]);
         setCustomTasks(data.customTasks||[]);LS.set("customTasks",data.customTasks||[]);
         setStageBlocks(data.stageBlocks||[]);LS.set("stageBlocks",data.stageBlocks||[]);
+        setDepartments(data.departments||[]);LS.set("departments",data.departments||[]);
         LS.set("session_company",_companyId);
       }
       if(users?.length){LS.set("users",users)}
@@ -3363,6 +3814,7 @@ function App(){
         if(data.workLogs){setWorkLogs(data.workLogs);LS.set("workLogs",data.workLogs)}
         if(data.customTasks){setCustomTasks(data.customTasks);LS.set("customTasks",data.customTasks)}
         if(data.stageBlocks){setStageBlocks(data.stageBlocks);LS.set("stageBlocks",data.stageBlocks)}
+        if(data.departments){setDepartments(data.departments);LS.set("departments",data.departments)}
       }
       if(users?.length)LS.set("users",users);
       setSync("ok");
@@ -3393,6 +3845,7 @@ function App(){
           if(data.stages){setStages(data.stages);LS.set("stages",data.stages)}
           if(data.projects){setProjects(data.projects);LS.set("projects",data.projects)}
           if(data.stageBlocks){setStageBlocks(data.stageBlocks);LS.set("stageBlocks",data.stageBlocks)}
+          if(data.departments){setDepartments(data.departments);LS.set("departments",data.departments)}
         }
         setSync("ok");
       }catch(e){console.warn("Poll error",e)}
@@ -3409,7 +3862,7 @@ function App(){
         ws=new WebSocket(wsUrl);
         ws.onopen=()=>{
           console.log("Realtime WS connected");
-          const tables=["orders","work_logs","custom_tasks","stages","projects","stage_blocks"];
+          const tables=["orders","work_logs","custom_tasks","stages","projects","stage_blocks","departments"];
           tables.forEach((t,i)=>{
             ws.send(JSON.stringify({
               topic:`realtime:public:${t}`,
@@ -3444,6 +3897,7 @@ function App(){
             if(["stages"].includes(tbl)){const rows=await SB.get("stages",cf+"order=stage_order.asc");setStages(rows.map(dbToStage));LS.set("stages",rows.map(dbToStage))}
             if(["projects"].includes(tbl)){const rows=await SB.get("projects",cf+"order=name.asc");setProjects(rows.map(dbToProject));LS.set("projects",rows.map(dbToProject))}
             if(["stage_blocks"].includes(tbl)){const rows=await SB.get("stage_blocks",cf+"order=created_at.asc");setStageBlocks(rows.map(dbToBlock));LS.set("stageBlocks",rows.map(dbToBlock))}
+            if(["departments"].includes(tbl)){const rows=await SB.get("departments",cf+"order=name.asc");setDepartments(rows.map(dbToDept));LS.set("departments",rows.map(dbToDept))}
           }catch(err){console.warn("Realtime msg error",err)}
         };
         ws.onclose=()=>{
@@ -3464,11 +3918,13 @@ function App(){
   useEffect(()=>{ctRef.current=customTasks},[customTasks]);
   const sbRef=useRef(stageBlocks);
   useEffect(()=>{sbRef.current=stageBlocks},[stageBlocks]);
+  const dpRef=useRef(departments);
+  useEffect(()=>{dpRef.current=departments},[departments]);
 
-  const persist=(no,np,ns,nw,nct,nsb)=>{
-    const o=no??oRef.current,p=np??pRef.current,s=ns??sRef.current,w=nw??wRef.current,ct=nct??ctRef.current,sb=nsb??sbRef.current;
+  const persist=(no,np,ns,nw,nct,nsb,ndp)=>{
+    const o=no??oRef.current,p=np??pRef.current,s=ns??sRef.current,w=nw??wRef.current,ct=nct??ctRef.current,sb=nsb??sbRef.current,dp=ndp??dpRef.current;
     // Always save to localStorage immediately
-    LS.set("orders",o);LS.set("projects",p);LS.set("stages",s);LS.set("workLogs",w);LS.set("customTasks",ct);LS.set("stageBlocks",sb);
+    LS.set("orders",o);LS.set("projects",p);LS.set("stages",s);LS.set("workLogs",w);LS.set("customTasks",ct);LS.set("stageBlocks",sb);LS.set("departments",dp);
     lastPersistRef.current=Date.now();
     setSync("saving");clearTimeout(saveTimer);
     saveTimer=setTimeout(async()=>{
@@ -3480,6 +3936,7 @@ function App(){
           SB.upsert("stage_blocks",sb.map(blockToDb)),
           SB.upsert("work_logs",w.map(logToDb)),
           SB.upsert("custom_tasks",ct.map(taskToDb)),
+          SB.upsert("departments",dp.map(deptToDb)),
         ]);
         setSync("ok");
       }catch(e){console.warn("Supabase save error",e);setSync("error")}
@@ -3492,8 +3949,8 @@ function App(){
     setCompanyId(cid);
     // If company changed — clear stale cache immediately so no data leaks between companies
     if(cid!==prevCid){
-      setOrders([]);setProjects(DEF_PROJ);setStages(DEF_STAGES);setWorkLogs([]);setCustomTasks([]);setStageBlocks([]);
-      ["orders","projects","stages","workLogs","customTasks","stageBlocks"].forEach(k=>{try{localStorage.removeItem(LS_PREFIX+k)}catch{}});
+      setOrders([]);setProjects(DEF_PROJ);setStages(DEF_STAGES);setWorkLogs([]);setCustomTasks([]);setStageBlocks([]);setDepartments([]);
+      ["orders","projects","stages","workLogs","customTasks","stageBlocks","departments"].forEach(k=>{try{localStorage.removeItem(LS_PREFIX+k)}catch{}});
     }
     setCurrentUser(u);
     try{localStorage.setItem(LS_PREFIX+"session",JSON.stringify({id:u.id,username:u.username,companyId:cid}))}catch{}
@@ -3515,6 +3972,7 @@ function App(){
 
   const updO=useCallback((fn)=>{setOrders(prev=>{const next=typeof fn==="function"?fn(prev):fn;persist(next,null,null,null);return next})},[]);
   const updP=useCallback((fn)=>{setProjects(prev=>{const next=typeof fn==="function"?fn(prev):fn;persist(null,next,null,null);return next})},[]);
+  const updD=useCallback((fn)=>{setDepartments(prev=>{const next=typeof fn==="function"?fn(prev):fn;persist(null,null,null,null,null,null,next);return next})},[]);
 
   // Auto-delivery: per serial — when a serial finishes all stages, mark it as delivered
   const checkAutoDelivery=(orderId,nextLogs)=>{
@@ -3607,6 +4065,7 @@ function App(){
 
   const isAdmin=currentUser?.role==="admin";
   const isWorker=currentUser?.role==="worker";
+  const isLead=isLeadRole(currentUser?.role);
 
   const TABS=isAdmin?[
     {id:"dashboard",label:"📊 דאשבורד"},
@@ -3618,6 +4077,10 @@ function App(){
     {id:"stages",label:"🔧 שלבים"},
     {id:"projects",label:"🏗️ פרויקטים"},
     {id:"excel",label:"📂 Excel"},
+  ]:isLead?[
+    {id:"team",label:"👥 הצוות שלי"},
+    {id:"mywork",label:"🔨 העבודה שלי"},
+    {id:"orders",label:'📋 פק"ע'},
   ]:isWorker?[
     {id:"mywork",label:"🔨 העבודה שלי"},
     {id:"orders",label:'📋 פק"ע'},
@@ -3706,13 +4169,26 @@ function App(){
       // Save to Supabase
       const CHUNK=50;
       const chunked=(arr,n)=>Array.from({length:Math.ceil(arr.length/n)},(_,i)=>arr.slice(i*n,(i+1)*n));
+      // Demo departments + team hierarchy
+      const dDepts=[
+        {id:"demo_d1",name:"מחלקת הרכבה",color:"#8b5cf6",manager_id:"w1",company_id:_companyId},
+        {id:"demo_d2",name:"מחלקת בדיקות",color:"#06b6d4",manager_id:"w4",company_id:_companyId}
+      ];
+      const demoHier={
+        w1:{role:"team_lead",departmentId:"demo_d1"},
+        w2:{departmentId:"demo_d1",managerId:"w1"},
+        w3:{departmentId:"demo_d1",managerId:"w1"},
+        w4:{role:"dept_manager",departmentId:"demo_d2"},
+        w5:{departmentId:"demo_d2",managerId:"w4"}
+      };
       // Seed demo users with hashed passwords
       const demoUsers=[];
       for(const fu of FALLBACK_USERS){
         const h=await sha256(fu.password);
-        demoUsers.push(userToDb({...fu,password_hash:h,password:undefined}));
+        demoUsers.push(userToDb({...fu,...(demoHier[fu.id]||{}),password_hash:h,password:undefined}));
       }
       await SB.upsert("app_users",demoUsers);
+      await SB.upsert("departments",dDepts);
       await SB.upsert("projects",dProj);
       await SB.upsert("stages",dStages);
       for(const chunk of chunked(orders,CHUNK))await SB.upsert("orders",chunk);
@@ -3742,17 +4218,19 @@ function App(){
         fetch(`${SB_URL}/rest/v1/custom_tasks?id=like.demo_t_*`,{method:"DELETE",headers:sbHeaders()}),
       ]);
       await fetch(`${SB_URL}/rest/v1/orders?id=like.demo_o_*`,{method:"DELETE",headers:sbHeaders()});
+      await fetch(`${SB_URL}/rest/v1/departments?id=like.demo_d*`,{method:"DELETE",headers:sbHeaders()}).catch(()=>{});
       const data=await dbLoadAll();
       if(data.orders){setOrders(data.orders);LS.set("orders",data.orders)}
       if(data.workLogs){setWorkLogs(data.workLogs);LS.set("workLogs",data.workLogs)}
       if(data.customTasks){setCustomTasks(data.customTasks);LS.set("customTasks",data.customTasks)}
+      if(data.departments){setDepartments(data.departments);LS.set("departments",data.departments)}
       setSync("ok");
       toast("נתוני דמו נמחקו!","success");
     }catch(e){console.error(e);setSync("error");toast("שגיאה: "+e.message,"error")}
   };
   useEffect(()=>{const isi=window.matchMedia("(display-mode:standalone)").matches||window.navigator.standalone;if(isi)return;const h=e=>{e.preventDefault();setInstallPrompt(e);setShowInstall(true)};window.addEventListener("beforeinstallprompt",h);window.addEventListener("appinstalled",()=>{setShowInstall(false);setInstallPrompt(null)});return()=>window.removeEventListener("beforeinstallprompt",h)},[]);
   // Service Worker
-  useEffect(()=>{if(!("serviceWorker" in navigator))return;navigator.serviceWorker.register("./sw.js?v=18").then(reg=>{swRegRef.current=reg;if(reg.waiting)setShowUpdate(true);reg.addEventListener("updatefound",()=>{const nw=reg.installing;if(!nw)return;nw.addEventListener("statechange",()=>{if(nw.state==="installed"&&navigator.serviceWorker.controller)setShowUpdate(true)})});setInterval(()=>reg.update(),30*60*1000)}).catch(()=>{});navigator.serviceWorker.addEventListener("controllerchange",()=>window.location.reload())},[]);
+  useEffect(()=>{if(!("serviceWorker" in navigator))return;navigator.serviceWorker.register("./sw.js?v=19").then(reg=>{swRegRef.current=reg;if(reg.waiting)setShowUpdate(true);reg.addEventListener("updatefound",()=>{const nw=reg.installing;if(!nw)return;nw.addEventListener("statechange",()=>{if(nw.state==="installed"&&navigator.serviceWorker.controller)setShowUpdate(true)})});setInterval(()=>reg.update(),30*60*1000)}).catch(()=>{});navigator.serviceWorker.addEventListener("controllerchange",()=>window.location.reload())},[]);
   // Network status
   useEffect(()=>{const on=()=>{setIsOffline(false);toast("החיבור חזר — מסנכרן נתונים...","success");refreshFromDB(true)};const off=()=>{setIsOffline(true)};window.addEventListener("online",on);window.addEventListener("offline",off);return()=>{window.removeEventListener("online",on);window.removeEventListener("offline",off)}},[]);
   // PWA Install
@@ -3762,8 +4240,9 @@ function App(){
   if(!currentUser)return(<AuthCtx.Provider value={{currentUser,canEdit:false,canViewProject:()=>false}}><LoginScreen onLogin={handleLogin} lightMode={lightMode} toggleLight={()=>setLightMode(p=>!p)}/></AuthCtx.Provider>);
   if(loading)return(<SkeletonDashboard/>);
 
-  // Default tab for workers
+  // Default tab for workers and team leads
   if(isWorker&&tab==="dashboard")setTab("mywork");
+  if(isLead&&tab==="dashboard")setTab("team");
   const lm=lightMode;
 
   return(
@@ -3778,7 +4257,8 @@ function App(){
         </div>
       )}
       <main className="main-content" style={{maxWidth:1440,margin:"0 auto",padding:"16px 14px",paddingBottom:showInstall?"100px":"calc(16px + env(safe-area-inset-bottom,0px))"}}>
-        {tab==="dashboard"&&<Dashboard orders={filteredOrders} projects={filteredProjects} stages={stages} users={getUsers()} workLogs={filteredWorkLogs}/>}
+        {tab==="dashboard"&&<Dashboard orders={filteredOrders} projects={filteredProjects} stages={stages} users={getUsers()} workLogs={filteredWorkLogs} departments={departments} customTasks={customTasks}/>}
+        {tab==="team"&&isLead&&<TeamDashboard users={getUsers()} workLogs={filteredWorkLogs} orders={filteredOrders} stages={stages} customTasks={customTasks} departments={departments} onAddTask={handleAddTask} onDeleteTask={handleDeleteTask} onMarkPartialTask={handleMarkPartialTask} onMarkDoneTask={handleMarkDoneTask}/>}
         {tab==="orders"&&<Orders orders={filteredOrders} projects={filteredProjects} stages={stages} stageBlocks={stageBlocks} updO={updO} workLogs={filteredWorkLogs} onWorkLog={handleStartWork}/>}
         {tab==="shortages"&&<Shortages orders={filteredOrders} updO={updO} projects={filteredProjects}/>}
         {tab==="mywork"&&<MyWork orders={filteredOrders} stages={stages} workLogs={filteredWorkLogs} onStartWork={handleStartWork} onEndWork={handleEndWork} onPauseWork={handlePauseWork} onResumeWork={handleResumeWork} customTasks={customTasks} onAddTask={handleAddTask} onStartTask={handleStartTask} onEndTask={handleEndTask} onPauseTask={handlePauseTask} onResumeTask={handleResumeTask} onDeleteTask={handleDeleteTask} onMarkPartialTask={handleMarkPartialTask} onMarkDoneTask={handleMarkDoneTask} users={getUsers()}/>}
@@ -3789,7 +4269,7 @@ function App(){
         {tab==="excel"&&isAdmin&&<ExcelTab orders={filteredOrders} projects={filteredProjects} stages={stages} workLogs={filteredWorkLogs} users={getUsers()} updO={updO}/>}
       </main>
       {showInstall&&<InstallBanner onInstall={handleInstall} onDismiss={()=>setShowInstall(false)} lm={lm}/>}
-      {showAdmin&&isAdmin&&<AdminPanel projects={projects} stages={stages} onClose={()=>setShowAdmin(false)} lightMode={lightMode} updO={updO}/>}
+      {showAdmin&&isAdmin&&<AdminPanel projects={projects} stages={stages} onClose={()=>setShowAdmin(false)} lightMode={lightMode} updO={updO} departments={departments} updD={updD}/>}
       {showAlerts&&<AlertsPanel orders={filteredOrders} stages={stages} workLogs={filteredWorkLogs} users={getUsers()} onClose={()=>setShowAlerts(false)} dismissedAlerts={dismissedAlerts} onDismissAll={ids=>setDismissedAlerts(prev=>[...new Set([...prev,...ids])])}/>}
       {showLiveBoard&&isAdmin&&(canUseFeature("live_board")?<LiveFactoryBoard orders={filteredOrders} workLogs={filteredWorkLogs} stages={stages} customTasks={customTasks} users={getUsers()} onClose={()=>setShowLiveBoard(false)} lightMode={lightMode}/>:<Modal onClose={()=>setShowLiveBoard(false)}><UpgradePrompt feature="לוח חי"/></Modal>)}
       {showReport&&isAdmin&&(canUseFeature("pdf_reports")?<MonthlyReportModal orders={filteredOrders} workLogs={filteredWorkLogs} stages={stages} projects={filteredProjects} users={getUsers()} onClose={()=>setShowReport(false)}/>:<Modal onClose={()=>setShowReport(false)}><UpgradePrompt feature="דוחות PDF"/></Modal>)}
