@@ -1,5 +1,5 @@
-const CACHE='pml-v20';
-const ASSETS=['./','./index.html','./manifest.json','./icon-192.png','./icon-512.png'];
+const CACHE='pml-v21';
+const ASSETS=['./','./index.html','./manifest.json','./app-icon-192.png','./app-icon-512.png'];
 
 self.addEventListener('install',e=>{
   e.waitUntil(caches.open(CACHE).then(c=>c.addAll(ASSETS)));
@@ -27,8 +27,8 @@ self.addEventListener('message',e=>{
   if(e.data&&e.data.type==='NOTIFY'){
     self.registration.showNotification(e.data.title,{
       body:e.data.body,
-      icon:'./icon-192.png',
-      badge:'./icon-192.png',
+      icon:'./app-icon-192.png',
+      badge:'./app-icon-192.png',
       tag:e.data.tag||'pml-notify',
       renotify:true,
       data:{url:e.data.url||'/'}
