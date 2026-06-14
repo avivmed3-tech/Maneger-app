@@ -123,3 +123,20 @@ function doPost(e) {
 YOUR_URL?t=123
 ```
 אם מחזיר `{}` — הנתונים עוד לא נשמרו. תעשה פעולה כלשהי באפליקציה ותבדוק שוב.
+
+---
+
+## 🆕 עדכון סכימת Supabase (תעריפים, סיסמאות וצפי מכירות)
+
+הגרסה החדשה משתמשת בעמודות נוספות. אם אתה מקים פרויקט Supabase חדש,
+הרץ את ה-SQL הבא ב-SQL Editor (במסד הקיים העמודות כבר נוספו):
+
+```sql
+ALTER TABLE public.app_users ADD COLUMN IF NOT EXISTS sale_rate numeric DEFAULT 0;      -- תעריף מכירה (שווי מכירת עובד) לשעה
+ALTER TABLE public.app_users ADD COLUMN IF NOT EXISTS password_plain text;              -- סיסמה לצפייה ע"י מנהל
+ALTER TABLE public.stages    ADD COLUMN IF NOT EXISTS hourly_rate numeric DEFAULT 0;    -- תעריף שעתי קבוע למרכז עבודה (שלב)
+```
+
+> ⚠️ **אבטחה:** העמודה `password_plain` שומרת את סיסמת העובד כטקסט גלוי כדי לאפשר
+> למנהל לצפות בה. סיסמאות שנוצרו לפני העדכון מאוחסנות בהצפנה (hash) בלבד ולא ניתן
+> לשחזרן — יש לאפס אותן דרך עריכת המשתמש כדי שיופיעו בכפתור הצפייה.

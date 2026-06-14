@@ -140,6 +140,16 @@ const ROLES={
 };
 const roleLabel=r=>ROLES[r]?`${ROLES[r].icon} ${ROLES[r].label}`:r;
 const isLeadRole=r=>r==="team_lead"||r==="dept_manager";
+// Leads/managers that belong to a given department: members of the dept with a lead role,
+// plus the department's assigned manager. Falls back to all leads when no department chosen.
+function leadsForDept(users,departments,deptId){
+  const allLeads=users.filter(u=>u.active!==false&&isLeadRole(u.role));
+  if(!deptId)return allLeads;
+  const dept=(departments||[]).find(d=>d.id===deptId);
+  const out=allLeads.filter(u=>u.departmentId===deptId);
+  if(dept&&dept.managerId){const mgr=users.find(u=>u.id===dept.managerId&&u.active!==false);if(mgr&&!out.some(o=>o.id===mgr.id))out.push(mgr);}
+  return out;
+}
 
 // ── SHA-256 password hashing ────────────────────────────────────────────────
 async function sha256(str){
@@ -176,14 +186,14 @@ const SB={
 };
 
 // ── DB row converters (DB → App format) ────────────────────────────────────
-const dbToUser=r=>({id:r.id,username:r.username,password_hash:r.password_hash,role:r.role,name:r.name,
+const dbToUser=r=>({id:r.id,username:r.username,password_hash:r.password_hash,passwordPlain:r.password_plain||"",role:r.role,name:r.name,
   projectAccess:r.project_access,stageAccess:r.stage_access,
-  canEdit:r.can_edit,canView:r.can_view,active:r.active,hourlyRate:r.hourly_rate,
+  canEdit:r.can_edit,canView:r.can_view,active:r.active,hourlyRate:r.hourly_rate,saleRate:r.sale_rate||0,
   departmentId:r.department_id||"",managerId:r.manager_id||"",
   companyId:r.company_id||DEFAULT_COMPANY_ID,loginAttempts:r.login_attempts||0,lockedUntil:r.locked_until,lastLogin:r.last_login});
-const userToDb=u=>({id:u.id,username:u.username,password_hash:u.password_hash||u.passwordHash||"",
+const userToDb=u=>({id:u.id,username:u.username,password_hash:u.password_hash||u.passwordHash||"",password_plain:u.passwordPlain||null,
   role:u.role,name:u.name,project_access:u.projectAccess,stage_access:u.stageAccess,
-  can_edit:u.canEdit,can_view:u.canView,active:u.active!==false,hourly_rate:Number(u.hourlyRate||0),
+  can_edit:u.canEdit,can_view:u.canView,active:u.active!==false,hourly_rate:Number(u.hourlyRate||0),sale_rate:Number(u.saleRate||0),
   department_id:u.departmentId||null,manager_id:u.managerId||null,
   company_id:u.companyId||DEFAULT_COMPANY_ID});
 const dbToOrder=r=>({id:r.id,woNumber:r.wo_number,pn:r.pn,description:r.description,qty:r.qty,
@@ -219,8 +229,8 @@ const taskToDb=t=>({id:t.id,user_id:t.userId,user_name:t.userName,name:t.name,
   end_time:t.endTime||null,duration_min:Number(t.durationMin||0),paused:t.paused||false,
   pause_start:t.pauseStart||null,total_pause_min:Number(t.totalPauseMin||0),
   pause_log:t.pauseLog||[],company_id:t.companyId||DEFAULT_COMPANY_ID,updated_at:new Date().toISOString()});
-const dbToStage=r=>({id:r.id,name:r.name,order:r.stage_order,color:r.color,price:r.price});
-const stageToDb=s=>({id:s.id,name:s.name,stage_order:s.order||0,color:s.color||"#3b82f6",price:Number(s.price||0),company_id:s.companyId||DEFAULT_COMPANY_ID});
+const dbToStage=r=>({id:r.id,name:r.name,order:r.stage_order,color:r.color,price:r.price,hourlyRate:r.hourly_rate||0});
+const stageToDb=s=>({id:s.id,name:s.name,stage_order:s.order||0,color:s.color||"#3b82f6",price:Number(s.price||0),hourly_rate:Number(s.hourlyRate||0),company_id:s.companyId||DEFAULT_COMPANY_ID});
 const dbToBlock=r=>({id:r.id,name:r.name,stages:r.stages});
 const blockToDb=b=>({id:b.id,name:b.name,stages:b.stages||[],company_id:b.companyId||DEFAULT_COMPANY_ID});
 const dbToProject=r=>({id:r.id,name:r.name});
@@ -2431,8 +2441,10 @@ function StagesManagement({stages,setStages,stageBlocks,setStageBlocks,persist})
   const [name,setName]=useState("");
   const [color,setColor]=useState("#3b82f6");
   const [price,setPrice]=useState(0);
+  const [hourly,setHourly]=useState(0);
   const [editId,setEditId]=useState(null);
   const [editPrice,setEditPrice]=useState(0);
+  const [editHourly,setEditHourly]=useState(0);
   // Block management
   const [showBlockForm,setShowBlockForm]=useState(false);
   const [blockName,setBlockName]=useState("");
@@ -2442,12 +2454,12 @@ function StagesManagement({stages,setStages,stageBlocks,setStageBlocks,persist})
   const add=()=>{
     if(!name.trim())return;
     const maxOrder=stages.reduce((m,s)=>Math.max(m,s.order||0),0);
-    const ns=[...stages,{id:uid(),name:name.trim(),order:maxOrder+1,color,price:Number(price)||0}];
-    setStages(ns);persist(null,null,ns);setName("");setPrice(0);setShowForm(false);
+    const ns=[...stages,{id:uid(),name:name.trim(),order:maxOrder+1,color,price:Number(price)||0,hourlyRate:Number(hourly)||0}];
+    setStages(ns);persist(null,null,ns);setName("");setPrice(0);setHourly(0);setShowForm(false);
   };
   const del=id=>{if(!confirm("למחוק?"))return;const ns=stages.filter(s=>s.id!==id);setStages(ns);persist(null,null,ns)};
   const move=(id,dir)=>{const idx=stages.findIndex(s=>s.id===id);if((dir===-1&&idx===0)||(dir===1&&idx===stages.length-1))return;const arr=[...stages];[arr[idx],arr[idx+dir]]=[arr[idx+dir],arr[idx]];arr.forEach((s,i)=>s.order=i+1);setStages(arr);persist(null,null,arr)};
-  const savePrice=(id)=>{const ns=stages.map(s=>s.id===id?{...s,price:Number(editPrice)||0}:s);setStages(ns);persist(null,null,ns);setEditId(null)};
+  const savePrice=(id)=>{const ns=stages.map(s=>s.id===id?{...s,price:Number(editPrice)||0,hourlyRate:Number(editHourly)||0}:s);setStages(ns);persist(null,null,ns);setEditId(null)};
 
   // Block functions
   const addBlock=()=>{
@@ -2461,8 +2473,10 @@ function StagesManagement({stages,setStages,stageBlocks,setStageBlocks,persist})
   const addStageToBlock=stageId=>{
     const st=stages.find(s=>s.id===stageId);if(!st)return;
     if(blockStages.some(bs=>bs.sourceId===stageId))return;
-    setBlockStages(p=>[...p,{sourceId:stageId,name:st.name,color:st.color,price:st.price||0}]);
+    setBlockStages(p=>[...p,{sourceId:stageId,name:st.name,color:st.color,hourlyRate:Number(st.hourlyRate||0),minutes:0,price:0}]);
   };
+  // Setting time per stage derives the total price from the work-center hourly rate.
+  const updateBlockStageMinutes=(idx,mins)=>{setBlockStages(p=>p.map((bs,i)=>i===idx?{...bs,minutes:Number(mins)||0,price:Math.round((Number(bs.hourlyRate||0)*(Number(mins)||0)/60))}:bs))};
   const updateBlockStagePrice=(idx,pr)=>{setBlockStages(p=>p.map((bs,i)=>i===idx?{...bs,price:Number(pr)||0}:bs))};
   const removeFromBlock=idx=>{setBlockStages(p=>p.filter((_,i)=>i!==idx))};
 
@@ -2479,26 +2493,36 @@ function StagesManagement({stages,setStages,stageBlocks,setStageBlocks,persist})
         {showBlockForm&&(
           <div style={{background:"var(--c-deep)",borderRadius:10,padding:14,marginBottom:12,border:"1px solid #8b5cf633"}}>
             <Field label="שם הבלוק *" value={blockName} onChange={setBlockName} style={{marginBottom:10,maxWidth:300}}/>
-            <div style={{fontSize:12,color:"var(--c-dim)",fontWeight:600,marginBottom:6}}>בחר שלבים והגדר תמחור לכל שלב:</div>
+            <div style={{fontSize:12,color:"var(--c-dim)",fontWeight:600,marginBottom:6}}>בחר שלבים והזן זמן (דקות) לכל שלב — המחיר מחושב לפי תעריף שעתי של השלב:</div>
             <div style={{display:"flex",flexWrap:"wrap",gap:6,marginBottom:10}}>
               {stages.sort((a,b)=>a.order-b.order).map(st=>{
                 const inBlock=blockStages.some(bs=>bs.sourceId===st.id);
-                return(<button key={st.id} onClick={()=>!inBlock&&addStageToBlock(st.id)} style={{background:inBlock?st.color+"22":"var(--c-card)",border:`1px solid ${inBlock?st.color:  "var(--c-border)"}`,borderRadius:8,padding:"5px 10px",fontSize:12,color:inBlock?st.color:"var(--c-muted)",cursor:inBlock?"default":"pointer",fontFamily:"inherit",opacity:inBlock?.6:1}}>{inBlock?"✓ ":""}{st.name}</button>);
+                return(<button key={st.id} onClick={()=>!inBlock&&addStageToBlock(st.id)} style={{background:inBlock?st.color+"22":"var(--c-card)",border:`1px solid ${inBlock?st.color:  "var(--c-border)"}`,borderRadius:8,padding:"5px 10px",fontSize:12,color:inBlock?st.color:"var(--c-muted)",cursor:inBlock?"default":"pointer",fontFamily:"inherit",opacity:inBlock?.6:1}}>{inBlock?"✓ ":""}{st.name}{st.hourlyRate>0?` (₪${st.hourlyRate}/שע')`:""}</button>);
               })}
             </div>
             {blockStages.length>0&&(
               <div style={{display:"flex",flexDirection:"column",gap:6,marginBottom:10}}>
                 {blockStages.map((bs,i)=>(
-                  <div key={i} style={{display:"flex",alignItems:"center",gap:8,background:"var(--c-card)",borderRadius:8,padding:"6px 10px",border:`1px solid ${bs.color}33`}}>
+                  <div key={i} style={{display:"flex",alignItems:"center",gap:8,background:"var(--c-card)",borderRadius:8,padding:"6px 10px",border:`1px solid ${bs.color}33`,flexWrap:"wrap"}}>
                     <span style={{fontWeight:700,color:bs.color,minWidth:20}}>{i+1}</span>
-                    <span style={{fontWeight:600,flex:1}}>{bs.name}</span>
+                    <span style={{fontWeight:600,flex:1,minWidth:90}}>{bs.name}</span>
+                    <span style={{fontSize:11,color:"var(--c-dim)"}}>{bs.hourlyRate>0?`₪${bs.hourlyRate}/שע'`:"ללא תעריף"}</span>
                     <div style={{display:"flex",alignItems:"center",gap:4}}>
-                      <input type="number" value={bs.price} onChange={e=>updateBlockStagePrice(i,e.target.value)} style={{width:70,padding:"3px 6px",fontSize:12}} placeholder="₪"/>
-                      <span style={{fontSize:11,color:"var(--c-dim)"}}>₪</span>
+                      <input type="number" min="0" value={bs.minutes} onChange={e=>updateBlockStageMinutes(i,e.target.value)} style={{width:64,padding:"3px 6px",fontSize:12}} placeholder="דק'"/>
+                      <span style={{fontSize:11,color:"var(--c-dim)"}}>דק'</span>
                     </div>
+                    {bs.hourlyRate>0?(
+                      <span style={{fontSize:12,fontWeight:700,color:"#10b981",minWidth:54,textAlign:"left"}}>₪{bs.price}</span>
+                    ):(
+                      <div style={{display:"flex",alignItems:"center",gap:4}}><input type="number" value={bs.price} onChange={e=>updateBlockStagePrice(i,e.target.value)} style={{width:64,padding:"3px 6px",fontSize:12}} placeholder="₪"/><span style={{fontSize:11,color:"var(--c-dim)"}}>₪</span></div>
+                    )}
                     <IBtn onClick={()=>removeFromBlock(i)}>✕</IBtn>
                   </div>
                 ))}
+                <div style={{display:"flex",justifyContent:"flex-end",gap:14,fontSize:12,fontWeight:700,padding:"2px 10px"}}>
+                  <span style={{color:"var(--c-dim)"}}>סה"כ זמן: {blockStages.reduce((s,bs)=>s+(bs.minutes||0),0)} דק'</span>
+                  <span style={{color:"#10b981"}}>מחיר כולל: ₪{blockStages.reduce((s,bs)=>s+(bs.price||0),0)}</span>
+                </div>
               </div>
             )}
             <div style={{display:"flex",gap:8}}>
@@ -2515,13 +2539,14 @@ function StagesManagement({stages,setStages,stageBlocks,setStageBlocks,persist})
                   <span style={{fontWeight:700,fontSize:14}}>{b.name}</span>
                   <div style={{display:"flex",gap:4,alignItems:"center"}}>
                     <span style={{fontSize:11,color:"var(--c-dim)"}}>{b.stages.length} שלבים</span>
+                    {b.stages.reduce((s,st)=>s+(st.minutes||0),0)>0&&<span style={{fontSize:11,color:"var(--c-dim)"}}>{b.stages.reduce((s,st)=>s+(st.minutes||0),0)} דק'</span>}
                     <span style={{fontSize:11,color:"#a78bfa"}}>סה"כ: ₪{b.stages.reduce((s,st)=>s+(st.price||0),0)}</span>
                     <IBtn onClick={()=>delBlock(b.id)}>🗑️</IBtn>
                   </div>
                 </div>
                 <div style={{display:"flex",flexWrap:"wrap",gap:4}}>
                   {b.stages.sort((a,b2)=>a.order-b2.order).map((st,i)=>(
-                    <span key={i} style={{fontSize:11,background:st.color+"22",color:st.color,padding:"3px 8px",borderRadius:6,border:`1px solid ${st.color}33`}}>{st.name}{st.price?` ₪${st.price}`:""}</span>
+                    <span key={i} style={{fontSize:11,background:st.color+"22",color:st.color,padding:"3px 8px",borderRadius:6,border:`1px solid ${st.color}33`}}>{st.name}{st.minutes?` ${st.minutes}ד'`:""}{st.price?` ₪${st.price}`:""}</span>
                   ))}
                 </div>
               </div>
@@ -2540,6 +2565,7 @@ function StagesManagement({stages,setStages,stageBlocks,setStageBlocks,persist})
           <div style={{display:"flex",gap:10,alignItems:"flex-end",marginBottom:12,flexWrap:"wrap"}}>
             <Field label="שם" value={name} onChange={setName} style={{flex:1,minWidth:140}}/>
             <Field label="₪ ליחידה" type="number" value={price} onChange={setPrice} style={{minWidth:80}}/>
+            <Field label="תעריף ₪/שעה" type="number" value={hourly} onChange={setHourly} style={{minWidth:90}}/>
             <div style={{display:"flex",flexDirection:"column",gap:4}}><label style={{fontSize:11,color:"var(--c-dim)",fontWeight:600}}>צבע</label><input type="color" value={color} onChange={e=>setColor(e.target.value)} style={{width:36,height:34,padding:2,border:"1px solid var(--c-border)",borderRadius:6}}/></div>
             <Btn color="#10b981" onClick={add} small>הוסף</Btn>
             <Btn onClick={()=>setShowForm(false)} small>ביטול</Btn>
@@ -2552,8 +2578,8 @@ function StagesManagement({stages,setStages,stageBlocks,setStageBlocks,persist})
                 <span style={{fontSize:16,fontWeight:800,color:s.color,minWidth:24}}>{i+1}</span>
                 <div style={{width:10,height:10,borderRadius:3,background:s.color}}/>
                 <span style={{fontWeight:600}}>{s.name}</span>
-                {editId===s.id?(<div style={{display:"flex",gap:4,alignItems:"center"}}><input type="number" value={editPrice} onChange={e=>setEditPrice(e.target.value)} style={{width:70,padding:"3px 6px",fontSize:12}}/><span style={{fontSize:11,color:"var(--c-dim)"}}>₪</span><IBtn onClick={()=>savePrice(s.id)}>✅</IBtn><IBtn onClick={()=>setEditId(null)}>✕</IBtn></div>):(
-                  <span style={{fontSize:11,color:s.price?"#a78bfa":"var(--c-dim)",cursor:"pointer",padding:"2px 6px",borderRadius:6,background:"var(--c-deep)"}} onClick={()=>{setEditId(s.id);setEditPrice(s.price||0)}}>{s.price?`₪${s.price}`:"+₪"}</span>
+                {editId===s.id?(<div style={{display:"flex",gap:4,alignItems:"center",flexWrap:"wrap"}}><input type="number" value={editPrice} onChange={e=>setEditPrice(e.target.value)} style={{width:62,padding:"3px 6px",fontSize:12}} title="₪ ליחידה"/><span style={{fontSize:11,color:"var(--c-dim)"}}>₪/יח'</span><input type="number" value={editHourly} onChange={e=>setEditHourly(e.target.value)} style={{width:62,padding:"3px 6px",fontSize:12}} title="תעריף שעתי"/><span style={{fontSize:11,color:"var(--c-dim)"}}>₪/שע'</span><IBtn onClick={()=>savePrice(s.id)}>✅</IBtn><IBtn onClick={()=>setEditId(null)}>✕</IBtn></div>):(
+                  <span style={{fontSize:11,color:(s.price||s.hourlyRate)?"#a78bfa":"var(--c-dim)",cursor:"pointer",padding:"2px 6px",borderRadius:6,background:"var(--c-deep)"}} onClick={()=>{setEditId(s.id);setEditPrice(s.price||0);setEditHourly(s.hourlyRate||0)}}>{s.price?`₪${s.price}/יח'`:""}{s.hourlyRate?`${s.price?" · ":""}₪${s.hourlyRate}/שע'`:""}{!s.price&&!s.hourlyRate?"+ תמחור":""}</span>
                 )}
               </div>
               <div style={{display:"flex",gap:3}}><IBtn onClick={()=>move(s.id,-1)}>⬆️</IBtn><IBtn onClick={()=>move(s.id,1)}>⬇️</IBtn><IBtn onClick={()=>del(s.id)}>🗑️</IBtn></div>
@@ -2624,7 +2650,9 @@ function AdminPanel({projects,stages,onClose,lightMode,updO,departments,updD}){
   const [auditLog]=useState(getAuditLog());
   const [editUser,setEditUser]=useState(null);
   const [addMode,setAddMode]=useState(false);
-  const [newUser,setNewUser]=useState({username:"",password:"",name:"",role:"worker",projectAccess:"all",stageAccess:"all",canEdit:false,canView:true,active:true,hourlyRate:0,departmentId:"",managerId:""});
+  const [revealPw,setRevealPw]=useState({}); // userId -> bool (show password in list)
+  const [editShowPw,setEditShowPw]=useState(false);
+  const [newUser,setNewUser]=useState({username:"",password:"",name:"",role:"worker",projectAccess:"all",stageAccess:"all",canEdit:false,canView:true,active:true,hourlyRate:0,saleRate:0,departmentId:"",managerId:""});
   // Departments form
   const [deptName,setDeptName]=useState("");
   const [deptColor,setDeptColor]=useState("#3b82f6");
@@ -2658,12 +2686,12 @@ function AdminPanel({projects,stages,onClose,lightMode,updO,departments,updD}){
     const pwErrors=validatePassword(newUser.password);
     if(pwErrors.length>0)return toast("הסיסמה חייבת לכלול: "+pwErrors.join(", "),"warning",5000);
     const hash=await sha256(newUser.password);
-    const u={...newUser,id:uid(),password_hash:hash,password:undefined};
+    const u={...newUser,id:uid(),password_hash:hash,passwordPlain:newUser.password,password:undefined};
     delete u.password;
     const updated=[...users,u];
     saveUsers(updated);setUsersLocal(updated);
     addAuditEntry({userId:currentUser.id,username:currentUser.username,name:currentUser.name,action:"הוספת משתמש",target:newUser.username,details:newUser.name});
-    setNewUser({username:"",password:"",name:"",role:"worker",projectAccess:"all",stageAccess:"all",canEdit:false,canView:true,active:true,hourlyRate:0,departmentId:"",managerId:""});
+    setNewUser({username:"",password:"",name:"",role:"worker",projectAccess:"all",stageAccess:"all",canEdit:false,canView:true,active:true,hourlyRate:0,saleRate:0,departmentId:"",managerId:""});
     setAddMode(false);
   };
   const saveUser=async()=>{
@@ -2672,6 +2700,7 @@ function AdminPanel({projects,stages,onClose,lightMode,updO,departments,updD}){
     // If password field was changed (not empty and not a hash), re-hash it
     if(u.password&&u.password.length<60){
       u.password_hash=await sha256(u.password);
+      u.passwordPlain=u.password;
       delete u.password;
     }
     const updated=users.map(usr=>usr.id===u.id?u:usr);
@@ -2722,7 +2751,7 @@ function AdminPanel({projects,stages,onClose,lightMode,updO,departments,updD}){
                 <div style={{background:lm?"#f7f8fa":"#0d1120",borderRadius:10,padding:16,marginBottom:12,border:`1px solid ${border}`}}>
                   <div style={{fontWeight:700,marginBottom:10,color:text}}>משתמש חדש</div>
                   <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(150px,1fr))",gap:10,marginBottom:10}}>
-                    {[["שם מלא","name","text"],["שם משתמש","username","text"],["סיסמה","password","password"],["תעריף שעתי ₪","hourlyRate","number"]].map(([l,k,t])=>(
+                    {[["שם מלא","name","text"],["שם משתמש","username","text"],["סיסמה","password","password"],["תעריף עלות ₪/שעה","hourlyRate","number"],["תעריף מכירה ₪/שעה","saleRate","number"]].map(([l,k,t])=>(
                       <div key={k}><label style={{fontSize:11,color:muted,display:"block",marginBottom:3}}>{l}</label><input style={inp} type={t} value={newUser[k]||""} onChange={e=>setNewUser(p=>({...p,[k]:t==="number"?Number(e.target.value):e.target.value}))}/></div>
                     ))}
                     <div><label style={{fontSize:11,color:muted,display:"block",marginBottom:3}}>תפקיד</label>
@@ -2731,7 +2760,7 @@ function AdminPanel({projects,stages,onClose,lightMode,updO,departments,updD}){
                       </select>
                     </div>
                     <div><label style={{fontSize:11,color:muted,display:"block",marginBottom:3}}>מחלקה</label>
-                      <select style={inp} value={newUser.departmentId||""} onChange={e=>setNewUser(p=>({...p,departmentId:e.target.value}))}>
+                      <select style={inp} value={newUser.departmentId||""} onChange={e=>setNewUser(p=>({...p,departmentId:e.target.value,managerId:""}))}>
                         <option value="">— ללא מחלקה —</option>
                         {(departments||[]).map(d=><option key={d.id} value={d.id}>{d.name}</option>)}
                       </select>
@@ -2739,8 +2768,9 @@ function AdminPanel({projects,stages,onClose,lightMode,updO,departments,updD}){
                     <div><label style={{fontSize:11,color:muted,display:"block",marginBottom:3}}>מנהל ישיר (ראש צוות)</label>
                       <select style={inp} value={newUser.managerId||""} onChange={e=>setNewUser(p=>({...p,managerId:e.target.value}))}>
                         <option value="">— ללא —</option>
-                        {users.filter(u=>u.active!==false&&isLeadRole(u.role)).map(u=><option key={u.id} value={u.id}>{ROLES[u.role]?.icon} {u.name}</option>)}
+                        {leadsForDept(users,departments,newUser.departmentId).map(u=><option key={u.id} value={u.id}>{ROLES[u.role]?.icon} {u.name}</option>)}
                       </select>
+                      {newUser.departmentId&&leadsForDept(users,departments,newUser.departmentId).length===0&&<div style={{fontSize:10,color:"#f59e0b",marginTop:3}}>אין מנהלים/ראשי צוות במחלקה זו</div>}
                     </div>
                   </div>
                   {isLeadRole(newUser.role)&&<div style={{background:"#a78bfa15",border:"1px solid #a78bfa33",borderRadius:8,padding:"8px 12px",fontSize:12,color:"#a78bfa",marginBottom:10}}>⭐ משתמש זה יוכל לראות את כל העובדים שישויכו אליו, להקצות להם משימות ולעקוב אחרי הביצועים שלהם</div>}
@@ -2788,13 +2818,17 @@ function AdminPanel({projects,stages,onClose,lightMode,updO,departments,updD}){
                         <span style={{color:ROLES[u.role]?.color||muted,fontWeight:600}}>{roleLabel(u.role)}</span>
                         {u.departmentId&&(departments||[]).find(d=>d.id===u.departmentId)&&<span style={{color:(departments||[]).find(d=>d.id===u.departmentId)?.color}}>🏢 {(departments||[]).find(d=>d.id===u.departmentId)?.name}</span>}
                         {u.managerId&&users.find(m=>m.id===u.managerId)&&<span>⭐ תחת: {users.find(m=>m.id===u.managerId)?.name}</span>}
-                        {u.hourlyRate>0&&<span>💰 {fmtMoney(u.hourlyRate)}/שעה</span>}
+                        {u.hourlyRate>0&&<span title="עלות (שכר)">💰 עלות {fmtMoney(u.hourlyRate)}/שע'</span>}
+                        {u.saleRate>0&&<span title="מחיר מכירה" style={{color:"#10b981"}}>🏷️ מכירה {fmtMoney(u.saleRate)}/שע'</span>}
+                        <span style={{display:"inline-flex",alignItems:"center",gap:4}}>🔑 {revealPw[u.id]?(u.passwordPlain?<b style={{color:"#f59e0b",fontFamily:"monospace"}}>{u.passwordPlain}</b>:<span style={{color:"#ef4444"}}>לא זמין — אפס סיסמה</span>):"••••••"}
+                          <button onClick={()=>setRevealPw(p=>({...p,[u.id]:!p[u.id]}))} title={revealPw[u.id]?"הסתר סיסמה":"הצג סיסמה"} style={{background:"none",border:"none",cursor:"pointer",fontSize:13,padding:0,lineHeight:1}}>{revealPw[u.id]?"🙈":"👁️"}</button>
+                        </span>
                         <span>פרויקטים: {u.projectAccess==="all"?"הכל":Array.isArray(u.projectAccess)?u.projectAccess.length:"1"}</span>
                         <span>שלבים: {u.stageAccess==="all"?"הכל":Array.isArray(u.stageAccess)?u.stageAccess.length:"1"}</span>
                       </div>
                     </div>
                     <div style={{display:"flex",gap:4}}>
-                      <IBtn onClick={()=>setEditUser({...u})} title="ערוך">✏️</IBtn>
+                      <IBtn onClick={()=>{setEditUser({...u});setEditShowPw(false)}} title="ערוך">✏️</IBtn>
                       {u.role!=="admin"&&<IBtn onClick={()=>toggleActive(u.id)} title={u.active!==false?"השבת":"הפעל"}>{u.active!==false?"🚫":"✅"}</IBtn>}
                       {u.role!=="admin"&&u.id!==currentUser.id&&<IBtn onClick={()=>deleteUser(u.id)} title="מחק לצמיתות">🗑️</IBtn>}
                     </div>
@@ -2884,16 +2918,23 @@ function AdminPanel({projects,stages,onClose,lightMode,updO,departments,updD}){
           <div onClick={e=>e.stopPropagation()} style={{background:card,borderRadius:16,padding:28,maxWidth:560,width:"100%",border:`1px solid ${border}`,maxHeight:"90vh",overflowY:"auto"}}>
             <div style={{fontWeight:700,fontSize:17,color:"var(--c-accent)",marginBottom:18}}>✏️ עריכת משתמש: {editUser.name}</div>
             <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(150px,1fr))",gap:10,marginBottom:12}}>
-              {[["שם מלא","name","text"],["שם משתמש","username","text"],["סיסמה","password","password"],["תעריף שעתי ₪","hourlyRate","number"]].map(([l,k,t])=>(
+              {[["שם מלא","name","text"],["שם משתמש","username","text"],["תעריף עלות ₪/שעה","hourlyRate","number"],["תעריף מכירה ₪/שעה","saleRate","number"]].map(([l,k,t])=>(
                 <div key={k}><label style={{fontSize:11,color:muted,display:"block",marginBottom:3}}>{l}</label><input style={inp} type={t} value={editUser[k]||""} onChange={e=>setEditUser(p=>({...p,[k]:t==="number"?Number(e.target.value):e.target.value}))}/></div>
               ))}
+              <div><label style={{fontSize:11,color:muted,display:"block",marginBottom:3}}>סיסמה (ריק = ללא שינוי)</label>
+                <div style={{position:"relative"}}>
+                  <input style={inp} type={editShowPw?"text":"password"} value={editUser.password||""} placeholder={editShowPw?(editUser.passwordPlain||"לא זמין"):"••••••"} onChange={e=>setEditUser(p=>({...p,password:e.target.value}))}/>
+                  <button onClick={()=>setEditShowPw(s=>!s)} title={editShowPw?"הסתר":"הצג"} style={{position:"absolute",left:8,top:"50%",transform:"translateY(-50%)",background:"none",border:"none",fontSize:15,cursor:"pointer",lineHeight:1}}>{editShowPw?"🙈":"👁️"}</button>
+                </div>
+                {editShowPw&&<div style={{fontSize:10,color:editUser.passwordPlain?"#f59e0b":"#ef4444",marginTop:3}}>{editUser.passwordPlain?`נוכחית: ${editUser.passwordPlain}`:"הסיסמה הנוכחית לא נשמרה כטקסט — הקלד סיסמה חדשה"}</div>}
+              </div>
               <div><label style={{fontSize:11,color:muted,display:"block",marginBottom:3}}>תפקיד</label>
                 <select style={inp} value={editUser.role} onChange={e=>setEditUser(p=>({...p,role:e.target.value,canEdit:["admin","editor","dept_manager"].includes(e.target.value)}))}>
                   {Object.entries(ROLES).map(([k,r])=><option key={k} value={k}>{r.icon} {r.label}</option>)}
                 </select>
               </div>
               <div><label style={{fontSize:11,color:muted,display:"block",marginBottom:3}}>מחלקה</label>
-                <select style={inp} value={editUser.departmentId||""} onChange={e=>setEditUser(p=>({...p,departmentId:e.target.value}))}>
+                <select style={inp} value={editUser.departmentId||""} onChange={e=>setEditUser(p=>({...p,departmentId:e.target.value,managerId:""}))}>
                   <option value="">— ללא מחלקה —</option>
                   {(departments||[]).map(d=><option key={d.id} value={d.id}>{d.name}</option>)}
                 </select>
@@ -2901,8 +2942,9 @@ function AdminPanel({projects,stages,onClose,lightMode,updO,departments,updD}){
               <div><label style={{fontSize:11,color:muted,display:"block",marginBottom:3}}>מנהל ישיר (ראש צוות)</label>
                 <select style={inp} value={editUser.managerId||""} onChange={e=>setEditUser(p=>({...p,managerId:e.target.value}))}>
                   <option value="">— ללא —</option>
-                  {users.filter(u=>u.active!==false&&isLeadRole(u.role)&&u.id!==editUser.id).map(u=><option key={u.id} value={u.id}>{ROLES[u.role]?.icon} {u.name}</option>)}
+                  {leadsForDept(users,departments,editUser.departmentId).filter(u=>u.id!==editUser.id).map(u=><option key={u.id} value={u.id}>{ROLES[u.role]?.icon} {u.name}</option>)}
                 </select>
+                {editUser.departmentId&&leadsForDept(users,departments,editUser.departmentId).filter(u=>u.id!==editUser.id).length===0&&<div style={{fontSize:10,color:"#f59e0b",marginTop:3}}>אין מנהלים/ראשי צוות במחלקה זו</div>}
               </div>
             </div>
             {/* Project Access */}
@@ -3301,7 +3343,7 @@ const PushNotify={
 // ══════════════════════════════════════════════════════════════════════════
 // ═══ LIVE FACTORY BOARD (מסך מפעל) ════════════════════════════════════
 // ══════════════════════════════════════════════════════════════════════════
-function LiveFactoryBoard({orders,workLogs,stages,customTasks,users,onClose,lightMode}){
+function LiveFactoryBoard({orders,workLogs,stages,customTasks,users,departments,onClose,lightMode}){
   const [now,setNow]=useState(Date.now());
   useEffect(()=>{const t=setInterval(()=>setNow(Date.now()),1000);return()=>clearInterval(t)},[]);
   const lm=lightMode;
@@ -3316,53 +3358,107 @@ function LiveFactoryBoard({orders,workLogs,stages,customTasks,users,onClose,ligh
   const activeWork=workLogs.filter(w=>!w.completed);
   const activeTasks=(customTasks||[]).filter(t=>t.active&&!t.completed);
 
-  // Build unified worker map: work logs + active tasks
-  const workerMap={};
-  activeWork.forEach(w=>{
-    if(!workerMap[w.userId])workerMap[w.userId]={name:w.userName,logs:[],tasks:[],paused:false};
-    workerMap[w.userId].logs.push(w);
-    if(!w.paused)workerMap[w.userId].paused=false; else workerMap[w.userId].paused=true;
-  });
-  activeTasks.forEach(t=>{
-    if(!workerMap[t.userId])workerMap[t.userId]={name:t.userName,logs:[],tasks:[],paused:false};
-    workerMap[t.userId].tasks.push(t);
-    if(t.paused)workerMap[t.userId].paused=true;
-  });
+  // Live activity per user (active logs + active tasks)
+  const liveByUser={};
+  activeWork.forEach(w=>{(liveByUser[w.userId]=liveByUser[w.userId]||{logs:[],tasks:[]}).logs.push(w)});
+  activeTasks.forEach(t=>{(liveByUser[t.userId]=liveByUser[t.userId]||{logs:[],tasks:[]}).tasks.push(t)});
+  const userStatus=uid=>{const lv=liveByUser[uid];if(!lv)return"idle";const anyW=lv.logs.some(l=>!l.paused),anyT=lv.tasks.some(t=>!t.paused);return anyW?"working":anyT?"task":(lv.logs.length||lv.tasks.length)?"break":"idle"};
 
-  // Dedupe bulk logs per worker
-  const workerCards=Object.values(workerMap).map(wk=>{
-    const seen=new Set();const items=[];
-    wk.logs.forEach(w=>{
-      const key=w.bulkGroupId||w.id;if(seen.has(key))return;seen.add(key);
-      const group=w.bulkGroupId?wk.logs.filter(g=>g.bulkGroupId===w.bulkGroupId):[w];
-      items.push({...w,_count:group.length,_sns:group.map(g=>g.serialSn),_type:"work"});
-    });
-    // Determine status: working > task > break
-    const anyWorkActive=wk.logs.some(l=>!l.paused);
-    const anyTaskActive=wk.tasks.some(t=>!t.paused);
-    const status=anyWorkActive?"working":anyTaskActive?"task":wk.logs.length>0||wk.tasks.length>0?"break":"idle";
-    return{name:wk.name,items,tasks:wk.tasks,status};
-  });
+  const isSerDone=(o,s)=>{const st=o.stageIds||[];return st.length>0&&st.every(sid=>workLogs.some(w=>w.serialId===s.id&&w.stageId===sid&&w.completed))};
+  const remainingUnits=o=>Math.max(0,(o.serials||[]).length-(o.serials||[]).filter(sr=>isSerDone(o,sr)).length);
+  const doneUnits=o=>(o.serials||[]).filter(sr=>isSerDone(o,sr)).length;
 
-  const pendingTotal=orders.reduce((s,o)=>{
-    const oSt=o.stageIds||[];
-    return s+(o.serials||[]).filter(sr=>!oSt.every(sid=>workLogs.some(w=>w.serialId===sr.id&&w.stageId===sid&&w.completed))).length;
-  },0);
+  // Cumulative performance for a set of user ids (completed logs + completed tasks)
+  const perfFor=ids=>{
+    const set=new Set(ids);let min=0,cost=0,sale=0,units=0,tasksN=0;
+    workLogs.forEach(w=>{if(!w.completed||!set.has(w.userId))return;const u=users.find(x=>x.id===w.userId);const m=w.durationMin||0;min+=m;cost+=m*Number(u?.hourlyRate||0)/60;sale+=m*Number(u?.saleRate||0)/60;units++});
+    (customTasks||[]).forEach(t=>{if(!t.completed||!set.has(t.userId))return;const u=users.find(x=>x.id===t.userId);const m=t.durationMin||0;min+=m;cost+=m*Number(u?.hourlyRate||0)/60;sale+=m*Number(u?.saleRate||0)/60;tasksN++});
+    return{min,cost,sale,units,tasksN,profit:sale-cost};
+  };
+
+  // Sales overview (feature: expected sales + cost of sales)
+  const forecastSales=orders.reduce((s,o)=>s+remainingUnits(o)*Number(o.unitPrice||0),0);
+  const realizedSales=orders.reduce((s,o)=>s+doneUnits(o)*Number(o.unitPrice||0),0);
+  const allPerf=perfFor(users.map(u=>u.id));
+
+  const pendingTotal=orders.reduce((s,o)=>s+remainingUnits(o),0);
   const doneToday=workLogs.filter(w=>w.completed&&w.endTime&&new Date(w.endTime).toDateString()===new Date().toDateString()).length;
 
   const fmtElapsed=ms=>{const s=Math.floor(ms/1000),m=Math.floor(s/60),h=Math.floor(m/60);return h>0?`${h}:${String(m%60).padStart(2,"0")}:${String(s%60).padStart(2,"0")}`:`${m}:${String(s%60).padStart(2,"0")}`};
-
   const statusLabel={working:"🔄 עובד",task:"📌 במשימה",break:"⏸️ הפסקה",idle:"😴 לא פעיל"};
-  const statusColor={working:"#f59e0b",task:"#a78bfa",break:"#8b95a8",idle:"#5a6478"};
+  const statusBg={working:"#f59e0b",task:"#a78bfa",break:"#8b95a8",idle:lm?"#aeb6c4":"#475569"};
+
+  // Floor population: all active users (system admins excluded from the floor view)
+  const floor=users.filter(u=>u.active!==false&&u.role!=="admin");
+  const liveCount=s=>floor.filter(u=>userStatus(u.id)===s).length;
+
+  // Single employee rectangle
+  const MemberBox=({u})=>{
+    const st=userStatus(u.id);const sc=statusBg[st];const lv=liveByUser[u.id];
+    const lead=isLeadRole(u.role);
+    // dedupe bulk logs
+    const items=[];if(lv){const seen=new Set();lv.logs.forEach(w=>{const k=w.bulkGroupId||w.id;if(seen.has(k))return;seen.add(k);const grp=w.bulkGroupId?lv.logs.filter(g=>g.bulkGroupId===w.bulkGroupId):[w];items.push({...w,_count:grp.length})})}
+    return(
+      <div style={{background:innerBg,borderRadius:10,padding:"9px 11px",border:`2px solid ${sc}`,minWidth:158,flex:"1 1 158px",maxWidth:230,boxShadow:st==="working"||st==="task"?`0 0 0 1px ${sc}55`:"none"}}>
+        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",gap:6}}>
+          <span style={{fontWeight:700,fontSize:13,color:textC,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>{lead?ROLES[u.role]?.icon+" ":""}{u.name}</span>
+          <span style={{width:9,height:9,borderRadius:"50%",background:sc,flexShrink:0,animation:st==="working"||st==="task"?"pulse 2s infinite":"none"}}/>
+        </div>
+        <div style={{fontSize:10,color:sc,fontWeight:600,marginTop:1}}>{statusLabel[st]}</div>
+        {items.map((w,j)=>{const stage=stages.find(s=>s.id===w.stageId);const order=orders.find(o=>o.id===w.orderId);const elapsed=now-new Date(w.startTime).getTime()-(w.totalPauseMin||0)*60000;return(
+          <div key={"w"+j} style={{marginTop:5,fontSize:10,lineHeight:1.3}}>
+            <div style={{color:stage?.color||"#60a5fa",fontWeight:600}}>🔧 {stage?.name||"—"}</div>
+            <div style={{color:dimC,display:"flex",justifyContent:"space-between"}}><span>{order?.woNumber||""}{w._count>1?` ×${w._count}`:w.serialSn?" "+w.serialSn:""}</span><span style={{color:w.paused?mutedC:"#f59e0b",fontVariantNumeric:"tabular-nums",fontWeight:700}}>{w.paused?"⏸️":fmtElapsed(Math.max(0,elapsed))}</span></div>
+          </div>
+        )})}
+        {lv&&lv.tasks.map((t,j)=>{const elapsed=t.startTime?now-new Date(t.startTime).getTime()-(t.totalPauseMin||0)*60000:0;return(
+          <div key={"t"+j} style={{marginTop:5,fontSize:10,lineHeight:1.3}}>
+            <div style={{color:"#a78bfa",fontWeight:600}}>📌 {t.name}</div>
+            <div style={{textAlign:"left",color:t.paused?mutedC:"#a78bfa",fontVariantNumeric:"tabular-nums",fontWeight:700}}>{t.paused?"⏸️":fmtElapsed(Math.max(0,elapsed))}</div>
+          </div>
+        )})}
+        {st==="idle"&&<div style={{marginTop:5,fontSize:10,color:dimC}}>אין פעילות כרגע</div>}
+      </div>
+    );
+  };
+
+  // Render a hierarchy of members within a container: group by direct lead
+  const Hierarchy=({members})=>{
+    const leads=members.filter(m=>isLeadRole(m.role));
+    const leadIds=new Set(leads.map(l=>l.id));
+    const grouped=leads.map(l=>({lead:l,reports:members.filter(m=>m.managerId===l.id&&m.id!==l.id)}));
+    const orphans=members.filter(m=>!isLeadRole(m.role)&&(!m.managerId||!leadIds.has(m.managerId)));
+    return(
+      <div style={{display:"flex",flexDirection:"column",gap:10}}>
+        {grouped.map(({lead,reports})=>(
+          <div key={lead.id} style={{borderRight:`3px solid ${statusBg[userStatus(lead.id)]}`,paddingRight:10}}>
+            <div style={{display:"flex",flexWrap:"wrap",gap:8,marginBottom:reports.length?6:0}}><MemberBox u={lead}/></div>
+            {reports.length>0&&<div style={{display:"flex",flexWrap:"wrap",gap:8,marginRight:14}}>{reports.map(r=><MemberBox key={r.id} u={r}/>)}</div>}
+          </div>
+        ))}
+        {orphans.length>0&&(
+          <div>
+            {grouped.length>0&&<div style={{fontSize:11,color:dimC,marginBottom:5}}>ללא ראש צוות ישיר</div>}
+            <div style={{display:"flex",flexWrap:"wrap",gap:8}}>{orphans.map(r=><MemberBox key={r.id} u={r}/>)}</div>
+          </div>
+        )}
+      </div>
+    );
+  };
+
+  const Metric=({label,value,color})=>(<div style={{textAlign:"center",minWidth:64}}><div style={{fontSize:15,fontWeight:800,color:color||textC}}>{value}</div><div style={{fontSize:10,color:dimC}}>{label}</div></div>);
+
+  const deptList=(departments||[]);
+  const unassigned=floor.filter(u=>!u.departmentId||!deptList.some(d=>d.id===u.departmentId));
 
   return(
     <div style={{position:"fixed",inset:0,background:bg,zIndex:500,overflow:"auto",padding:20}}>
       {/* Header */}
-      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:20}}>
+      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:18}}>
         <div style={{display:"flex",alignItems:"center",gap:12}}>
           <div style={{fontSize:32}}>⚙️</div>
           <div>
-            <div style={{fontWeight:800,fontSize:22,color:"#60a5fa",letterSpacing:-.5}}>מצב רצפת ייצור</div>
+            <div style={{fontWeight:800,fontSize:22,color:"#60a5fa",letterSpacing:-.5}}>מצב רצפת ייצור — מפעל חי</div>
             <div style={{fontSize:13,color:dimC}}>{new Date().toLocaleString("he-IL",{weekday:"long",day:"numeric",month:"long",hour:"2-digit",minute:"2-digit"})}</div>
           </div>
         </div>
@@ -3370,75 +3466,84 @@ function LiveFactoryBoard({orders,workLogs,stages,customTasks,users,onClose,ligh
       </div>
 
       {/* KPI row */}
-      <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(130px,1fr))",gap:10,marginBottom:20}}>
+      <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(120px,1fr))",gap:10,marginBottom:18}}>
         {[
-          {i:"🔄",v:workerCards.filter(w=>w.status==="working").length,l:"עובדים פעילים",c:"#f59e0b"},
-          {i:"📌",v:workerCards.filter(w=>w.status==="task").length,l:"במשימות",c:"#a78bfa"},
-          {i:"⏸️",v:workerCards.filter(w=>w.status==="break").length,l:"בהפסקה",c:"#8b95a8"},
+          {i:"🔄",v:liveCount("working"),l:"עובדים פעילים",c:"#f59e0b"},
+          {i:"📌",v:liveCount("task"),l:"במשימות",c:"#a78bfa"},
+          {i:"⏸️",v:liveCount("break"),l:"בהפסקה",c:"#8b95a8"},
+          {i:"😴",v:liveCount("idle"),l:"לא פעילים",c:mutedC},
           {i:"✅",v:doneToday,l:"הושלמו היום",c:"#10b981"},
           {i:"📋",v:pendingTotal,l:"יחידות ממתינות",c:"#3b82f6"},
-          {i:"📌",v:activeTasks.length,l:"משימות פעילות",c:"#ec4899"},
         ].map((k,i)=>(
-          <div key={i} style={{background:cardBg,borderRadius:12,padding:"14px 16px",border:`1px solid ${k.c}33`,textAlign:"center"}}>
-            <div style={{fontSize:24,marginBottom:4}}>{k.i}</div>
-            <div style={{fontSize:28,fontWeight:800,color:k.c}}>{k.v}</div>
+          <div key={i} style={{background:cardBg,borderRadius:12,padding:"12px 14px",border:`1px solid ${k.c}33`,textAlign:"center"}}>
+            <div style={{fontSize:22,marginBottom:2}}>{k.i}</div>
+            <div style={{fontSize:26,fontWeight:800,color:k.c}}>{k.v}</div>
             <div style={{fontSize:11,color:dimC,marginTop:2}}>{k.l}</div>
           </div>
         ))}
       </div>
 
-      {/* Worker cards */}
-      <div style={{marginBottom:16,fontWeight:700,fontSize:15,color:mutedC,borderBottom:`1px solid ${borderC}`,paddingBottom:8}}>👷 עובדים בזמן אמת</div>
-      {workerCards.length===0&&<EmptyState icon="😴" title="אין עבודה פעילה כרגע" subtitle="העובדים לא רשמו כניסה עדיין"/>}
-      <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(280px,1fr))",gap:12,marginBottom:24}}>
-        {workerCards.map((wk,i)=>{
-          const sc=statusColor[wk.status];
+      {/* Sales overview */}
+      <div style={{marginBottom:10,fontWeight:700,fontSize:15,color:mutedC,borderBottom:`1px solid ${borderC}`,paddingBottom:8}}>💰 מכירות ועלויות</div>
+      <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(170px,1fr))",gap:10,marginBottom:24}}>
+        <div style={{background:cardBg,borderRadius:12,padding:14,border:"1px solid #10b98133"}}>
+          <div style={{fontSize:11,color:dimC,marginBottom:3}}>מכירות צפויות (יח' שנותרו)</div>
+          <div style={{fontSize:22,fontWeight:800,color:"#10b981"}}>{fmtMoney(forecastSales)}</div>
+        </div>
+        <div style={{background:cardBg,borderRadius:12,padding:14,border:"1px solid #3b82f633"}}>
+          <div style={{fontSize:11,color:dimC,marginBottom:3}}>מכירות שמומשו</div>
+          <div style={{fontSize:22,fontWeight:800,color:"#3b82f6"}}>{fmtMoney(realizedSales)}</div>
+        </div>
+        <div style={{background:cardBg,borderRadius:12,padding:14,border:"1px solid #f9731633"}}>
+          <div style={{fontSize:11,color:dimC,marginBottom:3}}>עלות מכירות — לפי שעת עובד אמיתית</div>
+          <div style={{fontSize:22,fontWeight:800,color:"#f97316"}}>{fmtMoney(allPerf.cost)}</div>
+          <div style={{fontSize:10,color:dimC,marginTop:2}}>שכר בפועל · {fmtTime(allPerf.min)}</div>
+        </div>
+        <div style={{background:cardBg,borderRadius:12,padding:14,border:"1px solid #a78bfa33"}}>
+          <div style={{fontSize:11,color:dimC,marginBottom:3}}>עלות מכירות — לפי תמחור עובד</div>
+          <div style={{fontSize:22,fontWeight:800,color:"#a78bfa"}}>{fmtMoney(allPerf.sale)}</div>
+          <div style={{fontSize:10,color:dimC,marginTop:2}}>שווי מכירת עובד</div>
+        </div>
+      </div>
+
+      {/* Department hierarchy + cumulative performance */}
+      <div style={{marginBottom:14,fontWeight:700,fontSize:15,color:mutedC,borderBottom:`1px solid ${borderC}`,paddingBottom:8}}>🏢 מחלקות, היררכיה וביצועים</div>
+      {floor.length===0&&<EmptyState icon="👥" title="אין עובדים פעילים" subtitle="הוסף עובדים בניהול המערכת"/>}
+      <div style={{display:"flex",flexDirection:"column",gap:14,marginBottom:24}}>
+        {deptList.map(d=>{
+          const members=floor.filter(u=>u.departmentId===d.id);
+          if(members.length===0)return null;
+          const perf=perfFor(members.map(m=>m.id));
+          const activeN=members.filter(m=>userStatus(m.id)==="working"||userStatus(m.id)==="task").length;
           return(
-          <div key={i} style={{background:cardBg,borderRadius:14,padding:16,border:`2px solid ${sc}33`}}>
-            <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:12}}>
-              <div style={{fontWeight:700,fontSize:16,color:textC}}>{wk.name}</div>
-              <span style={{fontSize:11,background:sc+"22",color:sc,padding:"3px 10px",borderRadius:20,animation:wk.status==="working"||wk.status==="task"?"pulse 2s infinite":"none"}}>
-                {statusLabel[wk.status]}
-              </span>
+            <div key={d.id} style={{background:cardBg,borderRadius:14,padding:16,border:`1px solid ${d.color}44`}}>
+              <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",flexWrap:"wrap",gap:10,marginBottom:12,borderBottom:`1px solid ${borderC}`,paddingBottom:10}}>
+                <div style={{display:"flex",alignItems:"center",gap:8}}>
+                  <span style={{width:12,height:12,borderRadius:3,background:d.color}}/>
+                  <span style={{fontWeight:800,fontSize:16,color:textC}}>{d.name}</span>
+                  <span style={{fontSize:11,background:d.color+"22",color:d.color,padding:"2px 9px",borderRadius:12,fontWeight:700}}>{activeN}/{members.length} פעילים</span>
+                </div>
+                <div style={{display:"flex",gap:14,flexWrap:"wrap"}}>
+                  <Metric label="יח' שהושלמו" value={perf.units} color="#60a5fa"/>
+                  <Metric label="שעות עבודה" value={fmtTime(perf.min)} color={textC}/>
+                  <Metric label="עלות" value={fmtMoney(perf.cost)} color="#f97316"/>
+                  <Metric label="שווי מכירה" value={fmtMoney(perf.sale)} color="#a78bfa"/>
+                  <Metric label="רווח" value={fmtMoney(perf.profit)} color={perf.profit>=0?"#10b981":"#ef4444"}/>
+                </div>
+              </div>
+              <Hierarchy members={members}/>
             </div>
-            {/* Work log items */}
-            {wk.items.map((w,j)=>{
-              const stage=stages.find(s=>s.id===w.stageId);
-              const elapsed=now-new Date(w.startTime).getTime()-(w.totalPauseMin||0)*60000;
-              const order=orders.find(o=>o.id===w.orderId);
-              return(
-                <div key={`w${j}`} style={{background:innerBg,borderRadius:8,padding:"10px 12px",marginBottom:6,border:`1px solid ${stage?.color||borderC}22`}}>
-                  <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
-                    <div>
-                      <div style={{fontSize:13,fontWeight:600,color:stage?.color||"#60a5fa"}}>{stage?.name||"—"}</div>
-                      <div style={{fontSize:11,color:dimC}}>{order?.woNumber||""} {w._count>1?`× ${w._count} יחידות`:w.serialSn}</div>
-                    </div>
-                    <div style={{fontSize:18,fontWeight:800,color:w.paused?mutedC:"#f59e0b",fontVariantNumeric:"tabular-nums"}}>
-                      {w.paused?"⏸️":fmtElapsed(Math.max(0,elapsed))}
-                    </div>
-                  </div>
-                </div>
-              );
-            })}
-            {/* Active tasks for this worker */}
-            {wk.tasks.map((t,j)=>{
-              const elapsed=t.startTime?now-new Date(t.startTime).getTime()-(t.totalPauseMin||0)*60000:0;
-              return(
-                <div key={`t${j}`} style={{background:innerBg,borderRadius:8,padding:"10px 12px",marginBottom:6,border:"1px solid #a78bfa33"}}>
-                  <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
-                    <div>
-                      <div style={{fontSize:13,fontWeight:600,color:"#a78bfa"}}>📌 {t.name}</div>
-                      {t.description&&<div style={{fontSize:11,color:dimC}}>{t.description}</div>}
-                    </div>
-                    <div style={{fontSize:18,fontWeight:800,color:t.paused?mutedC:"#a78bfa",fontVariantNumeric:"tabular-nums"}}>
-                      {t.paused?"⏸️":fmtElapsed(Math.max(0,elapsed))}
-                    </div>
-                  </div>
-                </div>
-              );
-            })}
+          );
+        })}
+        {unassigned.length>0&&(
+          <div style={{background:cardBg,borderRadius:14,padding:16,border:`1px dashed ${borderC}`}}>
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",flexWrap:"wrap",gap:10,marginBottom:12,borderBottom:`1px solid ${borderC}`,paddingBottom:10}}>
+              <span style={{fontWeight:800,fontSize:16,color:mutedC}}>👤 ללא מחלקה</span>
+              {(()=>{const perf=perfFor(unassigned.map(m=>m.id));return(<div style={{display:"flex",gap:14,flexWrap:"wrap"}}><Metric label="יח'" value={perf.units} color="#60a5fa"/><Metric label="שעות" value={fmtTime(perf.min)} color={textC}/><Metric label="עלות" value={fmtMoney(perf.cost)} color="#f97316"/><Metric label="שווי מכירה" value={fmtMoney(perf.sale)} color="#a78bfa"/></div>)})()}
+            </div>
+            <Hierarchy members={unassigned}/>
           </div>
-        )})}
+        )}
       </div>
     </div>
   );
@@ -4271,7 +4376,7 @@ function App(){
       {showInstall&&<InstallBanner onInstall={handleInstall} onDismiss={()=>setShowInstall(false)} lm={lm}/>}
       {showAdmin&&isAdmin&&<AdminPanel projects={projects} stages={stages} onClose={()=>setShowAdmin(false)} lightMode={lightMode} updO={updO} departments={departments} updD={updD}/>}
       {showAlerts&&<AlertsPanel orders={filteredOrders} stages={stages} workLogs={filteredWorkLogs} users={getUsers()} onClose={()=>setShowAlerts(false)} dismissedAlerts={dismissedAlerts} onDismissAll={ids=>setDismissedAlerts(prev=>[...new Set([...prev,...ids])])}/>}
-      {showLiveBoard&&isAdmin&&(canUseFeature("live_board")?<LiveFactoryBoard orders={filteredOrders} workLogs={filteredWorkLogs} stages={stages} customTasks={customTasks} users={getUsers()} onClose={()=>setShowLiveBoard(false)} lightMode={lightMode}/>:<Modal onClose={()=>setShowLiveBoard(false)}><UpgradePrompt feature="לוח חי"/></Modal>)}
+      {showLiveBoard&&isAdmin&&(canUseFeature("live_board")?<LiveFactoryBoard orders={filteredOrders} workLogs={filteredWorkLogs} stages={stages} customTasks={customTasks} users={getUsers()} departments={departments} onClose={()=>setShowLiveBoard(false)} lightMode={lightMode}/>:<Modal onClose={()=>setShowLiveBoard(false)}><UpgradePrompt feature="לוח חי"/></Modal>)}
       {showReport&&isAdmin&&(canUseFeature("pdf_reports")?<MonthlyReportModal orders={filteredOrders} workLogs={filteredWorkLogs} stages={stages} projects={filteredProjects} users={getUsers()} onClose={()=>setShowReport(false)}/>:<Modal onClose={()=>setShowReport(false)}><UpgradePrompt feature="דוחות PDF"/></Modal>)}
       {showHistory&&isAdmin&&<HistoryPanel orders={filteredOrders} updO={updO} onClose={()=>setShowHistory(false)} workLogs={filteredWorkLogs} onDeleteLog={handleDeleteLog} onUndoWorkLog={handleUndoWorkLog} customTasks={customTasks} onDeleteTask={handleDeleteTask}/>}
     </AuthCtx.Provider>
