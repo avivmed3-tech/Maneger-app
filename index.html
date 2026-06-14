@@ -92,6 +92,19 @@ button{font-family:inherit;cursor:pointer}
 @keyframes pulse{0%,100%{opacity:1}50%{opacity:.5}}
 @keyframes fadeIn{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:none}}
 .fade-in{animation:fadeIn .3s ease-out}
+/* ── Factory org-chart diagram ─────────────────────────────────────────── */
+.fd-tree{display:flex;flex-direction:column;align-items:center;width:100%}
+.fd-trunk{width:2px;height:26px;background:var(--c-border2)}
+.fd-rail-outer{display:flex;justify-content:center;width:100%;max-width:100%}
+.fd-rail{position:relative;display:flex;justify-content:center;flex-wrap:wrap;gap:18px;padding-top:26px}
+.fd-rail::before{content:"";position:absolute;top:0;left:32px;right:32px;height:2px;background:var(--c-border2)}
+.fd-rail.fd-single::before{display:none}
+.fd-node{position:relative;display:flex;flex-direction:column;align-items:center}
+.fd-node::before{content:"";position:absolute;top:-26px;left:50%;transform:translateX(-50%);width:2px;height:26px;background:var(--c-border2)}
+.fd-box{cursor:pointer;font-family:inherit;text-align:right;padding:0;transition:transform .15s ease,box-shadow .2s ease,border-color .2s ease}
+.fd-box:hover{transform:translateY(-3px);box-shadow:var(--shadow-md)}
+.fd-box:active{transform:translateY(-1px)}
+@media(max-width:600px){.fd-rail{gap:12px}.fd-rail::before{left:18px;right:18px}}
 @keyframes shimmer{0%{background-position:200% 0}100%{background-position:-200% 0}}
 .skel{background:linear-gradient(90deg,var(--c-border) 25%,var(--c-border2) 50%,var(--c-border) 75%);background-size:200% 100%;animation:shimmer 1.5s ease-in-out infinite;border-radius:8px}
 @keyframes toastIn{from{opacity:0;transform:translateY(-12px) scale(.95)}to{opacity:1;transform:none}}
@@ -865,6 +878,225 @@ function OrgStructure({users,departments,workLogs,customTasks}){
 }
 
 // ══════════════════════════════════════════════════════════════════════════
+// ═══ FACTORY DIAGRAM (תרשים המפעל — מבנה מלבנים + זום-אין למחלקה) ═════════
+// ══════════════════════════════════════════════════════════════════════════
+const HEB_MONTHS=["","ינואר","פברואר","מרץ","אפריל","מאי","יוני","יולי","אוגוסט","ספטמבר","אוקטובר","נובמבר","דצמבר"];
+const fmtMonthLabel=m=>{if(!m||m==="all")return"כל הזמן";const[y,mo]=m.split("-");return`${HEB_MONTHS[Number(mo)]||mo} ${y}`};
+
+function FactoryDiagram({orders,stages,users,workLogs,departments,customTasks}){
+  const [selMonth,setSelMonth]=useState("all");
+  const [openDept,setOpenDept]=useState(null); // department id | "__none__" | null
+
+  const months=useMemo(()=>[...new Set(workLogs.filter(w=>w.completed&&w.endTime).map(w=>mkKey(w.endTime)).filter(Boolean))].sort().reverse(),[workLogs]);
+  const stageMap=useMemo(()=>Object.fromEntries(stages.map(s=>[s.id,s])),[stages]);
+  const userMap=useMemo(()=>Object.fromEntries(users.map(u=>[u.id,u])),[users]);
+
+  // Live status (in-progress work / tasks) — same logic as the org structure
+  const activeLogs=workLogs.filter(w=>!w.completed);
+  const activeTasks=(customTasks||[]).filter(t=>t.active&&!t.completed);
+  const statusOf=u=>{
+    const logs=activeLogs.filter(w=>w.userId===u.id);
+    const tasks=activeTasks.filter(t=>t.userId===u.id);
+    if(logs.some(l=>!l.paused)||tasks.some(t=>!t.paused))return{label:"עובד כעת",color:"#10b981",pulse:true};
+    if(logs.length||tasks.length)return{label:"בהפסקה",color:"#f59e0b"};
+    return{label:"לא פעיל",color:"#5a6478"};
+  };
+
+  // Completed logs for the selected month
+  const monthLogs=useMemo(()=>workLogs.filter(w=>w.completed&&w.endTime&&(selMonth==="all"||mkKey(w.endTime)===selMonth)),[workLogs,selMonth]);
+
+  // Aggregate revenue / expenses / output for a set of employees (by month)
+  const aggregate=(memberIds)=>{
+    let ops=0,mins=0,cost=0,rev=0;const serials=new Set();
+    monthLogs.forEach(w=>{
+      if(!memberIds.has(w.userId))return;
+      ops++;mins+=w.durationMin||0;
+      cost+=(w.durationMin||0)*(Number(userMap[w.userId]?.hourlyRate||0)/60);
+      rev+=Number(stageMap[w.stageId]?.price||0);
+      if(w.serialId)serials.add(w.serialId);
+    });
+    return{ops,mins,cost,rev,units:serials.size,profit:rev-cost};
+  };
+  const userStats=uid=>{
+    const logs=monthLogs.filter(w=>w.userId===uid);
+    const mins=logs.reduce((s,w)=>s+(w.durationMin||0),0);
+    return{ops:logs.length,mins,
+      cost:mins*(Number(userMap[uid]?.hourlyRate||0)/60),
+      rev:logs.reduce((s,w)=>s+Number(stageMap[w.stageId]?.price||0),0),
+      units:new Set(logs.map(w=>w.serialId)).size};
+  };
+
+  const staff=users.filter(u=>u.active!==false&&u.role!=="admin"&&u.role!=="viewer");
+  const assigned=new Set(departments.map(d=>d.id));
+  const noDeptMembers=staff.filter(u=>!u.departmentId||!assigned.has(u.departmentId));
+  const membersOf=d=>d.id==="__none__"?noDeptMembers:staff.filter(u=>u.departmentId===d.id);
+
+  const deptData=departments.map(d=>{const members=membersOf(d);return{dept:d,members,...aggregate(new Set(members.map(m=>m.id)))};});
+  if(noDeptMembers.length>0)deptData.push({dept:{id:"__none__",name:"ללא מחלקה",color:"#8b95a8",dashed:true},members:noDeptMembers,...aggregate(new Set(noDeptMembers.map(m=>m.id)))});
+
+  const total=aggregate(new Set(staff.map(s=>s.id)));
+  const activeNowCount=staff.filter(u=>statusOf(u).pulse).length;
+  const single=deptData.length<=1;
+
+  const Mini=({label,val,color})=>(
+    <div style={{background:"var(--c-deep)",borderRadius:8,padding:"6px 4px",textAlign:"center"}}>
+      <div style={{fontSize:13,fontWeight:800,color}}>{val}</div>
+      <div style={{fontSize:9.5,color:"var(--c-dim)",fontWeight:600}}>{label}</div>
+    </div>
+  );
+  const RootStat=({label,val,color})=>(
+    <div style={{textAlign:"center",minWidth:64}}>
+      <div style={{fontSize:16,fontWeight:900,color}}>{val}</div>
+      <div style={{fontSize:10,color:"var(--c-dim)",fontWeight:600}}>{label}</div>
+    </div>
+  );
+
+  const monthSelect=(
+    <select value={selMonth} onChange={e=>setSelMonth(e.target.value)} style={{padding:"5px 8px",fontSize:12,width:"auto"}}>
+      <option value="all">כל הזמן</option>
+      {months.map(m=><option key={m} value={m}>{fmtMonthLabel(m)}</option>)}
+    </select>
+  );
+
+  return(
+    <Card style={{marginBottom:14}}>
+      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",flexWrap:"wrap",gap:8,marginBottom:6}}>
+        <div style={{fontWeight:700,fontSize:15}}>🏭 תרשים המפעל</div>
+        <div style={{display:"flex",alignItems:"center",gap:8}}>
+          <span style={{fontSize:11.5,color:"var(--c-dim)"}}>📅 חודש</span>{monthSelect}
+        </div>
+      </div>
+      <div style={{fontSize:11.5,color:"var(--c-dim)",marginBottom:16}}>מבט-על של כל המפעל. הקש על מחלקה לזום-אין עם נתוני עובדים, הכנסות, הוצאות ותפוקות.</div>
+
+      {departments.length===0&&noDeptMembers.length===0?(
+        <EmptyState icon="🏭" title="אין מחלקות מוגדרות" subtitle="צור מחלקות והקצה עובדים במסך ניהול המערכת כדי לראות את תרשים המפעל"/>
+      ):(
+        <div className="fd-tree">
+          {/* Root — whole factory */}
+          <div style={{width:300,maxWidth:"94%",background:"linear-gradient(135deg,var(--c-accent),var(--c-accent2))",borderRadius:16,padding:"16px 18px",boxShadow:"var(--shadow-md)",textAlign:"center",color:"#fff"}}>
+            <div style={{fontSize:12.5,fontWeight:700,opacity:.9,marginBottom:2}}>🏭 כל המפעל</div>
+            <div style={{fontSize:17,fontWeight:900,marginBottom:10}}>{departments.length} מחלקות · {staff.length} עובדים</div>
+            <div style={{display:"flex",justifyContent:"center",gap:12,flexWrap:"wrap",background:"#ffffff1f",borderRadius:12,padding:"10px 8px"}}>
+              <RootStat label="תפוקה" val={total.units} color="#fff"/>
+              <RootStat label="הכנסות" val={fmtMoney(total.rev)} color="#fff"/>
+              <RootStat label="הוצאות" val={fmtMoney(total.cost)} color="#fff"/>
+              <RootStat label="רווח" val={fmtMoney(total.profit)} color="#fff"/>
+            </div>
+            {activeNowCount>0&&<div style={{marginTop:9,fontSize:11.5,fontWeight:700,display:"flex",alignItems:"center",justifyContent:"center",gap:5}}><span style={{width:7,height:7,borderRadius:"50%",background:"#bbf7d0",animation:"pulse 1.6s infinite"}}/>{activeNowCount} עובדים פעילים כעת</div>}
+          </div>
+
+          <div className="fd-trunk"/>
+          <div className="fd-rail-outer">
+            <div className={"fd-rail"+(single?" fd-single":"")}>
+              {deptData.map(({dept:d,members,units,rev,profit})=>{
+                const activeNow=members.filter(m=>statusOf(m).pulse).length;
+                return(
+                  <div className="fd-node" key={d.id}>
+                    <button className="fd-box" onClick={()=>setOpenDept(d.id)}
+                      style={{width:204,maxWidth:"82vw",background:"var(--c-card)",border:`1px ${d.dashed?"dashed":"solid"} ${d.color}66`,borderRadius:14,overflow:"hidden",boxShadow:"var(--shadow-sm)"}}>
+                      <div style={{height:5,background:d.color}}/>
+                      <div style={{padding:"11px 13px"}}>
+                        <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:8}}>
+                          <span style={{width:11,height:11,borderRadius:3,background:d.color,flexShrink:0}}/>
+                          <span style={{fontWeight:800,fontSize:14,flex:1,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{d.name}</span>
+                        </div>
+                        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",fontSize:11.5,color:"var(--c-muted)",marginBottom:8}}>
+                          <span>👥 {members.length} עובדים</span>
+                          {activeNow>0&&<span style={{color:"#10b981",fontWeight:700,display:"flex",alignItems:"center",gap:4}}><span style={{width:6,height:6,borderRadius:"50%",background:"#10b981",animation:"pulse 1.6s infinite"}}/>{activeNow}</span>}
+                        </div>
+                        <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:5}}>
+                          <Mini label="תפוקה" val={units} color="#60a5fa"/>
+                          <Mini label="הכנסה" val={fmtMoney(rev)} color="#a78bfa"/>
+                          <Mini label="רווח" val={fmtMoney(profit)} color={profit>=0?"#10b981":"#ef4444"}/>
+                        </div>
+                        <div style={{marginTop:9,fontSize:10.5,color:d.color,fontWeight:700,textAlign:"center"}}>הקש לפירוט ›</div>
+                      </div>
+                    </button>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Zoom-in: department detail */}
+      {openDept&&(()=>{
+        const entry=deptData.find(x=>x.dept.id===openDept);
+        if(!entry)return null;
+        const {dept:d,members}=entry;
+        const memberIds=new Set(members.map(m=>m.id));
+        const s=aggregate(memberIds);
+        const mgr=users.find(u=>u.id===d.managerId);
+        const byStage={};
+        monthLogs.forEach(w=>{if(!memberIds.has(w.userId))return;const st=stageMap[w.stageId];if(!st)return;byStage[st.id]=byStage[st.id]||{label:st.name,color:st.color,value:0};byStage[st.id].value++;});
+        const stageData=Object.values(byStage).sort((a,b)=>b.value-a.value);
+        return(
+          <Modal onClose={()=>setOpenDept(null)} wide>
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",gap:10,marginBottom:4,flexWrap:"wrap"}}>
+              <div style={{display:"flex",alignItems:"center",gap:10}}>
+                <span style={{width:14,height:14,borderRadius:4,background:d.color,flexShrink:0}}/>
+                <div>
+                  <div style={{fontSize:19,fontWeight:900}}>{d.name}</div>
+                  <div style={{fontSize:12,color:"var(--c-muted)"}}>{mgr?<>מנהל/ת: <b style={{color:d.color}}>{mgr.name}</b> · </>:null}{members.length} עובדים · {fmtMonthLabel(selMonth)}</div>
+                </div>
+              </div>
+              <div style={{display:"flex",alignItems:"center",gap:8}}>{monthSelect}
+                <button onClick={()=>setOpenDept(null)} style={{background:"var(--c-deep)",border:"1px solid var(--c-border)",borderRadius:8,padding:"5px 11px",fontSize:13,color:"var(--c-muted)",fontFamily:"inherit",cursor:"pointer"}}>✕</button>
+              </div>
+            </div>
+
+            <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(120px,1fr))",gap:8,margin:"14px 0"}}>
+              <KpiBox i="👥" v={members.length} label="עובדים" c="#60a5fa"/>
+              <KpiBox i="📦" v={s.units} label="תפוקה (יחידות)" c="#06b6d4" sub={`${s.ops} פעולות`}/>
+              <KpiBox i="💰" v={fmtMoney(s.rev)} label="הכנסות" c="#a78bfa"/>
+              <KpiBox i="💵" v={fmtMoney(s.cost)} label="הוצאות (עבודה)" c="#f97316"/>
+              <KpiBox i="📈" v={fmtMoney(s.profit)} label="רווח" c={s.profit>=0?"#10b981":"#ef4444"}/>
+              <KpiBox i="⏱️" v={fmtTime(s.mins)} label="שעות עבודה" c="#3b82f6"/>
+            </div>
+
+            {stageData.length>0&&(
+              <Card style={{marginBottom:12}}>
+                <div style={{fontWeight:700,fontSize:13.5,marginBottom:10}}>🔧 תפוקה לפי שלב</div>
+                <HBarChart data={stageData} formatVal={v=>`${v} פעולות`}/>
+              </Card>
+            )}
+
+            <div style={{fontWeight:700,fontSize:13.5,marginBottom:8}}>👥 עובדי המחלקה</div>
+            {members.length===0?(
+              <EmptyState icon="👥" title="אין עובדים במחלקה זו"/>
+            ):(
+              <div style={{display:"flex",flexDirection:"column",gap:7}}>
+                {members.map(u=>{
+                  const st=statusOf(u);const rc=ROLES[u.role]?.color||"#3b82f6";const us=userStats(u.id);
+                  return(
+                    <div key={u.id} style={{display:"flex",alignItems:"center",gap:10,background:"var(--c-deep)",border:"1px solid var(--c-border)",borderRadius:10,padding:"9px 12px",flexWrap:"wrap"}}>
+                      <div style={{width:30,height:30,borderRadius:"50%",background:rc+"22",color:rc,display:"flex",alignItems:"center",justifyContent:"center",fontSize:13,fontWeight:800,flexShrink:0}}>{u.name?.charAt(0)||"?"}</div>
+                      <div style={{flex:"1 1 120px",minWidth:0}}>
+                        <div style={{fontSize:13,fontWeight:700,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>{u.name}</div>
+                        <div style={{fontSize:10.5,color:rc,fontWeight:600}}>{ROLES[u.role]?.label||u.role}</div>
+                      </div>
+                      <div style={{display:"flex",gap:14,fontSize:11.5,color:"var(--c-muted)",flexWrap:"wrap"}}>
+                        <span>📦 <b style={{color:"var(--c-text)"}}>{us.units}</b> יח'</span>
+                        <span>⏱️ <b style={{color:"var(--c-text)"}}>{fmtTime(us.mins)}</b></span>
+                        <span>💰 <b style={{color:"#a78bfa"}}>{fmtMoney(us.rev)}</b></span>
+                      </div>
+                      <span style={{fontSize:10.5,color:st.color,fontWeight:700,display:"flex",alignItems:"center",gap:4,flexShrink:0}}>
+                        <span style={{width:6,height:6,borderRadius:"50%",background:st.color,display:"inline-block",animation:st.pulse?"pulse 1.6s infinite":"none"}}/>{st.label}
+                      </span>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </Modal>
+        );
+      })()}
+    </Card>
+  );
+}
+
+// ══════════════════════════════════════════════════════════════════════════
 // ═══ DASHBOARD ═══════════════════════════════════════════════════════════
 // ══════════════════════════════════════════════════════════════════════════
 function Dashboard({orders,projects,stages,users,workLogs,departments,customTasks}){
@@ -1000,6 +1232,9 @@ function Dashboard({orders,projects,stages,users,workLogs,departments,customTask
         <KpiBox i="⚠️" v={openShortages} label="חוסרים פתוחים" c="#dc2626"/>
       </div>
 
+      {/* Factory diagram — concentrated rectangle view of the whole plant */}
+      <FactoryDiagram orders={orders} stages={stages} users={users} workLogs={workLogs} departments={departments||[]} customTasks={customTasks||[]}/>
+
       {/* Operational insights */}
       {(overdue.length>0)&&(
         <Card style={{marginBottom:12,border:"1px solid #ef444433"}}>
@@ -1013,7 +1248,7 @@ function Dashboard({orders,projects,stages,users,workLogs,departments,customTask
         </Card>
       )}
 
-      {/* Org structure — who reports to whom */}
+      {/* Org structure — who reports to whom (detailed reporting lines) */}
       <OrgStructure users={users} departments={departments||[]} workLogs={workLogs} customTasks={customTasks||[]}/>
 
       {/* Worker Productivity */}
