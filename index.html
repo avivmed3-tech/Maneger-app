@@ -222,6 +222,34 @@ function leadsForDept(users,departments,deptId){
   return out;
 }
 
+// ── Role-based data visibility ──────────────────────────────────────────────
+// admin → everything · dept manager → their department · team lead → their team ·
+// everyone else → only the work defined/waiting for them.
+const userHasProjectAccess=(u,pid)=>{const pa=u?.projectAccess;if(pa==="all")return true;if(Array.isArray(pa))return pa.includes(pid);return pa===pid};
+const userStageIds=(u,allStageIds)=>u?.stageAccess==="all"?allStageIds:(Array.isArray(u?.stageAccess)?u.stageAccess:[]);
+// Is this order part of a user's own defined work (i.e. waiting for them)?
+const orderIsUsersWork=(u,o,allStageIds)=>userHasProjectAccess(u,o.projectId)&&(o.stageIds||[]).some(sid=>userStageIds(u,allStageIds).includes(sid));
+// The user IDs a given user is allowed to oversee (self included for leads/managers).
+// Returns null for admins — meaning no restriction (sees everyone / everything).
+function overseeingUserIds(currentUser,users,departments){
+  if(!currentUser)return [];
+  if(currentUser.role==="admin")return null;
+  const active=(users||[]).filter(u=>u.active!==false);
+  if(currentUser.role==="dept_manager"){
+    const dept=(departments||[]).find(d=>d.id===currentUser.departmentId||d.managerId===currentUser.id);
+    const ids=new Set([currentUser.id]);
+    if(dept)active.forEach(u=>{if(u.departmentId===dept.id)ids.add(u.id)});
+    return [...ids];
+  }
+  if(currentUser.role==="team_lead"){
+    const ids=new Set([currentUser.id]);
+    active.forEach(u=>{if(u.managerId===currentUser.id)ids.add(u.id)});
+    return [...ids];
+  }
+  // every other employee sees only their own work
+  return [currentUser.id];
+}
+
 // ── SHA-256 password hashing ────────────────────────────────────────────────
 async function sha256(str){
   const buf=await crypto.subtle.digest("SHA-256",new TextEncoder().encode(str));
@@ -4442,10 +4470,34 @@ function App(){
   };
 
   const canEdit=currentUser?.role==="admin"||currentUser?.role==="editor"||currentUser?.canEdit===true;
-  const canViewProject=pid=>{if(!currentUser)return false;if(currentUser.role==="admin")return true;const pa=currentUser.projectAccess;if(pa==="all")return true;if(Array.isArray(pa))return pa.includes(pid);return pa===pid};
 
-  const filteredProjects=projects.filter(p=>canViewProject(p.id));
-  const filteredOrders=orders.filter(o=>canViewProject(o.projectId));
+  // ── Role-based data visibility ──────────────────────────────────────────
+  // Only admins, department managers and team leads see beyond their own work.
+  const allUsers=getUsers();
+  const allStageIds=stages.map(s=>s.id);
+  const scopeIds=overseeingUserIds(currentUser,allUsers,departments);
+  const scopeIdSet=scopeIds==null?null:new Set(scopeIds);
+  const scopeUsers=scopeIds==null?allUsers:allUsers.filter(u=>scopeIdSet.has(u.id));
+  // Leads/managers are created with broad personal access, so their own access must
+  // not widen the scope — for them relevance is driven by the people they oversee.
+  // A plain employee's scope is simply their own defined work.
+  const relevanceUsers=isLeadRole(currentUser?.role)?scopeUsers.filter(u=>u.id!==currentUser?.id):scopeUsers;
+  // An order is visible if: the user is an admin, it is defined work for someone the
+  // user oversees (or themselves), or anyone in their scope has logged work on it.
+  const orderVisible=(o)=>{
+    if(currentUser?.role==="admin")return true;
+    if(relevanceUsers.some(u=>orderIsUsersWork(u,o,allStageIds)))return true;
+    if(scopeIdSet&&workLogs.some(w=>w.orderId===o.id&&scopeIdSet.has(w.userId)))return true;
+    return false;
+  };
+  const canViewProject=pid=>{
+    if(!currentUser)return false;
+    if(currentUser.role==="admin")return true;
+    return orders.some(o=>o.projectId===pid&&orderVisible(o));
+  };
+
+  const filteredOrders=orders.filter(orderVisible);
+  const filteredProjects=projects.filter(p=>currentUser?.role==="admin"||filteredOrders.some(o=>o.projectId===p.id));
   const filteredWorkLogs=workLogs;
 
   const updO=useCallback((fn)=>{setOrders(prev=>{const next=typeof fn==="function"?fn(prev):fn;persist(next,null,null,null);return next})},[]);
@@ -4542,8 +4594,9 @@ function App(){
   useEffect(()=>{const h=(e)=>{setCustomTasks(prev=>{const next=prev.filter(t=>t.id!==e.detail);persist(null,null,null,null,next);return next});SB.del("custom_tasks",{id:e.detail}).catch(()=>{})};window.addEventListener("deleteTask",h);return()=>window.removeEventListener("deleteTask",h)},[]);
 
   const isAdmin=currentUser?.role==="admin";
-  const isWorker=currentUser?.role==="worker";
   const isLead=isLeadRole(currentUser?.role);
+  // Every employee who is not an admin or a lead sees only their own work.
+  const isWorker=!isAdmin&&!isLead;
 
   const TABS=isAdmin?[
     {id:"dashboard",label:"📊 דאשבורד"},
@@ -4559,15 +4612,9 @@ function App(){
     {id:"team",label:"👥 הצוות שלי"},
     {id:"mywork",label:"🔨 העבודה שלי"},
     {id:"orders",label:'📋 פק"ע'},
-  ]:isWorker?[
+  ]:[
     {id:"mywork",label:"🔨 העבודה שלי"},
     {id:"orders",label:'📋 פק"ע'},
-  ]:[
-    {id:"dashboard",label:"📊 דאשבורד"},
-    {id:"orders",label:'📋 פק"ע'},
-    {id:"shortages",label:"⚠️ חוסרים"},
-    {id:"mywork",label:"🔨 עבודה"},
-    {id:"projects",label:"🏗️ פרויקטים"},
   ];
 
   // Push notification enable on login for admin
