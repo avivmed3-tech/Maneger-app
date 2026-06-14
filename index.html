@@ -111,9 +111,61 @@ button{font-family:inherit;cursor:pointer}
 @keyframes toastOut{from{opacity:1;transform:none}to{opacity:0;transform:translateY(-12px) scale(.95)}}
 .toast-in{animation:toastIn .25s ease-out forwards}
 .toast-out{animation:toastOut .2s ease-in forwards}
+/* ── App boot splash screen ──────────────────────────────────────────────── */
+#splash{position:fixed;inset:0;z-index:99999;display:flex;flex-direction:column;align-items:center;justify-content:center;background:radial-gradient(125% 90% at 50% -10%,#16203a 0%,#0c1122 45%,#070a14 100%);transition:opacity .55s ease,visibility .55s ease;direction:rtl;font-family:'Heebo','Segoe UI',Tahoma,Arial,sans-serif;overflow:hidden}
+#splash::before{content:"";position:absolute;width:520px;height:520px;border-radius:50%;background:radial-gradient(circle,rgba(59,130,246,.16),transparent 70%);filter:blur(8px);animation:splashGlow 4.5s ease-in-out infinite}
+#splash.hide{opacity:0;visibility:hidden;pointer-events:none}
+.splash-logo-wrap{position:relative;width:104px;height:104px;display:flex;align-items:center;justify-content:center;animation:splashFloat 3.2s ease-in-out infinite}
+.splash-logo-wrap svg{width:88px;height:88px;filter:drop-shadow(0 10px 28px rgba(6,182,212,.4));position:relative;z-index:2}
+.splash-ring{position:absolute;inset:-13px;border-radius:50%;background:conic-gradient(from 0deg,transparent 0 58%,#3b82f6 78%,#06b6d4 92%,transparent 100%);-webkit-mask:radial-gradient(closest-side,transparent calc(100% - 3px),#000 calc(100% - 3px));mask:radial-gradient(closest-side,transparent calc(100% - 3px),#000 calc(100% - 3px));animation:splashSpin 1.15s linear infinite}
+.splash-ring.r2{inset:-13px;opacity:.35;animation:splashSpin 2.6s linear infinite reverse}
+.splash-flow{stroke-dasharray:62;stroke-dashoffset:62;animation:splashDraw 1s ease-out .25s forwards}
+.splash-node{opacity:0;transform-box:fill-box;transform-origin:center;animation:splashNode .35s ease-out forwards}
+.splash-node.n1{animation-delay:.5s}.splash-node.n2{animation-delay:.7s}.splash-node.n3{animation-delay:.9s}
+.splash-title{margin-top:28px;font-size:24px;font-weight:800;letter-spacing:-.02em;background:linear-gradient(90deg,#ffffff,#bcd9ff);-webkit-background-clip:text;background-clip:text;color:transparent;opacity:0;animation:splashUp .6s cubic-bezier(.2,.7,.3,1) .3s forwards}
+.splash-sub{margin-top:8px;font-size:13px;font-weight:500;color:#7e8aa3;opacity:0;animation:splashUp .6s cubic-bezier(.2,.7,.3,1) .45s forwards}
+.splash-bar{margin-top:24px;width:178px;height:3px;border-radius:4px;background:rgba(255,255,255,.07);overflow:hidden;position:relative;opacity:0;animation:splashUp .6s cubic-bezier(.2,.7,.3,1) .6s forwards}
+.splash-bar i{position:absolute;top:0;left:-42%;height:100%;width:42%;border-radius:4px;background:linear-gradient(90deg,#3b82f6,#06b6d4);animation:splashBar 1.35s cubic-bezier(.5,0,.5,1) infinite}
+@keyframes splashSpin{to{transform:rotate(360deg)}}
+@keyframes splashFloat{0%,100%{transform:translateY(0)}50%{transform:translateY(-8px)}}
+@keyframes splashGlow{0%,100%{opacity:.55;transform:scale(1)}50%{opacity:1;transform:scale(1.08)}}
+@keyframes splashUp{from{opacity:0;transform:translateY(11px)}to{opacity:1;transform:none}}
+@keyframes splashBar{0%{left:-42%}55%{left:62%}100%{left:108%}}
+@keyframes splashDraw{to{stroke-dashoffset:0}}
+@keyframes splashNode{from{opacity:0;transform:scale(0)}to{opacity:1;transform:scale(1)}}
+@media(prefers-reduced-motion:reduce){
+  .splash-logo-wrap,#splash::before,.splash-bar i{animation:none!important}
+  .splash-flow{stroke-dashoffset:0!important;animation:none!important}
+  .splash-node,.splash-title,.splash-sub,.splash-bar{opacity:1!important;animation:none!important;transform:none!important}
+  .splash-ring{animation-duration:2s!important}
+}
 </style>
 </head>
 <body>
+<div id="splash" role="status" aria-label="טוען את המערכת">
+  <div class="splash-logo-wrap">
+    <div class="splash-ring"></div>
+    <div class="splash-ring r2"></div>
+    <svg viewBox="0 0 40 40" aria-hidden="true">
+      <defs>
+        <linearGradient id="splashLogoG" x1="0" y1="0" x2="1" y2="1">
+          <stop offset="0" stop-color="#3b82f6"/><stop offset=".55" stop-color="#2da6e0"/><stop offset="1" stop-color="#06b6d4"/>
+        </linearGradient>
+      </defs>
+      <rect x="2" y="2" width="36" height="36" rx="11.5" fill="url(#splashLogoG)"/>
+      <rect x="2" y="2" width="36" height="17" rx="11.5" fill="#fff" opacity=".10"/>
+      <path class="splash-flow" d="M10 27.5 L17 20.5 L23 23.5 L29.5 13.5" fill="none" stroke="#fff" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/>
+      <path class="splash-flow" d="M24.8 13.5 H29.5 V18.2" fill="none" stroke="#fff" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/>
+      <circle class="splash-node n1" cx="10" cy="27.5" r="2.5" fill="#fff"/>
+      <circle class="splash-node n2" cx="17" cy="20.5" r="2.5" fill="#fff"/>
+      <circle class="splash-node n3" cx="23" cy="23.5" r="2.5" fill="#fff"/>
+    </svg>
+  </div>
+  <div class="splash-title">ניהול קו ייצור</div>
+  <div class="splash-sub">מערכת ניהול רצפת ייצור</div>
+  <div class="splash-bar"><i></i></div>
+</div>
+<script>window.__splashStart=Date.now()</script>
 <div id="root"></div>
 <script type="text/babel">
 const {useState,useEffect,useCallback,useRef,useMemo}=React;
@@ -345,11 +397,18 @@ const useAuth=()=>React.useContext(AuthCtx);
 // ── Shared UI ──────────────────────────────────────────────────────────────
 const Logo=({size=32})=>(
   <svg width={size} height={size} viewBox="0 0 40 40" style={{flexShrink:0,display:"block"}}>
-    <defs><linearGradient id="pmlLogoG" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stopColor="#3b82f6"/><stop offset="1" stopColor="#06b6d4"/></linearGradient></defs>
-    <rect x="2" y="2" width="36" height="36" rx="11" fill="url(#pmlLogoG)"/>
-    <path d="M10 28V17.5l6.2 4.1v-4.1l6.2 4.1v-4.1l7.6 5V28z" fill="#fff" opacity=".96"/>
-    <rect x="11.5" y="11.5" width="3.6" height="4.5" rx="1" fill="#fff" opacity=".75"/>
-    <rect x="17" y="13.5" width="3.6" height="2.5" rx="1" fill="#fff" opacity=".5"/>
+    <defs>
+      <linearGradient id="pmlLogoG" x1="0" y1="0" x2="1" y2="1">
+        <stop offset="0" stopColor="#3b82f6"/><stop offset=".55" stopColor="#2da6e0"/><stop offset="1" stopColor="#06b6d4"/>
+      </linearGradient>
+    </defs>
+    <rect x="2" y="2" width="36" height="36" rx="11.5" fill="url(#pmlLogoG)"/>
+    <rect x="2" y="2" width="36" height="17" rx="11.5" fill="#fff" opacity=".10"/>
+    <path d="M10 27.5 L17 20.5 L23 23.5 L29.5 13.5" fill="none" stroke="#fff" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round" opacity=".97"/>
+    <path d="M24.8 13.5 H29.5 V18.2" fill="none" stroke="#fff" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round" opacity=".97"/>
+    <circle cx="10" cy="27.5" r="2.5" fill="#fff"/>
+    <circle cx="17" cy="20.5" r="2.5" fill="#fff"/>
+    <circle cx="23" cy="23.5" r="2.5" fill="#fff"/>
   </svg>
 );
 const Btn=({children,color="#374151",onClick,style={},disabled,small})=>(
@@ -4713,6 +4772,17 @@ function App(){
 }
 
 ReactDOM.createRoot(document.getElementById("root")).render(<ToastProvider><App/></ToastProvider>);
+// ── Dismiss boot splash once the app has mounted (with a graceful minimum) ──
+(function(){
+  const sp=document.getElementById("splash");if(!sp)return;
+  const MIN_MS=1100;
+  const elapsed=Date.now()-(window.__splashStart||Date.now());
+  const wait=Math.max(0,MIN_MS-elapsed);
+  requestAnimationFrame(()=>setTimeout(()=>{
+    sp.classList.add("hide");
+    setTimeout(()=>{sp.parentNode&&sp.remove()},650);
+  },wait));
+})();
 </script>
 </body>
 </html>
