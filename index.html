@@ -1513,7 +1513,7 @@ function Orders({orders,projects,stages,stageBlocks,updO,workLogs,onWorkLog}){
     });
   },[orders,filterProj,search]);
 
-  const del=id=>{if(!confirm('למחוק פק"ע זו?'))return;updO(prev=>prev.filter(o=>o.id!==id));if(detail?.id===id)setDetail(null)};
+  const del=id=>{if(!confirm('למחוק פק"ע זו?'))return;updO(prev=>prev.filter(o=>o.id!==id));if(detail?.id===id)setDetail(null);SB.del("orders",{id}).catch(()=>{})};
   const handleUpd=(upd)=>{updO(prev=>prev.map(o=>o.id===upd.id?upd:o));setDetail(upd)};
 
   // Always get fresh order from state
@@ -2463,7 +2463,7 @@ function StagesManagement({stages,setStages,stageBlocks,setStageBlocks,persist})
     const ns=[...stages,{id:uid(),name:name.trim(),order:maxOrder+1,color,price:Number(price)||0,hourlyRate:Number(hourly)||0}];
     setStages(ns);persist(null,null,ns);setName("");setPrice(0);setHourly(0);setShowForm(false);
   };
-  const del=id=>{if(!confirm("למחוק?"))return;const ns=stages.filter(s=>s.id!==id);setStages(ns);persist(null,null,ns)};
+  const del=id=>{if(!confirm("למחוק?"))return;const ns=stages.filter(s=>s.id!==id);setStages(ns);persist(null,null,ns);SB.del("stages",{id}).catch(()=>{})};
   const move=(id,dir)=>{const idx=stages.findIndex(s=>s.id===id);if((dir===-1&&idx===0)||(dir===1&&idx===stages.length-1))return;const arr=[...stages];[arr[idx],arr[idx+dir]]=[arr[idx+dir],arr[idx]];arr.forEach((s,i)=>s.order=i+1);setStages(arr);persist(null,null,arr)};
   const saveStage=(id)=>{const ns=stages.map(s=>s.id===id?{...s,name:editStageName.trim()||s.name,color:editStageColor,price:Number(editPrice)||0,hourlyRate:Number(editHourly)||0}:s);setStages(ns);persist(null,null,ns);setEditId(null)};
 
@@ -2480,7 +2480,7 @@ function StagesManagement({stages,setStages,stageBlocks,setStageBlocks,persist})
     setStageBlocks(nb);LS.set("stageBlocks",nb);persist(null,null,null,null,null,nb);
     setBlockName("");setBlockStages([]);setShowBlockForm(false);setEditBlockId(null);
   };
-  const delBlock=id=>{const nb=(stageBlocks||[]).filter(b=>b.id!==id);setStageBlocks(nb);LS.set("stageBlocks",nb);persist(null,null,null,null,null,nb)};
+  const delBlock=id=>{const nb=(stageBlocks||[]).filter(b=>b.id!==id);setStageBlocks(nb);LS.set("stageBlocks",nb);persist(null,null,null,null,null,nb);SB.del("stage_blocks",{id}).catch(()=>{})};
   const addStageToBlock=stageId=>{
     const st=stages.find(s=>s.id===stageId);if(!st)return;
     if(blockStages.some(bs=>bs.sourceId===stageId))return;
@@ -2645,7 +2645,7 @@ function Projects({projects,orders,updP,stages,workLogs}){
   const [showForm,setShowForm]=useState(false);
   const [name,setName]=useState("");
   const add=()=>{if(!name.trim())return;updP(prev=>[...prev,{id:uid(),name:name.trim()}]);setName("");setShowForm(false)};
-  const del=id=>{if(orders.some(o=>o.projectId===id))return toast('לא ניתן למחוק פרויקט עם פק"ע',"warning");updP(prev=>prev.filter(p=>p.id!==id))};
+  const del=id=>{if(orders.some(o=>o.projectId===id))return toast('לא ניתן למחוק פרויקט עם פק"ע',"warning");updP(prev=>prev.filter(p=>p.id!==id));SB.del("projects",{id}).catch(()=>{})};
   return(
     <div className="fade-in">
       <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:14}}>
@@ -3306,7 +3306,7 @@ function OfflineBanner({lm}){return(
 // ══════════════════════════════════════════════════════════════════════════
 // ═══ NAVBAR ═════════════════════════════════════════════════════════════
 // ══════════════════════════════════════════════════════════════════════════
-function Navbar({tab,setTab,tabs,lightMode,toggleLight,sync,onAdmin,onLogout,alertCount,onAlerts,onRefresh,onLiveBoard,onReport,onHistory,isAdmin,onLoadDemo,onDeleteDemo}){
+function Navbar({tab,setTab,tabs,lightMode,toggleLight,sync,onAdmin,onLogout,alertCount,onAlerts,onRefresh,onLiveBoard,onReport,onHistory,isAdmin,onLoadDemo,onDeleteDemo,onInstall,canInstall}){
   const {currentUser}=useAuth();
   const [menuOpen,setMenuOpen]=useState(false);
   const lm=lightMode;
@@ -3330,6 +3330,7 @@ function Navbar({tab,setTab,tabs,lightMode,toggleLight,sync,onAdmin,onLogout,ale
         <div className="hide-mobile" style={{display:"flex",gap:4,alignItems:"center",flexShrink:0}}>
           <button onClick={onAlerts} aria-label={`התראות${alertCount>0?` (${alertCount})`:""}`} style={{background:alertCount>0?"#ef444422":"transparent",border:`1px solid ${alertCount>0?"#ef4444":navBorder}`,borderRadius:8,padding:"5px 10px",fontSize:14,color:alertCount>0?"#ef4444":navMuted,fontFamily:"inherit",position:"relative"}}>🔔{alertCount>0&&<span style={{position:"absolute",top:-4,right:-4,background:"#ef4444",color:"#fff",fontSize:9,fontWeight:700,borderRadius:10,padding:"1px 5px",minWidth:16,textAlign:"center"}}>{alertCount}</span>}</button>
           <button onClick={toggleLight} aria-label={lm?"מצב כהה":"מצב בהיר"} style={{background:lm?"#e2e8f0":"#0d1120",border:`1px solid ${navBorder}`,borderRadius:8,padding:"5px 10px",fontSize:13,color:navMuted,fontFamily:"inherit"}}>{lm?"🌙":"☀️"}</button>
+          {canInstall&&<button onClick={onInstall} aria-label="התקן אפליקציה" title="התקן אפליקציה" style={{background:"#3b82f622",border:"1px solid #3b82f644",borderRadius:8,padding:"5px 10px",fontSize:13,color:"#3b82f6",fontFamily:"inherit",fontWeight:600,display:"flex",alignItems:"center",gap:4}}><span>📲</span><span style={{fontSize:11}}>התקן</span></button>}
           <div style={{fontSize:11,padding:"3px 8px",borderRadius:20,background:sync==="ok"?(lm?"#d1fae5":"#052e16"):sync==="saving"?(lm?"#dbeafe":"#1e3a5f"):(lm?"#fee2e2":"#450a0a"),color:sync==="ok"?(lm?"#059669":"#6ee7b7"):sync==="saving"?(lm?"#2563eb":"#93c5fd"):(lm?"#dc2626":"#fca5a5"),whiteSpace:"nowrap",cursor:"pointer",display:"flex",alignItems:"center",gap:4}} onClick={onRefresh} title="לחץ לרענון">
             {sync==="ok"&&<span style={{display:"inline-block",width:6,height:6,borderRadius:"50%",background:"#10b981",animation:"pulse 2s infinite"}}/>}
             {sync==="ok"?"בזמן אמת":sync==="saving"?"⏳":"❌"}
@@ -3349,6 +3350,7 @@ function Navbar({tab,setTab,tabs,lightMode,toggleLight,sync,onAdmin,onLogout,ale
                   <button onClick={()=>{onLoadDemo();setMenuOpen(false)}} style={{background:"transparent",border:"none",color:"#06b6d4",borderRadius:7,padding:"8px 12px",fontSize:13,fontWeight:600,fontFamily:"inherit",textAlign:"right",cursor:"pointer",whiteSpace:"nowrap"}}>🧪 טען נתוני דמו</button>
                   <button onClick={()=>{onDeleteDemo();setMenuOpen(false)}} style={{background:"transparent",border:"none",color:"#ef4444",borderRadius:7,padding:"8px 12px",fontSize:13,fontWeight:600,fontFamily:"inherit",textAlign:"right",cursor:"pointer",whiteSpace:"nowrap"}}>🗑️ מחק נתוני דמו</button>
                   <div style={{borderTop:`1px solid ${navBorder}`,margin:"4px 0"}}/>
+                  {canInstall&&<button onClick={()=>{onInstall();setMenuOpen(false)}} style={{background:"transparent",border:"none",color:"#3b82f6",borderRadius:7,padding:"8px 12px",fontSize:13,fontWeight:600,fontFamily:"inherit",textAlign:"right",cursor:"pointer",whiteSpace:"nowrap"}}>📲 התקן אפליקציה</button>}
                   <button onClick={()=>{onLogout();setMenuOpen(false)}} style={{background:"transparent",border:"none",color:"#ef4444",borderRadius:7,padding:"8px 12px",fontSize:13,fontWeight:600,fontFamily:"inherit",textAlign:"right",cursor:"pointer"}}>🚪 יציאה</button>
                 </div>
               )}
@@ -3393,6 +3395,7 @@ function Navbar({tab,setTab,tabs,lightMode,toggleLight,sync,onAdmin,onLogout,ale
               <button onClick={()=>{onLoadDemo();setMenuOpen(false)}} style={{background:"transparent",border:"none",borderRadius:8,padding:"10px 14px",fontSize:14,color:"#06b6d4",fontFamily:"inherit",textAlign:"right",display:"flex",alignItems:"center",gap:10}}><span style={{fontSize:18}}>🧪</span>טען נתוני דמו</button>
               <button onClick={()=>{onDeleteDemo();setMenuOpen(false)}} style={{background:"transparent",border:"none",borderRadius:8,padding:"10px 14px",fontSize:14,color:"#ef4444",fontFamily:"inherit",textAlign:"right",display:"flex",alignItems:"center",gap:10}}><span style={{fontSize:18}}>🗑️</span>מחק נתוני דמו</button></>}
               <div style={{borderTop:`1px solid ${navBorder}`,margin:"6px 8px"}}/>
+              {canInstall&&<button onClick={()=>{onInstall();setMenuOpen(false)}} style={{background:"#3b82f611",border:"none",borderRadius:8,padding:"10px 14px",fontSize:14,color:"#3b82f6",fontFamily:"inherit",textAlign:"right",display:"flex",alignItems:"center",gap:10,fontWeight:600}}><span style={{fontSize:18}}>📲</span>התקן אפליקציה</button>}
               <button onClick={()=>{onLogout();setMenuOpen(false)}} style={{background:"transparent",border:"none",borderRadius:8,padding:"10px 14px",fontSize:14,color:"#ef4444",fontFamily:"inherit",textAlign:"right",display:"flex",alignItems:"center",gap:10}}><span style={{fontSize:18}}>🚪</span>יציאה מהמערכת</button>
             </div>
           </div>
@@ -4228,11 +4231,11 @@ function App(){
   const handleEndTask=(taskId)=>{setCustomTasks(prev=>{const next=prev.map(t=>{if(t.id!==taskId)return t;const dur=t.startTime?Math.round((Date.now()-new Date(t.startTime).getTime())/60000)-(t.totalPauseMin||0):0;return{...t,active:false,completed:true,endTime:nowISO(),durationMin:Math.max(0,dur)}});persist(null,null,null,null,next);return next})};
   const handlePauseTask=(taskId)=>{setCustomTasks(prev=>{const next=prev.map(t=>t.id===taskId?{...t,paused:true,pauseStart:nowISO(),pauseLog:[...(t.pauseLog||[]),{start:nowISO()}]}:t);persist(null,null,null,null,next);return next})};
   const handleResumeTask=(taskId)=>{setCustomTasks(prev=>{const next=prev.map(t=>{if(t.id!==taskId)return t;const pMin=t.pauseStart?Math.round((Date.now()-new Date(t.pauseStart).getTime())/60000):0;const pl=[...(t.pauseLog||[])];if(pl.length>0&&!pl[pl.length-1].end)pl[pl.length-1].end=nowISO();return{...t,paused:false,pauseStart:null,totalPauseMin:(t.totalPauseMin||0)+pMin,pauseLog:pl}});persist(null,null,null,null,next);return next})};
-  const handleDeleteTask=(taskId)=>{setCustomTasks(prev=>{const next=prev.filter(t=>t.id!==taskId);persist(null,null,null,null,next);return next})};
+  const handleDeleteTask=(taskId)=>{setCustomTasks(prev=>{const next=prev.filter(t=>t.id!==taskId);persist(null,null,null,null,next);return next});SB.del("custom_tasks",{id:taskId}).catch(()=>{})};
   const handleMarkPartialTask=(taskId)=>{setCustomTasks(prev=>{const next=prev.map(t=>t.id===taskId?{...t,partial:!t.partial}:t);persist(null,null,null,null,next);return next})};
   const handleMarkDoneTask=(taskId)=>{setCustomTasks(prev=>{const next=prev.map(t=>t.id===taskId?{...t,completed:true,partial:false,endTime:t.endTime||nowISO()}:t);persist(null,null,null,null,next);return next})};
   const handleUpdateTask=(taskId,updates)=>{setCustomTasks(prev=>{const next=prev.map(t=>t.id===taskId?{...t,...updates}:t);persist(null,null,null,null,next);return next})};
-  const handleDeleteLog=(ids)=>{setWorkLogs(prev=>{const next=prev.filter(w=>!ids.includes(w.id));persist(null,null,null,next);return next})};
+  const handleDeleteLog=(ids)=>{setWorkLogs(prev=>{const next=prev.filter(w=>!ids.includes(w.id));persist(null,null,null,next);return next});ids.forEach(id=>SB.del("work_logs",{id}).catch(()=>{}))};
   // Undo a completed work log — revert to uncompleted state (effectively delete it)
   const handleUndoWorkLog=(logId)=>{
     setWorkLogs(prev=>{
@@ -4246,7 +4249,7 @@ function App(){
   // Expose stages globally so HistoryPanel can access them for matching
   window.__pml_stages=stages;
   // Listen for delete from WorkersDashboard
-  useEffect(()=>{const h=(e)=>{setCustomTasks(prev=>{const next=prev.filter(t=>t.id!==e.detail);persist(null,null,null,null,next);return next})};window.addEventListener("deleteTask",h);return()=>window.removeEventListener("deleteTask",h)},[]);
+  useEffect(()=>{const h=(e)=>{setCustomTasks(prev=>{const next=prev.filter(t=>t.id!==e.detail);persist(null,null,null,null,next);return next});SB.del("custom_tasks",{id:e.detail}).catch(()=>{})};window.addEventListener("deleteTask",h);return()=>window.removeEventListener("deleteTask",h)},[]);
 
   const isAdmin=currentUser?.role==="admin";
   const isWorker=currentUser?.role==="worker";
@@ -4434,7 +4437,7 @@ function App(){
     <AuthCtx.Provider value={{currentUser,canEdit,canViewProject}}>
       {isOffline&&<OfflineBanner lm={lm}/>}
       {showUpdate&&!isOffline&&<UpdateBanner onUpdate={handleUpdate} onDismiss={()=>setShowUpdate(false)} lm={lm}/>}
-      <Navbar tab={tab} setTab={setTab} tabs={TABS} lightMode={lightMode} toggleLight={()=>setLightMode(p=>!p)} sync={sync} onAdmin={()=>setShowAdmin(true)} onLogout={handleLogout} alertCount={alertCount} onAlerts={()=>setShowAlerts(true)} onRefresh={()=>refreshFromDB(true)} onLiveBoard={()=>setShowLiveBoard(true)} onReport={()=>setShowReport(true)} onHistory={()=>setShowHistory(true)} isAdmin={isAdmin} onLoadDemo={loadDemoData} onDeleteDemo={deleteDemoData}/>
+      <Navbar tab={tab} setTab={setTab} tabs={TABS} lightMode={lightMode} toggleLight={()=>setLightMode(p=>!p)} sync={sync} onAdmin={()=>setShowAdmin(true)} onLogout={handleLogout} alertCount={alertCount} onAlerts={()=>setShowAlerts(true)} onRefresh={()=>refreshFromDB(true)} onLiveBoard={()=>setShowLiveBoard(true)} onReport={()=>setShowReport(true)} onHistory={()=>setShowHistory(true)} isAdmin={isAdmin} onLoadDemo={loadDemoData} onDeleteDemo={deleteDemoData} onInstall={handleInstall} canInstall={!!installPrompt}/>
       {currentUser?.isDemo&&(
         <div style={{background:lm?"#eff6ff":"#0c1e3a",borderBottom:`1px solid ${lm?"#bfdbfe":"#1e3a5f"}`,padding:"8px 16px",display:"flex",alignItems:"center",justifyContent:"center",gap:10,flexWrap:"wrap"}}>
           <span style={{fontSize:13,color:lm?"#1d4ed8":"#93c5fd"}}>🔍 מצב דמו — הנתונים לא נשמרים</span>
