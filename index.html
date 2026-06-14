@@ -2449,6 +2449,8 @@ function StagesManagement({stages,setStages,stageBlocks,setStageBlocks,persist})
   const [editId,setEditId]=useState(null);
   const [editPrice,setEditPrice]=useState(0);
   const [editHourly,setEditHourly]=useState(0);
+  const [editStageName,setEditStageName]=useState("");
+  const [editStageColor,setEditStageColor]=useState("#3b82f6");
   // Block management
   const [showBlockForm,setShowBlockForm]=useState(false);
   const [blockName,setBlockName]=useState("");
@@ -2463,15 +2465,20 @@ function StagesManagement({stages,setStages,stageBlocks,setStageBlocks,persist})
   };
   const del=id=>{if(!confirm("למחוק?"))return;const ns=stages.filter(s=>s.id!==id);setStages(ns);persist(null,null,ns)};
   const move=(id,dir)=>{const idx=stages.findIndex(s=>s.id===id);if((dir===-1&&idx===0)||(dir===1&&idx===stages.length-1))return;const arr=[...stages];[arr[idx],arr[idx+dir]]=[arr[idx+dir],arr[idx]];arr.forEach((s,i)=>s.order=i+1);setStages(arr);persist(null,null,arr)};
-  const savePrice=(id)=>{const ns=stages.map(s=>s.id===id?{...s,price:Number(editPrice)||0,hourlyRate:Number(editHourly)||0}:s);setStages(ns);persist(null,null,ns);setEditId(null)};
+  const saveStage=(id)=>{const ns=stages.map(s=>s.id===id?{...s,name:editStageName.trim()||s.name,color:editStageColor,price:Number(editPrice)||0,hourlyRate:Number(editHourly)||0}:s);setStages(ns);persist(null,null,ns);setEditId(null)};
 
   // Block functions
   const addBlock=()=>{
     if(!blockName.trim()||blockStages.length===0)return toast("יש לתת שם ולבחור לפחות שלב אחד","warning");
-    const block={id:uid(),name:blockName.trim(),stages:blockStages.map((bs,i)=>({...bs,id:uid(),order:i+1}))};
-    const nb=[...(stageBlocks||[]),block];
+    let nb;
+    if(editBlockId){
+      nb=(stageBlocks||[]).map(b=>b.id===editBlockId?{...b,name:blockName.trim(),stages:blockStages.map((bs,i)=>({...bs,order:i+1}))}:b);
+    } else {
+      const block={id:uid(),name:blockName.trim(),stages:blockStages.map((bs,i)=>({...bs,id:uid(),order:i+1}))};
+      nb=[...(stageBlocks||[]),block];
+    }
     setStageBlocks(nb);LS.set("stageBlocks",nb);persist(null,null,null,null,null,nb);
-    setBlockName("");setBlockStages([]);setShowBlockForm(false);
+    setBlockName("");setBlockStages([]);setShowBlockForm(false);setEditBlockId(null);
   };
   const delBlock=id=>{const nb=(stageBlocks||[]).filter(b=>b.id!==id);setStageBlocks(nb);LS.set("stageBlocks",nb);persist(null,null,null,null,null,nb)};
   const addStageToBlock=stageId=>{
@@ -2492,10 +2499,11 @@ function StagesManagement({stages,setStages,stageBlocks,setStageBlocks,persist})
       <Card style={{marginBottom:14,border:"1px solid #8b5cf633"}}>
         <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:12}}>
           <h3 style={{margin:0,fontSize:15,color:"#8b5cf6"}}>📦 בלוקים (תבניות שלבים)</h3>
-          <Btn color="#8b5cf6" small onClick={()=>{setShowBlockForm(p=>!p);setBlockStages([]);setBlockName("")}}>+ בלוק חדש</Btn>
+          <Btn color="#8b5cf6" small onClick={()=>{setShowBlockForm(p=>!p);setBlockStages([]);setBlockName("");setEditBlockId(null)}}>+ בלוק חדש</Btn>
         </div>
         {showBlockForm&&(
           <div style={{background:"var(--c-deep)",borderRadius:10,padding:14,marginBottom:12,border:"1px solid #8b5cf633"}}>
+            <div style={{fontWeight:700,fontSize:13,color:"#8b5cf6",marginBottom:8}}>{editBlockId?"✏️ עריכת בלוק":"➕ בלוק חדש"}</div>
             <Field label="שם הבלוק *" value={blockName} onChange={setBlockName} style={{marginBottom:10,maxWidth:300}}/>
             <div style={{fontSize:12,color:"var(--c-dim)",fontWeight:600,marginBottom:6}}>בחר שלבים והזן זמן (דקות) לכל שלב — המחיר מחושב לפי תעריף שעתי של השלב:</div>
             <div style={{display:"flex",flexWrap:"wrap",gap:6,marginBottom:10}}>
@@ -2530,8 +2538,8 @@ function StagesManagement({stages,setStages,stageBlocks,setStageBlocks,persist})
               </div>
             )}
             <div style={{display:"flex",gap:8}}>
-              <Btn color="#8b5cf6" onClick={addBlock} small>צור בלוק ({blockStages.length} שלבים)</Btn>
-              <Btn onClick={()=>setShowBlockForm(false)} small>ביטול</Btn>
+              <Btn color="#8b5cf6" onClick={addBlock} small>{editBlockId?"✅ עדכן בלוק":"צור בלוק"} ({blockStages.length} שלבים)</Btn>
+              <Btn onClick={()=>{setShowBlockForm(false);setEditBlockId(null);setBlockName("");setBlockStages([])}} small>ביטול</Btn>
             </div>
           </div>
         )}
@@ -2545,6 +2553,7 @@ function StagesManagement({stages,setStages,stageBlocks,setStageBlocks,persist})
                     <span style={{fontSize:11,color:"var(--c-dim)"}}>{b.stages.length} שלבים</span>
                     {b.stages.reduce((s,st)=>s+(st.minutes||0),0)>0&&<span style={{fontSize:11,color:"var(--c-dim)"}}>{b.stages.reduce((s,st)=>s+(st.minutes||0),0)} דק'</span>}
                     <span style={{fontSize:11,color:"#a78bfa"}}>סה"כ: ₪{b.stages.reduce((s,st)=>s+(st.price||0),0)}</span>
+                    <IBtn onClick={()=>{setEditBlockId(b.id);setBlockName(b.name);setBlockStages(b.stages.slice().sort((a,b2)=>a.order-b2.order));setShowBlockForm(true)}} title="ערוך בלוק">✏️</IBtn>
                     <IBtn onClick={()=>delBlock(b.id)}>🗑️</IBtn>
                   </div>
                 </div>
@@ -2577,16 +2586,48 @@ function StagesManagement({stages,setStages,stageBlocks,setStageBlocks,persist})
         )}
         <div style={{display:"flex",flexDirection:"column",gap:6}}>
           {stages.sort((a,b)=>a.order-b.order).map((s,i)=>(
-            <div key={s.id} style={{background:"var(--c-card)",borderRadius:10,padding:"10px 14px",border:`1px solid ${s.color}33`,display:"flex",justifyContent:"space-between",alignItems:"center",flexWrap:"wrap",gap:6}}>
-              <div style={{display:"flex",alignItems:"center",gap:8}}>
-                <span style={{fontSize:16,fontWeight:800,color:s.color,minWidth:24}}>{i+1}</span>
-                <div style={{width:10,height:10,borderRadius:3,background:s.color}}/>
-                <span style={{fontWeight:600}}>{s.name}</span>
-                {editId===s.id?(<div style={{display:"flex",gap:4,alignItems:"center",flexWrap:"wrap"}}><input type="number" value={editPrice} onChange={e=>setEditPrice(e.target.value)} style={{width:62,padding:"3px 6px",fontSize:12}} title="₪ ליחידה"/><span style={{fontSize:11,color:"var(--c-dim)"}}>₪/יח'</span><input type="number" value={editHourly} onChange={e=>setEditHourly(e.target.value)} style={{width:62,padding:"3px 6px",fontSize:12}} title="תעריף שעתי"/><span style={{fontSize:11,color:"var(--c-dim)"}}>₪/שע'</span><IBtn onClick={()=>savePrice(s.id)}>✅</IBtn><IBtn onClick={()=>setEditId(null)}>✕</IBtn></div>):(
-                  <span style={{fontSize:11,color:(s.price||s.hourlyRate)?"#a78bfa":"var(--c-dim)",cursor:"pointer",padding:"2px 6px",borderRadius:6,background:"var(--c-deep)"}} onClick={()=>{setEditId(s.id);setEditPrice(s.price||0);setEditHourly(s.hourlyRate||0)}}>{s.price?`₪${s.price}/יח'`:""}{s.hourlyRate?`${s.price?" · ":""}₪${s.hourlyRate}/שע'`:""}{!s.price&&!s.hourlyRate?"+ תמחור":""}</span>
-                )}
-              </div>
-              <div style={{display:"flex",gap:3}}><IBtn onClick={()=>move(s.id,-1)}>⬆️</IBtn><IBtn onClick={()=>move(s.id,1)}>⬇️</IBtn><IBtn onClick={()=>del(s.id)}>🗑️</IBtn></div>
+            <div key={s.id} style={{background:"var(--c-card)",borderRadius:10,padding:"10px 14px",border:`1px solid ${editId===s.id?"#3b82f6":s.color}33`}}>
+              {editId===s.id?(
+                <div>
+                  <div style={{display:"flex",gap:8,flexWrap:"wrap",alignItems:"flex-end",marginBottom:8}}>
+                    <div style={{flex:1,minWidth:120}}>
+                      <label style={{fontSize:11,color:"var(--c-dim)",display:"block",marginBottom:2}}>שם שלב</label>
+                      <input value={editStageName} onChange={e=>setEditStageName(e.target.value)} style={{width:"100%",padding:"5px 8px",fontSize:13,borderRadius:6,border:"1px solid var(--c-border)",background:"var(--c-deep)",color:"var(--c-text)",fontFamily:"inherit",boxSizing:"border-box"}}/>
+                    </div>
+                    <div style={{display:"flex",flexDirection:"column",gap:2}}>
+                      <label style={{fontSize:11,color:"var(--c-dim)"}}>צבע</label>
+                      <input type="color" value={editStageColor} onChange={e=>setEditStageColor(e.target.value)} style={{width:36,height:34,padding:2,border:"1px solid var(--c-border)",borderRadius:6,cursor:"pointer"}}/>
+                    </div>
+                    <div>
+                      <label style={{fontSize:11,color:"var(--c-dim)",display:"block",marginBottom:2}}>₪ ליחידה</label>
+                      <input type="number" value={editPrice} onChange={e=>setEditPrice(e.target.value)} style={{width:80,padding:"5px 8px",fontSize:13,borderRadius:6,border:"1px solid var(--c-border)",background:"var(--c-deep)",color:"var(--c-text)",fontFamily:"inherit"}}/>
+                    </div>
+                    <div>
+                      <label style={{fontSize:11,color:"var(--c-dim)",display:"block",marginBottom:2}}>₪/שעה</label>
+                      <input type="number" value={editHourly} onChange={e=>setEditHourly(e.target.value)} style={{width:80,padding:"5px 8px",fontSize:13,borderRadius:6,border:"1px solid var(--c-border)",background:"var(--c-deep)",color:"var(--c-text)",fontFamily:"inherit"}}/>
+                    </div>
+                  </div>
+                  <div style={{display:"flex",gap:8}}>
+                    <Btn color="#10b981" onClick={()=>saveStage(s.id)} small>✅ שמור שינויים</Btn>
+                    <Btn onClick={()=>setEditId(null)} small>ביטול</Btn>
+                  </div>
+                </div>
+              ):(
+                <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",flexWrap:"wrap",gap:6}}>
+                  <div style={{display:"flex",alignItems:"center",gap:8}}>
+                    <span style={{fontSize:16,fontWeight:800,color:s.color,minWidth:24}}>{i+1}</span>
+                    <div style={{width:10,height:10,borderRadius:3,background:s.color}}/>
+                    <span style={{fontWeight:600}}>{s.name}</span>
+                    <span style={{fontSize:11,color:(s.price||s.hourlyRate)?"#a78bfa":"var(--c-dim)",padding:"2px 6px",borderRadius:6,background:"var(--c-deep)"}}>{s.price?`₪${s.price}/יח'`:""}{s.hourlyRate?`${s.price?" · ":""}₪${s.hourlyRate}/שע'`:""}{!s.price&&!s.hourlyRate?"ללא תמחור":""}</span>
+                  </div>
+                  <div style={{display:"flex",gap:3}}>
+                    <IBtn onClick={()=>{setEditId(s.id);setEditStageName(s.name);setEditStageColor(s.color);setEditPrice(s.price||0);setEditHourly(s.hourlyRate||0)}} title="ערוך שלב">✏️</IBtn>
+                    <IBtn onClick={()=>move(s.id,-1)}>⬆️</IBtn>
+                    <IBtn onClick={()=>move(s.id,1)}>⬇️</IBtn>
+                    <IBtn onClick={()=>del(s.id)}>🗑️</IBtn>
+                  </div>
+                </div>
+              )}
             </div>
           ))}
         </div>
@@ -2661,6 +2702,7 @@ function AdminPanel({projects,stages,onClose,lightMode,updO,departments,updD}){
   const [deptName,setDeptName]=useState("");
   const [deptColor,setDeptColor]=useState("#3b82f6");
   const [deptManager,setDeptManager]=useState("");
+  const [editDept,setEditDept]=useState(null);
   const leadOptions=users.filter(u=>u.active!==false&&(isLeadRole(u.role)||u.role==="admin"));
   const addDept=()=>{
     if(!deptName.trim())return toast("יש להזין שם מחלקה","warning");
@@ -2677,6 +2719,12 @@ function AdminPanel({projects,stages,onClose,lightMode,updO,departments,updD}){
     addAuditEntry({userId:currentUser.id,username:currentUser.username,name:currentUser.name,action:"מחיקת מחלקה",target:d.name,details:""});
   };
   const setDeptMgr=(deptId,mgrId)=>{updD(prev=>prev.map(d=>d.id===deptId?{...d,managerId:mgrId}:d))};
+  const saveDept=()=>{
+    if(!editDept||!editDept.name.trim())return toast("יש להזין שם מחלקה","warning");
+    updD(prev=>prev.map(d=>d.id===editDept.id?{...d,name:editDept.name.trim(),color:editDept.color}:d));
+    addAuditEntry({userId:currentUser.id,username:currentUser.username,name:currentUser.name,action:"עריכת מחלקה",target:editDept.name.trim(),details:""});
+    setEditDept(null);
+  };
   const lm=lightMode;
   const card=lm?"#ffffff":"#131829";
   const border=lm?"#dde1e8":"#1e2a42";
@@ -2876,6 +2924,7 @@ function AdminPanel({projects,stages,onClose,lightMode,updO,departments,updD}){
                               <option value="">— ללא מנהל —</option>
                               {leadOptions.map(u=><option key={u.id} value={u.id}>{ROLES[u.role]?.icon} {u.name}</option>)}
                             </select>
+                            <IBtn onClick={()=>setEditDept({...d})} title="ערוך מחלקה">✏️</IBtn>
                             <IBtn onClick={()=>delDept(d)} title="מחק מחלקה">🗑️</IBtn>
                           </div>
                         </div>
@@ -2984,6 +3033,33 @@ function AdminPanel({projects,stages,onClose,lightMode,updO,departments,updD}){
               </div>
             </div>
             <div style={{display:"flex",gap:8}}><Btn color="#10b981" onClick={saveUser}>✅ שמור</Btn><Btn onClick={()=>setEditUser(null)}>ביטול</Btn></div>
+          </div>
+        </div>
+      )}
+
+      {/* Edit Department Modal */}
+      {editDept&&(
+        <div onClick={()=>setEditDept(null)} style={{position:"fixed",inset:0,background:"#000000cc",zIndex:400,display:"flex",alignItems:"center",justifyContent:"center",padding:16}}>
+          <div onClick={e=>e.stopPropagation()} style={{background:card,borderRadius:16,padding:28,maxWidth:420,width:"100%",border:`1px solid ${border}`}}>
+            <div style={{fontWeight:700,fontSize:17,color:"var(--c-accent)",marginBottom:18}}>✏️ עריכת מחלקה</div>
+            <div style={{display:"flex",flexDirection:"column",gap:12,marginBottom:16}}>
+              <div>
+                <label style={{fontSize:11,color:muted,display:"block",marginBottom:3}}>שם המחלקה</label>
+                <input style={inp} value={editDept.name} onChange={e=>setEditDept(p=>({...p,name:e.target.value}))} placeholder="שם המחלקה"/>
+              </div>
+              <div>
+                <label style={{fontSize:11,color:muted,display:"block",marginBottom:3}}>צבע</label>
+                <div style={{display:"flex",alignItems:"center",gap:10}}>
+                  <input type="color" value={editDept.color} onChange={e=>setEditDept(p=>({...p,color:e.target.value}))} style={{width:44,height:40,padding:2,border:`1px solid ${border}`,borderRadius:6,background:"transparent",cursor:"pointer"}}/>
+                  <span style={{fontSize:12,color:muted}}>{editDept.color}</span>
+                  <span style={{fontSize:13,fontWeight:700,color:editDept.color,padding:"3px 12px",borderRadius:8,background:editDept.color+"22",border:`1px solid ${editDept.color}44`}}>{editDept.name||"תצוגה מקדימה"}</span>
+                </div>
+              </div>
+            </div>
+            <div style={{display:"flex",gap:8}}>
+              <Btn color="#10b981" onClick={saveDept}>✅ שמור</Btn>
+              <Btn onClick={()=>setEditDept(null)}>ביטול</Btn>
+            </div>
           </div>
         </div>
       )}
