@@ -3878,6 +3878,7 @@ function App(){
   const [installPrompt,setInstallPrompt]=useState(null);
   const [showInstall,setShowInstall]=useState(false);
   const [showUpdate,setShowUpdate]=useState(false);
+  const [isStandalone,setIsStandalone]=useState(()=>window.matchMedia("(display-mode:standalone)").matches||!!window.navigator.standalone);
   const [isOffline,setIsOffline]=useState(()=>!navigator.onLine);
   const [companyPlan,setCompanyPlan]=useState("free");
   const lastActivityRef=useRef(Date.now());
@@ -4416,13 +4417,18 @@ function App(){
       toast("נתוני דמו נמחקו!","success");
     }catch(e){console.error(e);setSync("error");toast("שגיאה: "+e.message,"error")}
   };
-  useEffect(()=>{const isi=window.matchMedia("(display-mode:standalone)").matches||window.navigator.standalone;if(isi)return;const h=e=>{e.preventDefault();setInstallPrompt(e);setShowInstall(true)};window.addEventListener("beforeinstallprompt",h);window.addEventListener("appinstalled",()=>{setShowInstall(false);setInstallPrompt(null)});return()=>window.removeEventListener("beforeinstallprompt",h)},[]);
+  useEffect(()=>{const isi=window.matchMedia("(display-mode:standalone)").matches||window.navigator.standalone;if(isi){setIsStandalone(true);return;}const h=e=>{e.preventDefault();setInstallPrompt(e);setShowInstall(true)};window.addEventListener("beforeinstallprompt",h);window.addEventListener("appinstalled",()=>{setShowInstall(false);setInstallPrompt(null);setIsStandalone(true)});return()=>window.removeEventListener("beforeinstallprompt",h)},[]);
   // Service Worker
   useEffect(()=>{if(!("serviceWorker" in navigator))return;navigator.serviceWorker.register("./sw.js?v=19").then(reg=>{swRegRef.current=reg;if(reg.waiting)setShowUpdate(true);reg.addEventListener("updatefound",()=>{const nw=reg.installing;if(!nw)return;nw.addEventListener("statechange",()=>{if(nw.state==="installed"&&navigator.serviceWorker.controller)setShowUpdate(true)})});setInterval(()=>reg.update(),30*60*1000)}).catch(()=>{});navigator.serviceWorker.addEventListener("controllerchange",()=>window.location.reload())},[]);
   // Network status
   useEffect(()=>{const on=()=>{setIsOffline(false);toast("החיבור חזר — מסנכרן נתונים...","success");refreshFromDB(true)};const off=()=>{setIsOffline(true)};window.addEventListener("online",on);window.addEventListener("offline",off);return()=>{window.removeEventListener("online",on);window.removeEventListener("offline",off)}},[]);
   // PWA Install
-  const handleInstall=async()=>{if(!installPrompt)return;installPrompt.prompt();setInstallPrompt(null);setShowInstall(false)};
+  const handleInstall=async()=>{
+    if(installPrompt){installPrompt.prompt();setInstallPrompt(null);setShowInstall(false);return;}
+    const isIOS=/iphone|ipad|ipod/i.test(navigator.userAgent);
+    if(isIOS)toast("ב-Safari: לחץ על סמל השיתוף ← 'הוסף למסך הבית'","info",6000);
+    else toast("לחץ על תפריט הדפדפן (⋮ / ☰) ← 'הוסף למסך הבית' או 'התקן אפליקציה'","info",6000);
+  };
   const handleUpdate=()=>{const r=swRegRef.current;if(r?.waiting)r.waiting.postMessage({type:"SKIP_WAITING"});else window.location.reload();setShowUpdate(false)};
 
   if(!currentUser)return(<AuthCtx.Provider value={{currentUser,canEdit:false,canViewProject:()=>false}}><LoginScreen onLogin={handleLogin} lightMode={lightMode} toggleLight={()=>setLightMode(p=>!p)}/></AuthCtx.Provider>);
@@ -4437,7 +4443,7 @@ function App(){
     <AuthCtx.Provider value={{currentUser,canEdit,canViewProject}}>
       {isOffline&&<OfflineBanner lm={lm}/>}
       {showUpdate&&!isOffline&&<UpdateBanner onUpdate={handleUpdate} onDismiss={()=>setShowUpdate(false)} lm={lm}/>}
-      <Navbar tab={tab} setTab={setTab} tabs={TABS} lightMode={lightMode} toggleLight={()=>setLightMode(p=>!p)} sync={sync} onAdmin={()=>setShowAdmin(true)} onLogout={handleLogout} alertCount={alertCount} onAlerts={()=>setShowAlerts(true)} onRefresh={()=>refreshFromDB(true)} onLiveBoard={()=>setShowLiveBoard(true)} onReport={()=>setShowReport(true)} onHistory={()=>setShowHistory(true)} isAdmin={isAdmin} onLoadDemo={loadDemoData} onDeleteDemo={deleteDemoData} onInstall={handleInstall} canInstall={!!installPrompt}/>
+      <Navbar tab={tab} setTab={setTab} tabs={TABS} lightMode={lightMode} toggleLight={()=>setLightMode(p=>!p)} sync={sync} onAdmin={()=>setShowAdmin(true)} onLogout={handleLogout} alertCount={alertCount} onAlerts={()=>setShowAlerts(true)} onRefresh={()=>refreshFromDB(true)} onLiveBoard={()=>setShowLiveBoard(true)} onReport={()=>setShowReport(true)} onHistory={()=>setShowHistory(true)} isAdmin={isAdmin} onLoadDemo={loadDemoData} onDeleteDemo={deleteDemoData} onInstall={handleInstall} canInstall={!isStandalone}/>
       {currentUser?.isDemo&&(
         <div style={{background:lm?"#eff6ff":"#0c1e3a",borderBottom:`1px solid ${lm?"#bfdbfe":"#1e3a5f"}`,padding:"8px 16px",display:"flex",alignItems:"center",justifyContent:"center",gap:10,flexWrap:"wrap"}}>
           <span style={{fontSize:13,color:lm?"#1d4ed8":"#93c5fd"}}>🔍 מצב דמו — הנתונים לא נשמרים</span>
