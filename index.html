@@ -470,6 +470,37 @@ const Modal=({children,onClose,wide})=>(
     <div onClick={e=>e.stopPropagation()} style={{background:"var(--c-card)",borderRadius:14,padding:24,maxWidth:wide?960:740,width:"100%",maxHeight:"92vh",overflowY:"auto",border:"1px solid var(--c-border)",margin:"auto"}}>{children}</div>
   </div>
 );
+// ── Chart explanation: small "?" button that opens a friendly detailed modal ──
+function ChartInfo({title,shows,data,how,tip}){
+  const [open,setOpen]=useState(false);
+  const secs=[["📊","מה הגרף מציג",shows],["🔢","אילו נתונים הוא מחשב",data],["⚙️","איך זה מחושב",how],["💡","איך לקרוא את זה",tip]].filter(s=>s[2]);
+  return(<>
+    <button onClick={e=>{e.stopPropagation();setOpen(true)}} title="הסבר על הגרף" aria-label="הסבר על הגרף"
+      style={{width:22,height:22,minWidth:22,borderRadius:"50%",border:"1px solid var(--c-border)",background:"var(--c-deep)",color:"var(--c-muted)",fontSize:13,fontWeight:800,cursor:"pointer",display:"inline-flex",alignItems:"center",justifyContent:"center",flexShrink:0,lineHeight:1,padding:0}}>?</button>
+    {open&&(
+      <div onClick={()=>setOpen(false)} style={{position:"fixed",inset:0,background:"#000000cc",zIndex:2000,display:"flex",alignItems:"center",justifyContent:"center",padding:16,overflowY:"auto"}}>
+        <div onClick={e=>e.stopPropagation()} dir="rtl" style={{background:"var(--c-card)",borderRadius:16,padding:"22px 24px",maxWidth:500,width:"100%",maxHeight:"88vh",overflowY:"auto",border:"1px solid var(--c-border)",margin:"auto",boxShadow:"0 24px 70px #000b"}}>
+          <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",gap:10,marginBottom:18,borderBottom:"1px solid var(--c-border)",paddingBottom:14}}>
+            <div style={{display:"flex",alignItems:"center",gap:8}}><span style={{fontSize:20}}>📈</span><div style={{fontWeight:800,fontSize:16.5,lineHeight:1.3}}>{title}</div></div>
+            <button onClick={()=>setOpen(false)} aria-label="סגור" style={{width:28,height:28,borderRadius:8,border:"1px solid var(--c-border)",background:"var(--c-deep)",color:"var(--c-muted)",fontSize:14,cursor:"pointer",flexShrink:0,lineHeight:1}}>✕</button>
+          </div>
+          {secs.map(([icon,head,body],si)=>(
+            <div key={si} style={{marginBottom:si===secs.length-1?2:15}}>
+              <div style={{fontWeight:700,fontSize:13.5,marginBottom:7,display:"flex",alignItems:"center",gap:7}}><span style={{fontSize:15}}>{icon}</span>{head}</div>
+              {Array.isArray(body)?(
+                <ul style={{margin:0,paddingInlineStart:20,display:"flex",flexDirection:"column",gap:6}}>
+                  {body.map((b,i)=><li key={i} style={{fontSize:12.5,color:"var(--c-muted)",lineHeight:1.55}}>{b}</li>)}
+                </ul>
+              ):(
+                <div style={{fontSize:12.5,color:"var(--c-muted)",lineHeight:1.6}}>{body}</div>
+              )}
+            </div>
+          ))}
+        </div>
+      </div>
+    )}
+  </>);
+}
 const PBar=({pct,h=6,color})=>{const bg=color||(pct>=100?"#10b981":pct>50?"#3b82f6":"#f59e0b");return(
   <div style={{height:h,background:"var(--c-border)",borderRadius:h/2,overflow:"hidden"}}>
     <div style={{width:`${Math.min(100,Math.max(0,pct))}%`,height:"100%",background:bg,borderRadius:h/2,transition:"width .4s"}}/>
@@ -1134,20 +1165,38 @@ function Dashboard({orders,projects,stages,users,workLogs,departments,customTask
       <div style={{display:"grid",gridTemplateColumns:"minmax(0,1.6fr) minmax(0,1fr)",gap:12,marginBottom:12}} className="chart-grid">
         <Card>
           <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:12,flexWrap:"wrap",gap:8}}>
-            <div style={{fontWeight:700,fontSize:14}}>{barMetric==="rev"?"💰 הכנסות":"📦 תפוקה (יחידות)"} לפי {period==="month"?"חודש":period==="quarter"?"רבעון":"שנה"}</div>
+            <div style={{display:"flex",alignItems:"center",gap:7}}>
+              <div style={{fontWeight:700,fontSize:14}}>{barMetric==="rev"?"💰 הכנסות":"📦 תפוקה (יחידות)"} לפי {period==="month"?"חודש":period==="quarter"?"רבעון":"שנה"}</div>
+              <ChartInfo title="הכנסות / תפוקה לפי תקופה"
+                shows="עמודות שמציגות כמה הכנסות (₪) או כמה יחידות הופקו בכל תקופה — חודש, רבעון או שנה. אפשר להחליף בין 'הכנסות' ל'תפוקה' בכפתורים שלמעלה, ובין סוגי התקופות בראש המסך."
+                data={["הכנסות — סכום מחיר היחידה (unitPrice) של כל יחידה שהושלמה במלואה באותה תקופה.","תפוקה — מספר היחידות שהושלמו במלואן באותה תקופה."]}
+                how={["המערכת עוברת על כל רישומי העבודה ומשייכת כל יחידה לתקופה לפי תאריך סיום העבודה עליה.","הכנסה ויחידה נספרות פעם אחת בלבד — ברגע שכל השלבים של אותה יחידה הושלמו.","מוצגות עד 10 התקופות האחרונות, מסודרות כרונולוגית."]}
+                tip="עמודה גבוהה = תקופה חזקה. השוו בין עמודות סמוכות כדי לזהות מגמת צמיחה או ירידה."/>
+            </div>
             <SegBtn options={[["rev","הכנסות"],["qty","תפוקה"]]} value={barMetric} onChange={setBarMetric}/>
           </div>
           <BarChart data={pKeys.map(k=>({label:k,value:barMetric==="rev"?revByPeriod[k].rev:revByPeriod[k].qty}))} color={barMetric==="rev"?"#a78bfa":"#06b6d4"} formatVal={v=>barMetric==="rev"?fmtMoney(v):v.toLocaleString()+" יח'"} height={130}/>
         </Card>
         <Card style={{display:"flex",flexDirection:"column"}}>
-          <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:10}}><div style={{fontWeight:700,fontSize:14}}>📊 התפלגות</div><select value={donutSlice} onChange={e=>setDonutSlice(e.target.value)} style={{padding:"3px 6px",fontSize:11,width:"auto"}}><option value="status">סטטוס</option><option value="project">פרויקטים</option><option value="stage">שלבים</option></select></div>
+          <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:10}}><div style={{display:"flex",alignItems:"center",gap:7}}><div style={{fontWeight:700,fontSize:14}}>📊 התפלגות</div><ChartInfo title="התפלגות"
+            shows="טבעת (Donut) שמפלגת את הנתונים לפי הבחירה בתפריט: סטטוס יחידות, פרויקטים או שלבי ייצור. כל פלח הוא קטגוריה."
+            data={["סטטוס — כמה יחידות הושלמו לעומת כמה עדיין בתהליך.","פרויקטים — כמה יחידות הושלמו בכל פרויקט.","שלבים — כמה פעולות עבודה בוצעו בכל שלב ייצור."]}
+            how="לכל קטגוריה מסכמים את מספר היחידות או הפעולות שלה, וגודל הפלח בטבעת משקף את חלקה היחסי מתוך הסך הכולל."
+            tip="פלח גדול = הקטגוריה הדומיננטית. כך רואים במבט אחד היכן מרוכזת רוב הפעילות."/></div><select value={donutSlice} onChange={e=>setDonutSlice(e.target.value)} style={{padding:"3px 6px",fontSize:11,width:"auto"}}><option value="status">סטטוס</option><option value="project">פרויקטים</option><option value="stage">שלבים</option></select></div>
           <div style={{flex:1,display:"flex",alignItems:"center",justifyContent:"center"}}><DonutChart data={donutData} size={170}/></div>
         </Card>
       </div>
 
       {/* Revenue & Cost trend - Line Chart */}
       <Card style={{marginBottom:12}}>
-        <div style={{fontWeight:700,fontSize:14,marginBottom:4}}>📈 ניתוח מגמות</div>
+        <div style={{display:"flex",alignItems:"center",gap:7,marginBottom:4}}>
+          <div style={{fontWeight:700,fontSize:14}}>📈 ניתוח מגמות</div>
+          <ChartInfo title="ניתוח מגמות — הכנסות מול הוצאות"
+            shows="שני קווים לאורך זמן: הכנסות (ירוק) מול הוצאות (כחול), לפי אותן תקופות של הגרף העליון. מתחת לגרף מוצג סיכום הכנסות, הוצאות ורווח."
+            data={["הכנסות — סכום מחיר היחידות שהושלמו בכל תקופה.","הוצאות — עלות שכר העבודה בכל תקופה (זמן עבודה × תעריף שעתי של העובד).","רווח — ההפרש בין הכנסות להוצאות."]}
+            how={["ההוצאה מחושבת על כל רישום עבודה: משך בדקות × (תעריף שעתי ÷ 60).","ההכנסה נספרת רק כשהיחידה הושלמה במלואה, פעם אחת ליחידה."]}
+            tip="כשהקו הירוק מעל הכחול — יש רווח. התקרבות או הצטלבות של הקווים מסמנת שחיקה ברווחיות."/>
+        </div>
         <LineChart
           labels={pKeys}
           series={[
@@ -1166,12 +1215,26 @@ function Dashboard({orders,projects,stages,users,workLogs,departments,customTask
       {/* Bottlenecks & WIP */}
       <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:12,marginBottom:12}} className="chart-grid">
         <Card>
-          <div style={{fontWeight:700,fontSize:14,marginBottom:4}}>⏱️ צווארי בקבוק — זמן ממוצע לשלב</div>
+          <div style={{display:"flex",alignItems:"center",gap:7,marginBottom:4}}>
+            <div style={{fontWeight:700,fontSize:14}}>⏱️ צווארי בקבוק — זמן ממוצע לשלב</div>
+            <ChartInfo title="צווארי בקבוק — זמן ממוצע לשלב"
+              shows="עמודות אופקיות שמדרגות את שלבי הייצור לפי הזמן הממוצע שלוקח להשלים פעולה בכל שלב — מהשלב האיטי ביותר לזריז."
+              data="הזמן הממוצע לפעולה אחת בכל שלב (מוצג כשעות/דקות), ולצדו מספר הפעולות שנמדדו בשלב."
+              how="לכל שלב מסכמים את משך כל הפעולות שבוצעו בו ומחלקים במספר הפעולות. מוצגים עד 8 השלבים האיטיים ביותר."
+              tip="ככל שהעמודה ארוכה יותר, השלב איטי יותר ועלול להיות צוואר בקבוק — שם כדאי לתגבר כוח אדם."/>
+          </div>
           <div style={{fontSize:11.5,color:"var(--c-dim)",marginBottom:14}}>השלבים האיטיים ביותר בתהליך — כאן כדאי לתגבר</div>
           <HBarChart data={stagePerf.slice(0,8)} formatVal={v=>fmtTime(Math.round(v))}/>
         </Card>
         <Card>
-          <div style={{fontWeight:700,fontSize:14,marginBottom:4}}>📦 יחידות ממתינות לפי שלב (WIP)</div>
+          <div style={{display:"flex",alignItems:"center",gap:7,marginBottom:4}}>
+            <div style={{fontWeight:700,fontSize:14}}>📦 יחידות ממתינות לפי שלב (WIP)</div>
+            <ChartInfo title="יחידות ממתינות לפי שלב (WIP)"
+              shows="עמודות אופקיות שמראות כמה יחידות שעדיין בתהליך 'ממתינות' כרגע בכל שלב — כלומר השלב הבא שטרם בוצע עבורן. WIP = עבודה בתהליך (Work In Progress)."
+              data="מספר היחידות הפתוחות שתחנתן הבאה היא אותו שלב, מדורג מהגבוה לנמוך."
+              how="לכל יחידה שלא הושלמה מאתרים את השלב הראשון בסדר הייצור שעוד לא בוצע עבורה, וסופרים אותה לאותו שלב."
+              tip="ערמה גדולה בשלב מסוים מצביעה על הצטברות עבודה — סימן אפשרי לעומס או לתקיעה שדורשת התערבות."/>
+          </div>
           <div style={{fontSize:11.5,color:"var(--c-dim)",marginBottom:14}}>איפה "נתקעות" היחידות שעדיין בתהליך</div>
           <HBarChart data={wipData} formatVal={v=>v.toLocaleString()+" יח'"}/>
         </Card>
@@ -3218,7 +3281,14 @@ function YieldDashboard({orders,projects,stages,workLogs}){
 
       {/* Donut */}
       <Card style={{marginBottom:14}}>
-        <div style={{fontWeight:700,marginBottom:10,fontSize:14}}>תקלות לפי סוג</div>
+        <div style={{display:"flex",alignItems:"center",gap:7,marginBottom:10}}>
+          <div style={{fontWeight:700,fontSize:14}}>תקלות לפי סוג</div>
+          <ChartInfo title="תקלות לפי סוג"
+            shows="טבעת (Donut) שמפלגת את התקלות הפתוחות לפי סוג התקלה. כל פלח הוא סוג תקלה אחר."
+            data="מספר התקלות הפתוחות (שאינן בסטטוס 'סגור') מכל סוג."
+            how="המערכת עוברת על כל פקודות העבודה, מסננת את התקלות לפי סוג ולפי סטטוס שאינו 'סגור', וסופרת כמה יש מכל סוג."
+            tip="הפלח הגדול ביותר הוא סוג התקלה הנפוץ ביותר — מועמד מוביל לבדיקת שורש ולשיפור תהליך."/>
+        </div>
         <DonutChart data={typeDonut} size={160}/>
       </Card>
 
@@ -3878,7 +3948,14 @@ function LiveFactoryBoard({orders,workLogs,stages,customTasks,users,departments,
           {/* Stage output */}
           {stageData.length>0&&(
             <div style={{background:innerBg,borderRadius:12,padding:14,marginBottom:18}}>
-              <div style={{fontWeight:700,fontSize:13,color:textC,marginBottom:10}}>🔧 תפוקה לפי שלב</div>
+              <div style={{display:"flex",alignItems:"center",gap:7,marginBottom:10}}>
+                <div style={{fontWeight:700,fontSize:13,color:textC}}>🔧 תפוקה לפי שלב</div>
+                <ChartInfo title="תפוקה לפי שלב — מחלקה"
+                  shows="עמודות אופקיות שמראות כמה פעולות בוצעו בכל שלב ייצור על ידי חברי המחלקה במהלך החודש הנוכחי."
+                  data="מספר הפעולות שהושלמו בכל שלב, מדורג מהשלב הפעיל ביותר לפחות."
+                  how="המערכת סופרת רק רישומי עבודה שהושלמו, של עובדי המחלקה, שתאריך סיומם נופל בחודש הנוכחי, ומקבצת אותם לפי שלב."
+                  tip="כך רואים במבט אחד על אילו שלבי ייצור המחלקה הכי פעילה החודש."/>
+              </div>
               <HBarChart data={stageData} formatVal={v=>`${v} פעולות`}/>
             </div>
           )}
@@ -3939,7 +4016,14 @@ function LiveFactoryBoard({orders,workLogs,stages,customTasks,users,departments,
 
           {stageData.length>0&&(
             <div style={{background:innerBg,borderRadius:12,padding:14}}>
-              <div style={{fontWeight:700,fontSize:13,color:textC,marginBottom:10}}>🔧 תפוקה לפי שלב</div>
+              <div style={{display:"flex",alignItems:"center",gap:7,marginBottom:10}}>
+                <div style={{fontWeight:700,fontSize:13,color:textC}}>🔧 תפוקה לפי שלב</div>
+                <ChartInfo title="תפוקה לפי שלב — עובד"
+                  shows="עמודות אופקיות שמראות כמה פעולות העובד ביצע בכל שלב ייצור במהלך החודש הנוכחי."
+                  data="מספר הפעולות שהעובד השלים בכל שלב, מדורג מהגבוה לנמוך."
+                  how="המערכת סופרת רק את רישומי העבודה שהושלמו על ידי העובד, שתאריך סיומם נופל בחודש הנוכחי, ומקבצת אותם לפי שלב."
+                  tip="כך מזהים את השלבים שבהם העובד הכי פעיל או מתמחה."/>
+              </div>
               <HBarChart data={stageData} formatVal={v=>`${v} פעולות`}/>
             </div>
           )}
