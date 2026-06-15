@@ -173,7 +173,7 @@ button{font-family:inherit;cursor:pointer}
 const {useState,useEffect,useCallback,useRef,useMemo}=React;
 
 // ── Config ─────────────────────────────────────────────────────────────────
-const APP_VERSION="4.0.0";const APP_DATE="2026-06-12";
+const APP_VERSION="4.1.0";const APP_DATE="2026-06-15";
 const SB_URL="https://lwiurzkiojctwzllpnmr.supabase.co";
 const SB_KEY="eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imx3aXVyemtpb2pjdHd6bGxwbm1yIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzQ2MjU4NTAsImV4cCI6MjA5MDIwMTg1MH0.jWOnAtsjbefoY18ofSd46WMdgY47Vv4k7LgcHdOrj6Q";
 const SB_H={"Content-Type":"application/json","apikey":SB_KEY,"Authorization":"Bearer "+SB_KEY};
@@ -205,11 +205,14 @@ const ROLES={
   worker:{label:"עובד",icon:"👷",color:"#10b981"},
   mechanical_assembler:{label:"מרכיב מכני",icon:"🔩",color:"#64748b"},
   soldering:{label:"מלחימה",icon:"🔧",color:"#f97316"},
+  wiring:{label:"חיווט",icon:"🔌",color:"#eab308"},
   technician:{label:"טכנאי",icon:"🛠️",color:"#0ea5e9"},
   quality_inspector:{label:"מבקר איכות",icon:"🔍",color:"#8b5cf6"},
   viewer:{label:"צופה",icon:"👁️",color:"#8b95a8"}
 };
 const roleLabel=r=>ROLES[r]?`${ROLES[r].icon} ${ROLES[r].label}`:r;
+// Roles that actually perform production stages — offered when assigning a role to a stage.
+const EXECUTION_ROLES=["worker","mechanical_assembler","soldering","wiring","technician","quality_inspector"];
 const isLeadRole=r=>r==="team_lead"||r==="dept_manager";
 // Leads/managers that belong to a given department: members of the dept with a lead role,
 // plus the department's assigned manager. Falls back to all leads when no department chosen.
@@ -328,20 +331,23 @@ const taskToDb=t=>({id:t.id,user_id:t.userId,user_name:t.userName,name:t.name,
   end_time:t.endTime||null,duration_min:Number(t.durationMin||0),paused:t.paused||false,
   pause_start:t.pauseStart||null,total_pause_min:Number(t.totalPauseMin||0),
   pause_log:t.pauseLog||[],company_id:t.companyId||DEFAULT_COMPANY_ID,updated_at:new Date().toISOString()});
-const dbToStage=r=>({id:r.id,name:r.name,order:r.stage_order,color:r.color,price:r.price,hourlyRate:r.hourly_rate||0});
-const stageToDb=s=>({id:s.id,name:s.name,stage_order:s.order||0,color:s.color||"#3b82f6",price:Number(s.price||0),hourly_rate:Number(s.hourlyRate||0),company_id:s.companyId||DEFAULT_COMPANY_ID});
+const dbToStage=r=>({id:r.id,name:r.name,order:r.stage_order,color:r.color,price:r.price,hourlyRate:r.hourly_rate||0,roleId:r.role_id||"",minutes:Number(r.minutes||0)});
+const stageToDb=s=>({id:s.id,name:s.name,stage_order:s.order||0,color:s.color||"#3b82f6",price:Number(s.price||0),hourly_rate:Number(s.hourlyRate||0),role_id:s.roleId||null,minutes:Number(s.minutes||0),company_id:s.companyId||DEFAULT_COMPANY_ID});
 const dbToBlock=r=>({id:r.id,name:r.name,stages:r.stages});
 const blockToDb=b=>({id:b.id,name:b.name,stages:b.stages||[],company_id:b.companyId||DEFAULT_COMPANY_ID});
 const dbToProject=r=>({id:r.id,name:r.name});
 const projectToDb=p=>({id:p.id,name:p.name,company_id:p.companyId||DEFAULT_COMPANY_ID});
 const dbToDept=r=>({id:r.id,name:r.name,color:r.color||"#3b82f6",managerId:r.manager_id||""});
 const deptToDb=d=>({id:d.id,name:d.name,color:d.color||"#3b82f6",manager_id:d.managerId||null,company_id:d.companyId||DEFAULT_COMPANY_ID});
+// Daily work plans — a manager assigns a worker an order+stage to work on for a given day.
+const dbToPlan=r=>({id:r.id,userId:r.user_id,userName:r.user_name,date:r.plan_date,orderId:r.order_id||"",stageId:r.stage_id||"",targetQty:Number(r.target_qty||0),note:r.note||"",done:r.done||false,createdBy:r.created_by||"",createdByName:r.created_by_name||"",createdAt:r.created_at});
+const planToDb=p=>({id:p.id,user_id:p.userId,user_name:p.userName||null,plan_date:p.date,order_id:p.orderId||null,stage_id:p.stageId||null,target_qty:Number(p.targetQty||0),note:p.note||null,done:p.done||false,created_by:p.createdBy||null,created_by_name:p.createdByName||null,company_id:p.companyId||DEFAULT_COMPANY_ID,updated_at:new Date().toISOString()});
 
 // ── DB load all ────────────────────────────────────────────────────────────
 async function dbLoadAll(){
   const cid=_companyId||DEFAULT_COMPANY_ID;
   const cf=`company_id=eq.${cid}&`;
-  const [orders,projects,stages,blocks,logs,tasks,depts]=await Promise.all([
+  const [orders,projects,stages,blocks,logs,tasks,depts,plans]=await Promise.all([
     SB.get("orders",cf+"order=created_at.asc"),
     SB.get("projects",cf+"order=name.asc"),
     SB.get("stages",cf+"order=stage_order.asc"),
@@ -349,12 +355,13 @@ async function dbLoadAll(){
     SB.get("work_logs",cf+"order=created_at.asc"),
     SB.get("custom_tasks",cf+"order=created_at.asc"),
     SB.get("departments",cf+"order=name.asc").catch(()=>[]),
+    SB.get("daily_plans",cf+"order=created_at.asc").catch(()=>[]),
   ]);
   return{
     orders:orders.map(dbToOrder),projects:projects.map(dbToProject),
     stages:stages.map(dbToStage),stageBlocks:blocks.map(dbToBlock),
     workLogs:logs.map(dbToLog),customTasks:tasks.map(dbToTask),
-    departments:depts.map(dbToDept)
+    departments:depts.map(dbToDept),dailyPlans:plans.map(dbToPlan)
   };
 }
 async function dbLoadUsers(){
@@ -396,6 +403,44 @@ const daysBetween=(a,b)=>{if(!a||!b)return null;return Math.round((new Date(b)-n
 const mkKey=d=>d?d.slice(0,7):null;
 const qK=d=>{if(!d)return null;const[y,m]=d.split("-");return`${y}-Q${Math.ceil(Number(m)/3)}`};
 const yK=d=>d?d.slice(0,4):null;
+
+// ── Work-time estimation ─────────────────────────────────────────────────────
+// Minutes for a stage as it applies to a specific order. If the order was built
+// from a block that defines per-stage minutes, use those; otherwise fall back to
+// the stage's own estimated minutes.
+function stageMinutesFor(order,stage,stageBlocks){
+  if(!stage)return 0;
+  if(order&&order.blockId){
+    const block=(stageBlocks||[]).find(b=>b.id===order.blockId);
+    const bs=block&&(block.stages||[]).find(x=>x.name===stage.name);
+    if(bs&&Number(bs.minutes)>0)return Number(bs.minutes);
+  }
+  return Number(stage.minutes||0);
+}
+// Estimated work minutes for a single unit of an order (sum across its stages).
+function orderPerUnitMin(order,stages,stageBlocks){
+  return (order.stageIds||[]).reduce((s,sid)=>{const st=(stages||[]).find(x=>x.id===sid);return s+stageMinutesFor(order,st,stageBlocks)},0);
+}
+// Remaining estimated work minutes for an order — only stages not yet completed
+// per unit. Falls back to the full per-unit estimate × qty when there are no serials.
+function orderRemainingMin(order,stages,stageBlocks,workLogs){
+  const oStages=(order.stageIds||[]).map(sid=>(stages||[]).find(x=>x.id===sid)).filter(Boolean);
+  const serials=order.serials||[];
+  if(serials.length===0)return oStages.reduce((s,st)=>s+stageMinutesFor(order,st,stageBlocks),0)*Number(order.qty||0);
+  let total=0;
+  serials.forEach(sr=>oStages.forEach(st=>{
+    if(!(workLogs||[]).some(w=>w.serialId===sr.id&&w.stageId===st.id&&w.completed))total+=stageMinutesFor(order,st,stageBlocks);
+  }));
+  return total;
+}
+// Pretty estimate string: net work-days (at given hours/day) plus the raw hours.
+function fmtWorkEstimate(mins,workdayHours){
+  if(!mins||mins<=0)return"—";
+  const h=mins/60,wh=Number(workdayHours)||8,days=h/wh;
+  const hStr=h>=1?`${Math.round(h*10)/10} שע'`:`${Math.round(mins)} דק'`;
+  return days>=1?`${Math.round(days*10)/10} ימי עבודה · ${hStr}`:hStr;
+}
+const WORKDAY_LS_KEY="workdayHours";
 
 // ── LocalStorage cache (גיבוי מקומי לעבודה offline) ──────────────────────
 const LS={
@@ -1347,7 +1392,7 @@ function OrderForm({initial,projects,stages,stageBlocks,onSave,onClose}){
           {stages.map(st=>(
             <label key={st.id} style={{display:"flex",alignItems:"center",gap:5,fontSize:12,cursor:"pointer",background:f.stageIds.includes(st.id)?st.color+"22":"var(--c-deep)",border:`1px solid ${f.stageIds.includes(st.id)?st.color+"66":"var(--c-border)"}`,borderRadius:8,padding:"6px 10px",color:f.stageIds.includes(st.id)?st.color:"var(--c-muted)"}}>
               <input type="checkbox" checked={f.stageIds.includes(st.id)} onChange={()=>toggleStage(st.id)} style={{width:"auto"}}/>
-              {st.name}
+              {st.name}{st.roleId&&ROLES[st.roleId]?` · ${ROLES[st.roleId].icon} ${ROLES[st.roleId].label}`:""}{st.minutes>0?` · ⏱️${st.minutes}ד'`:""}
             </label>
           ))}
         </div>
@@ -1568,7 +1613,7 @@ function ShortagesInOrder({order,onUpdate}){
   );
 }
 
-function OrderDetail({order,projects,stages,onClose,onUpdate,workLogs,onWorkLog}){
+function OrderDetail({order,projects,stages,stageBlocks,onClose,onUpdate,workLogs,onWorkLog,workdayHours=8}){
   const {canEdit,currentUser}=useAuth();
   const isAdmin=currentUser?.role==="admin";
   const proj=projects.find(p=>p.id===order.projectId);
@@ -1576,6 +1621,8 @@ function OrderDetail({order,projects,stages,onClose,onUpdate,workLogs,onWorkLog}
   const oStages=(order.stageIds||[]).map(sid=>stages.find(s=>s.id===sid)).filter(Boolean).sort((a,b)=>a.order-b.order);
   const totalCompleted=serials.filter(s=>oStages.every(st=>workLogs.some(w=>w.serialId===s.id&&w.stageId===st.id&&w.completed))).length;
   const pct=serials.length?Math.round(totalCompleted/serials.length*100):0;
+  const perUnitMin=orderPerUnitMin(order,stages,stageBlocks);
+  const remainMin=orderRemainingMin(order,stages,stageBlocks,workLogs);
   const [editDates,setEditDates]=useState(false);
   const [dates,setDates]=useState({receivedDate:order.receivedDate||"",targetDate:order.targetDate||"",deliveryDate:order.deliveryDate||"",deliveryStatus:order.deliveryStatus||"pending",deliveryNotes:order.deliveryNotes||""});
   const saveDates=()=>{onUpdate({...order,...dates});setEditDates(false)};
@@ -1605,6 +1652,14 @@ function OrderDetail({order,projects,stages,onClose,onUpdate,workLogs,onWorkLog}
           <div style={{display:"flex",justifyContent:"space-between",fontSize:13,color:"var(--c-muted)",marginBottom:3}}><span>התקדמות</span><span>{pct}%</span></div>
           <PBar pct={pct} h={10}/>
         </div>
+        {perUnitMin>0&&(
+          <div style={{display:"flex",gap:14,flexWrap:"wrap",marginTop:12,fontSize:12,color:"var(--c-muted)"}}>
+            <span>⏱️ זמן ליחידה: <b style={{color:"var(--c-text)"}}>{fmtTime(perUnitMin)}</b></span>
+            <span>📦 צפי לכלל הפק"ע: <b style={{color:"#a78bfa"}}>{fmtWorkEstimate(perUnitMin*serials.length,workdayHours)}</b></span>
+            {pct<100&&<span>⏳ צפי לסיום הנותר: <b style={{color:"#06b6d4"}}>{fmtWorkEstimate(remainMin,workdayHours)}</b></span>}
+            <span style={{color:"var(--c-dim)"}}>(לפי יום עבודה של {workdayHours} שע')</span>
+          </div>
+        )}
       </Card>
 
       {/* Delivery & Dates Management (admin only) */}
@@ -1658,7 +1713,7 @@ function OrderDetail({order,projects,stages,onClose,onUpdate,workLogs,onWorkLog}
   );
 }
 
-function Orders({orders,projects,stages,stageBlocks,updO,workLogs,onWorkLog}){
+function Orders({orders,projects,stages,stageBlocks,updO,workLogs,onWorkLog,workdayHours=8,setWorkdayHours}){
   const {canEdit}=useAuth();
   const [showForm,setShowForm]=useState(false);
   const [editing,setEditing]=useState(null);
@@ -1680,7 +1735,7 @@ function Orders({orders,projects,stages,stageBlocks,updO,workLogs,onWorkLog}){
   // Always get fresh order from state
   const detailOrder=detail?orders.find(o=>o.id===detail.id)||detail:null;
 
-  if(detailOrder)return<OrderDetail order={detailOrder} projects={projects} stages={stages} onClose={()=>setDetail(null)} onUpdate={handleUpd} workLogs={workLogs} onWorkLog={onWorkLog}/>;
+  if(detailOrder)return<OrderDetail order={detailOrder} projects={projects} stages={stages} stageBlocks={stageBlocks} onClose={()=>setDetail(null)} onUpdate={handleUpd} workLogs={workLogs} onWorkLog={onWorkLog} workdayHours={workdayHours}/>;
 
   return(
     <div className="fade-in">
@@ -1691,6 +1746,7 @@ function Orders({orders,projects,stages,stageBlocks,updO,workLogs,onWorkLog}){
       <Card style={{padding:"12px 14px",marginBottom:12,display:"flex",gap:10,flexWrap:"wrap",alignItems:"flex-end"}}>
         <div style={{display:"flex",flexDirection:"column",gap:3,flex:"1 1 150px"}}><label style={{fontSize:11,color:"var(--c-dim)"}}>חיפוש</label><input value={search} onChange={e=>setSearch(e.target.value)} placeholder="חיפוש לפי מספר / תיאור / P/N..."/></div>
         <div style={{display:"flex",flexDirection:"column",gap:3}}><label style={{fontSize:11,color:"var(--c-dim)"}}>פרויקט</label><select value={filterProj} onChange={e=>setFilterProj(e.target.value)} style={{padding:"7px 8px",fontSize:12}}><option value="all">כל הפרויקטים</option>{projects.map(p=><option key={p.id} value={p.id}>{p.name}</option>)}</select></div>
+        {setWorkdayHours&&<div style={{display:"flex",flexDirection:"column",gap:3}}><label style={{fontSize:11,color:"var(--c-dim)"}}>יום עבודה (שע' נטו)</label><input type="number" min="1" step="0.5" value={workdayHours} onChange={e=>setWorkdayHours(e.target.value)} style={{padding:"7px 8px",fontSize:12,width:90}} title="משמש לחישוב צפי הסיום"/></div>}
         <div style={{fontSize:12,color:"var(--c-dim)",paddingBottom:4}}>{filtered.length} פק"ע</div>
       </Card>
       <div style={{display:"flex",flexDirection:"column",gap:7}}>
@@ -1702,6 +1758,7 @@ function Orders({orders,projects,stages,stageBlocks,updO,workLogs,onWorkLog}){
           const pct=serials.length?Math.round(completed/serials.length*100):0;
           const proj=projects.find(p=>p.id===o.projectId);
           const openDef=(o.defects||[]).filter(d=>d.status!=="closed").length;
+          const remainMin=orderRemainingMin(o,stages,stageBlocks,workLogs);
           return(
             <div key={o.id} style={{background:"var(--c-card)",borderRadius:10,padding:"12px 14px",border:"1px solid var(--c-border)",cursor:"pointer",transition:"border-color .15s"}}
               onClick={()=>setDetail(o)}
@@ -1725,6 +1782,7 @@ function Orders({orders,projects,stages,stageBlocks,updO,workLogs,onWorkLog}){
                 <span>יחידות: <b style={{color:"var(--c-text)"}}>{serials.length}</b></span>
                 {canEdit&&<span>מחיר: <b style={{color:"#a78bfa"}}>{fmtMoney(o.unitPrice)}</b></span>}
                 <span>שלבים: <b>{(o.stageIds||[]).length}</b></span>
+                {remainMin>0&&pct<100&&<span>⏳ צפי לסיום: <b style={{color:"#06b6d4"}}>{fmtWorkEstimate(remainMin,workdayHours)}</b></span>}
               </div>
               <PBar pct={pct}/>
             </div>
@@ -2005,7 +2063,7 @@ function AdminTasksBoard({customTasks,onDeleteTask,onMarkPartialTask,onMarkDoneT
 // ══════════════════════════════════════════════════════════════════════════
 // ═══ MY WORK (Worker View) — Enhanced with Break, Bulk, Custom Tasks ════
 // ══════════════════════════════════════════════════════════════════════════
-function MyWork({orders,stages,workLogs,onStartWork,onEndWork,onPauseWork,onResumeWork,customTasks,onAddTask,onStartTask,onEndTask,onPauseTask,onResumeTask,onDeleteTask,onMarkPartialTask,onMarkDoneTask,users}){
+function MyWork({orders,stages,workLogs,onStartWork,onEndWork,onPauseWork,onResumeWork,customTasks,onAddTask,onStartTask,onEndTask,onPauseTask,onResumeTask,onDeleteTask,onMarkPartialTask,onMarkDoneTask,users,dailyPlans}){
   const {toast}=useToast();
   const {currentUser}=useAuth();
   const myAccess=currentUser.stageAccess==="all"?stages.map(s=>s.id):(Array.isArray(currentUser.stageAccess)?currentUser.stageAccess:[]);
@@ -2018,6 +2076,9 @@ function MyWork({orders,stages,workLogs,onStartWork,onEndWork,onPauseWork,onResu
   const [taskDesc,setTaskDesc]=useState("");
 
   const accessible=orders.filter(o=>(o.stageIds||[]).some(sid=>myAccess.includes(sid)));
+  // Today's work plan assigned to me by my manager
+  const myPlans=(dailyPlans||[]).filter(p=>p.userId===currentUser.id&&p.date===todays());
+  const planPending=(orderId,stageId)=>{const o=orders.find(x=>x.id===orderId);if(!o)return [];return (o.serials||[]).filter(sr=>!workLogs.some(w=>w.serialId===sr.id&&w.stageId===stageId&&w.completed)&&!workLogs.some(w=>w.serialId===sr.id&&w.stageId===stageId&&!w.completed))};
 
   const startWork=(serialId,stageId,orderId)=>{
     if(myActiveLog&&!myActiveLog.paused){toast("יש לך עבודה פעילה. סיים או עצור לפני שמתחיל חדשה.","warning");return}
@@ -2133,6 +2194,43 @@ function MyWork({orders,stages,workLogs,onStartWork,onEndWork,onPauseWork,onResu
       ):(
       <div>
       <h2 style={{margin:"0 0 14px"}}>🔨 העבודה שלי</h2>
+
+      {/* My daily work plan (assigned by manager) */}
+      {myPlans.length>0&&(
+        <Card style={{marginBottom:14,border:"1px solid #06b6d455",background:"linear-gradient(135deg,var(--c-card),#02161c)"}}>
+          <div style={{fontWeight:700,fontSize:15,color:"#06b6d4",marginBottom:10}}>📅 תוכנית העבודה שלי להיום</div>
+          <div style={{display:"flex",flexDirection:"column",gap:8}}>
+            {myPlans.map(p=>{
+              const o=orders.find(x=>x.id===p.orderId);const st=stages.find(s=>s.id===p.stageId);
+              const pend=planPending(p.orderId,p.stageId);
+              const canStart=st&&myAccess.includes(st.id);
+              return(
+                <div key={p.id} style={{background:"var(--c-deep)",borderRadius:10,padding:"10px 12px",border:`1px solid ${p.done?"#10b98144":"#06b6d433"}`,opacity:p.done?.65:1}}>
+                  <div style={{display:"flex",alignItems:"center",gap:8,flexWrap:"wrap",marginBottom:pend.length?8:0}}>
+                    <span style={{fontWeight:700,color:"#60a5fa"}}>{o?.woNumber||'פק"ע נמחקה'}</span>
+                    {o?.pn&&<span style={{fontSize:11,color:"#a78bfa"}}>P/N: {o.pn}</span>}
+                    {st&&<span style={{fontSize:12,color:st.color}}>← {st.name}</span>}
+                    <span style={{fontSize:11,color:"var(--c-dim)"}}>{p.targetQty>0?`יעד: ${p.targetQty} יח'`:"כל היחידות"} · נותרו {pend.length}</span>
+                    {p.done&&<span style={{fontSize:11,color:"#10b981"}}>✅ בוצע</span>}
+                    {p.createdByName&&<span style={{fontSize:11,color:"var(--c-dim)"}}>· שובץ ע"י {p.createdByName}</span>}
+                  </div>
+                  {p.note&&<div style={{fontSize:12,color:"var(--c-muted)",marginBottom:pend.length?8:0}}>📝 {p.note}</div>}
+                  {!canStart&&st&&<div style={{fontSize:11,color:"#f59e0b"}}>⚠️ אין לך הרשאה לשלב זה — פנה למנהל</div>}
+                  {canStart&&pend.length>0&&(
+                    <div style={{display:"flex",flexWrap:"wrap",gap:6}}>
+                      {pend.slice(0,12).map(s=>(
+                        <Btn key={s.id} color={st.color} small onClick={()=>startWork(s.id,st.id,p.orderId)} disabled={!!(myActiveLog&&!myActiveLog.paused)}>▶️ {s.sn}</Btn>
+                      ))}
+                      {pend.length>12&&<span style={{fontSize:11,color:"var(--c-dim)",alignSelf:"center"}}>ועוד {pend.length-12}...</span>}
+                    </div>
+                  )}
+                  {canStart&&pend.length===0&&<div style={{fontSize:11,color:"#10b981"}}>🎉 כל היחידות בשלב זה הושלמו</div>}
+                </div>
+              );
+            })}
+          </div>
+        </Card>
+      )}
 
       {/* Active Work */}
       {myActiveLog&&(
@@ -2322,7 +2420,7 @@ function ActiveTimer({startTime,pauseMin=0}){
 // ══════════════════════════════════════════════════════════════════════════
 // ═══ WORKERS DASHBOARD ══════════════════════════════════════════════════
 // ══════════════════════════════════════════════════════════════════════════
-function WorkersDashboard({users,workLogs,orders,stages,customTasks,onAddTask,onDeleteLog,onUpdateTask,onDeleteTask,onMarkPartialTask,onMarkDoneTask}){
+function WorkersDashboard({users,workLogs,orders,stages,customTasks,onAddTask,onDeleteLog,onUpdateTask,onDeleteTask,onMarkPartialTask,onMarkDoneTask,dailyPlans,onAddPlan,onDeletePlan,onTogglePlanDone}){
   const {toast}=useToast();
   const [search,setSearch]=useState("");
   const [period,setPeriod]=useState("all");
@@ -2382,6 +2480,9 @@ function WorkersDashboard({users,workLogs,orders,stages,customTasks,onAddTask,on
           <SegBtn options={[["all","הכל"],["today","היום"],["week","שבוע"],["month","חודש"],["quarter","רבעון"],["year","שנה"]]} value={period} onChange={setPeriod}/>
         </div>
       </Card>
+
+      {/* Daily work plan */}
+      <DailyPlanBoard dailyPlans={dailyPlans} workers={workers} orders={orders} stages={stages} workLogs={workLogs} onAddPlan={onAddPlan} onDeletePlan={onDeletePlan} onTogglePlanDone={onTogglePlanDone}/>
 
       {/* Tasks Board */}
       <AdminTasksBoard workers={workers} customTasks={customTasks||[]} onAddTask={onAddTask} onUpdateTask={onUpdateTask} onDeleteTask={onDeleteTask} filterByPeriod={filterByPeriod}/>
@@ -2471,9 +2572,114 @@ function WorkersDashboard({users,workLogs,orders,stages,customTasks,onAddTask,on
 }
 
 // ══════════════════════════════════════════════════════════════════════════
+// ═══ DAILY WORK PLANS (תוכנית עבודה יומית) ═══════════════════════════════
+// ══════════════════════════════════════════════════════════════════════════
+// Managers (team leads / dept managers / admin) assign each worker the order+stage
+// units to work on for a chosen day. Workers see their plan in "העבודה שלי".
+function DailyPlanBoard({dailyPlans,workers,orders,stages,workLogs,onAddPlan,onDeletePlan,onTogglePlanDone}){
+  const {toast}=useToast();
+  const {currentUser}=useAuth();
+  const [date,setDate]=useState(todays());
+  const [showForm,setShowForm]=useState(false);
+  const [pWorker,setPWorker]=useState("");
+  const [pOrder,setPOrder]=useState("");
+  const [pStage,setPStage]=useState("");
+  const [pQty,setPQty]=useState("");
+  const [pNote,setPNote]=useState("");
+  const canAssign=Array.isArray(workers)&&workers.length>0&&!!onAddPlan;
+  const selOrder=(orders||[]).find(o=>o.id===pOrder);
+  const orderStages=selOrder?(selOrder.stageIds||[]).map(sid=>stages.find(s=>s.id===sid)).filter(Boolean).sort((a,b)=>a.order-b.order):[];
+  // Units of an order still needing a given stage (not yet completed there).
+  const pendingFor=(orderId,stageId)=>{const o=(orders||[]).find(x=>x.id===orderId);if(!o)return 0;return (o.serials||[]).filter(sr=>!(workLogs||[]).some(w=>w.serialId===sr.id&&w.stageId===stageId&&w.completed)).length};
+  const submit=()=>{
+    if(!pWorker||!pOrder||!pStage){toast('יש לבחור עובד, פק"ע ושלב',"warning");return}
+    const u=workers.find(w=>w.id===pWorker);
+    onAddPlan({id:uid(),userId:pWorker,userName:u?.name||"",date,orderId:pOrder,stageId:pStage,targetQty:Number(pQty)||0,note:pNote.trim(),done:false,createdBy:currentUser.id,createdByName:currentUser.name,createdAt:nowISO()});
+    setPOrder("");setPStage("");setPQty("");setPNote("");setShowForm(false);
+    toast("התוכנית נשמרה","success");
+  };
+  const dayPlans=(dailyPlans||[]).filter(p=>p.date===date&&workers.some(w=>w.id===p.userId));
+  const byWorker={};
+  dayPlans.forEach(p=>{(byWorker[p.userId]=byWorker[p.userId]||[]).push(p)});
+  return(
+    <Card style={{marginBottom:14,border:"1px solid #06b6d433"}}>
+      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:12,flexWrap:"wrap",gap:8}}>
+        <div style={{fontWeight:700,fontSize:15,color:"#06b6d4"}}>📅 תוכנית עבודה יומית</div>
+        <div style={{display:"flex",gap:8,alignItems:"center",flexWrap:"wrap"}}>
+          <input type="date" value={date} onChange={e=>setDate(e.target.value)} style={{padding:"6px 8px",fontSize:12}}/>
+          {canAssign&&<Btn color="#06b6d4" small onClick={()=>setShowForm(p=>!p)}>{showForm?"✕ סגור":"➕ שיבוץ"}</Btn>}
+        </div>
+      </div>
+      {canAssign&&showForm&&(
+        <div style={{background:"var(--c-deep)",borderRadius:10,padding:14,marginBottom:12,border:"1px solid #06b6d444"}}>
+          <div style={{fontWeight:700,fontSize:13,color:"#06b6d4",marginBottom:10}}>➕ שיבוץ עבודה ל-{fmt(date)}</div>
+          <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(160px,1fr))",gap:10}}>
+            <div style={{display:"flex",flexDirection:"column",gap:3}}>
+              <label style={{fontSize:11,color:"var(--c-dim)"}}>עובד *</label>
+              <select value={pWorker} onChange={e=>setPWorker(e.target.value)}><option value="">— בחר עובד —</option>{workers.map(w=><option key={w.id} value={w.id}>{w.name}</option>)}</select>
+            </div>
+            <div style={{display:"flex",flexDirection:"column",gap:3}}>
+              <label style={{fontSize:11,color:"var(--c-dim)"}}>פק"ע *</label>
+              <select value={pOrder} onChange={e=>{setPOrder(e.target.value);setPStage("")}}><option value="">— בחר פק"ע —</option>{(orders||[]).map(o=><option key={o.id} value={o.id}>{o.woNumber}{o.pn?` · ${o.pn}`:""}</option>)}</select>
+            </div>
+            <div style={{display:"flex",flexDirection:"column",gap:3}}>
+              <label style={{fontSize:11,color:"var(--c-dim)"}}>שלב *</label>
+              <select value={pStage} onChange={e=>setPStage(e.target.value)} disabled={!selOrder}><option value="">— בחר שלב —</option>{orderStages.map(st=><option key={st.id} value={st.id}>{st.name}{st.roleId&&ROLES[st.roleId]?` (${ROLES[st.roleId].label})`:""}</option>)}</select>
+            </div>
+            <div style={{display:"flex",flexDirection:"column",gap:3}}>
+              <label style={{fontSize:11,color:"var(--c-dim)"}}>יעד יחידות (0=הכל)</label>
+              <input type="number" min="0" value={pQty} onChange={e=>setPQty(e.target.value)} placeholder="0"/>
+            </div>
+            <div style={{display:"flex",flexDirection:"column",gap:3,gridColumn:"1 / -1"}}>
+              <label style={{fontSize:11,color:"var(--c-dim)"}}>הערה (לא חובה)</label>
+              <input value={pNote} onChange={e=>setPNote(e.target.value)} placeholder="הנחיות נוספות..."/>
+            </div>
+          </div>
+          {pOrder&&pStage&&<div style={{fontSize:11,color:"var(--c-dim)",marginTop:8}}>זמינות לשלב זה: {pendingFor(pOrder,pStage)} יחידות ממתינות</div>}
+          <div style={{display:"flex",gap:8,marginTop:10,justifyContent:"flex-end"}}>
+            <Btn small onClick={()=>{setShowForm(false)}}>ביטול</Btn>
+            <Btn color="#06b6d4" small onClick={submit}>✅ שבץ</Btn>
+          </div>
+        </div>
+      )}
+      {dayPlans.length===0?<EmptyState icon="📅" title="אין שיבוצים ליום זה" subtitle={canAssign?"לחץ על שיבוץ כדי להקצות עבודה לעובד":"המנהל יכול לשבץ לך עבודה יומית"}/>:(
+        <div style={{display:"flex",flexDirection:"column",gap:10}}>
+          {workers.filter(w=>byWorker[w.id]).map(w=>(
+            <div key={w.id} style={{background:"var(--c-deep)",borderRadius:10,padding:"10px 12px",border:"1px solid var(--c-border)"}}>
+              <div style={{fontWeight:700,fontSize:13,marginBottom:6,display:"flex",alignItems:"center",gap:6}}>
+                <span style={{width:24,height:24,borderRadius:"50%",background:(ROLES[w.role]?.color||"#3b82f6")+"22",color:ROLES[w.role]?.color||"#3b82f6",display:"inline-flex",alignItems:"center",justifyContent:"center",fontSize:12,fontWeight:800}}>{w.name?.charAt(0)}</span>
+                {w.name}
+                <span style={{fontSize:11,color:"var(--c-dim)"}}>({byWorker[w.id].length} שיבוצים)</span>
+              </div>
+              <div style={{display:"flex",flexDirection:"column",gap:5}}>
+                {byWorker[w.id].map(p=>{
+                  const o=(orders||[]).find(x=>x.id===p.orderId);const st=stages.find(s=>s.id===p.stageId);const remain=pendingFor(p.orderId,p.stageId);
+                  return(
+                    <div key={p.id} style={{display:"flex",alignItems:"center",gap:8,flexWrap:"wrap",background:"var(--c-card)",borderRadius:8,padding:"7px 10px",border:`1px solid ${p.done?"#10b98144":"var(--c-border)"}`,opacity:p.done?.7:1}}>
+                      <span style={{fontWeight:700,color:"#60a5fa",fontSize:13}}>{o?.woNumber||"פק\"ע נמחקה"}</span>
+                      {st&&<span style={{fontSize:11,color:st.color}}>← {st.name}</span>}
+                      <span style={{fontSize:11,color:"var(--c-dim)"}}>{p.targetQty>0?`יעד ${p.targetQty}`:"כל היחידות"} · נותרו {remain}</span>
+                      {p.note&&<span style={{fontSize:11,color:"var(--c-muted)"}}>📝 {p.note}</span>}
+                      <div style={{marginInlineStart:"auto",display:"flex",gap:4,alignItems:"center"}}>
+                        <button onClick={()=>onTogglePlanDone&&onTogglePlanDone(p.id)} title="סמן כבוצע" style={{background:p.done?"#10b98133":"transparent",border:"1px solid #10b98144",borderRadius:6,padding:"2px 7px",fontSize:11,color:"#10b981",fontFamily:"inherit",cursor:"pointer"}}>✅</button>
+                        {onDeletePlan&&<IBtn onClick={()=>{if(confirm("למחוק שיבוץ?"))onDeletePlan(p.id)}}>🗑️</IBtn>}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+    </Card>
+  );
+}
+
+// ══════════════════════════════════════════════════════════════════════════
 // ═══ TEAM DASHBOARD (ראש צוות / מנהל מחלקה) ══════════════════════════════
 // ══════════════════════════════════════════════════════════════════════════
-function TeamDashboard({users,workLogs,orders,stages,customTasks,departments,onAddTask,onDeleteTask,onMarkPartialTask,onMarkDoneTask}){
+function TeamDashboard({users,workLogs,orders,stages,customTasks,departments,onAddTask,onDeleteTask,onMarkPartialTask,onMarkDoneTask,dailyPlans,onAddPlan,onDeletePlan,onTogglePlanDone}){
   const {currentUser}=useAuth();
   const isDeptMgr=currentUser.role==="dept_manager";
   const myDept=(departments||[]).find(d=>d.id===currentUser.departmentId||d.managerId===currentUser.id);
@@ -2567,6 +2773,9 @@ function TeamDashboard({users,workLogs,orders,stages,customTasks,departments,onA
         </div>
       )}
 
+      {/* Daily work plan for my team */}
+      {team.length>0&&<DailyPlanBoard dailyPlans={dailyPlans} workers={team} orders={orders} stages={stages} workLogs={workLogs} onAddPlan={onAddPlan} onDeletePlan={onDeletePlan} onTogglePlanDone={onTogglePlanDone}/>}
+
       {/* Task assignment to my team */}
       {team.length>0&&<AdminTasksBoard customTasks={(customTasks||[]).filter(t=>teamIds.has(t.userId))} onDeleteTask={onDeleteTask} onMarkPartialTask={onMarkPartialTask} onMarkDoneTask={onMarkDoneTask} workers={team} onAddTask={onAddTask}/>}
 
@@ -2607,9 +2816,13 @@ function StagesManagement({stages,setStages,stageBlocks,setStageBlocks,persist})
   const [color,setColor]=useState("#3b82f6");
   const [price,setPrice]=useState(0);
   const [hourly,setHourly]=useState(0);
+  const [roleId,setRoleId]=useState("");
+  const [minutes,setMinutes]=useState(0);
   const [editId,setEditId]=useState(null);
   const [editPrice,setEditPrice]=useState(0);
   const [editHourly,setEditHourly]=useState(0);
+  const [editRoleId,setEditRoleId]=useState("");
+  const [editMinutes,setEditMinutes]=useState(0);
   const [editStageName,setEditStageName]=useState("");
   const [editStageColor,setEditStageColor]=useState("#3b82f6");
   // Block management
@@ -2621,12 +2834,12 @@ function StagesManagement({stages,setStages,stageBlocks,setStageBlocks,persist})
   const add=()=>{
     if(!name.trim())return;
     const maxOrder=stages.reduce((m,s)=>Math.max(m,s.order||0),0);
-    const ns=[...stages,{id:uid(),name:name.trim(),order:maxOrder+1,color,price:Number(price)||0,hourlyRate:Number(hourly)||0}];
-    setStages(ns);persist(null,null,ns);setName("");setPrice(0);setHourly(0);setShowForm(false);
+    const ns=[...stages,{id:uid(),name:name.trim(),order:maxOrder+1,color,price:Number(price)||0,hourlyRate:Number(hourly)||0,roleId:roleId||"",minutes:Number(minutes)||0}];
+    setStages(ns);persist(null,null,ns);setName("");setPrice(0);setHourly(0);setRoleId("");setMinutes(0);setShowForm(false);
   };
   const del=id=>{if(!confirm("למחוק?"))return;const ns=stages.filter(s=>s.id!==id);setStages(ns);persist(null,null,ns);SB.del("stages",{id}).catch(()=>{})};
   const move=(id,dir)=>{const idx=stages.findIndex(s=>s.id===id);if((dir===-1&&idx===0)||(dir===1&&idx===stages.length-1))return;const arr=[...stages];[arr[idx],arr[idx+dir]]=[arr[idx+dir],arr[idx]];arr.forEach((s,i)=>s.order=i+1);setStages(arr);persist(null,null,arr)};
-  const saveStage=(id)=>{const ns=stages.map(s=>s.id===id?{...s,name:editStageName.trim()||s.name,color:editStageColor,price:Number(editPrice)||0,hourlyRate:Number(editHourly)||0}:s);setStages(ns);persist(null,null,ns);setEditId(null)};
+  const saveStage=(id)=>{const ns=stages.map(s=>s.id===id?{...s,name:editStageName.trim()||s.name,color:editStageColor,price:Number(editPrice)||0,hourlyRate:Number(editHourly)||0,roleId:editRoleId||"",minutes:Number(editMinutes)||0}:s);setStages(ns);persist(null,null,ns);setEditId(null)};
 
   // Block functions
   const addBlock=()=>{
@@ -2738,6 +2951,14 @@ function StagesManagement({stages,setStages,stageBlocks,setStageBlocks,persist})
         {showForm&&(
           <div style={{display:"flex",gap:10,alignItems:"flex-end",marginBottom:12,flexWrap:"wrap"}}>
             <Field label="שם" value={name} onChange={setName} style={{flex:1,minWidth:140}}/>
+            <div style={{display:"flex",flexDirection:"column",gap:4,minWidth:140}}>
+              <label style={{fontSize:11,color:"var(--c-dim)",fontWeight:600}}>תפקיד מבצע</label>
+              <select value={roleId} onChange={e=>setRoleId(e.target.value)} style={{padding:"7px 8px",fontSize:13}}>
+                <option value="">— ללא —</option>
+                {EXECUTION_ROLES.map(r=><option key={r} value={r}>{ROLES[r].icon} {ROLES[r].label}</option>)}
+              </select>
+            </div>
+            <Field label="זמן (דק'/יח')" type="number" value={minutes} onChange={setMinutes} style={{minWidth:90}}/>
             <Field label="₪ ליחידה" type="number" value={price} onChange={setPrice} style={{minWidth:80}}/>
             <Field label="תעריף ₪/שעה" type="number" value={hourly} onChange={setHourly} style={{minWidth:90}}/>
             <div style={{display:"flex",flexDirection:"column",gap:4}}><label style={{fontSize:11,color:"var(--c-dim)",fontWeight:600}}>צבע</label><input type="color" value={color} onChange={e=>setColor(e.target.value)} style={{width:36,height:34,padding:2,border:"1px solid var(--c-border)",borderRadius:6}}/></div>
@@ -2767,6 +2988,17 @@ function StagesManagement({stages,setStages,stageBlocks,setStageBlocks,persist})
                       <label style={{fontSize:11,color:"var(--c-dim)",display:"block",marginBottom:2}}>₪/שעה</label>
                       <input type="number" value={editHourly} onChange={e=>setEditHourly(e.target.value)} style={{width:80,padding:"5px 8px",fontSize:13,borderRadius:6,border:"1px solid var(--c-border)",background:"var(--c-deep)",color:"var(--c-text)",fontFamily:"inherit"}}/>
                     </div>
+                    <div>
+                      <label style={{fontSize:11,color:"var(--c-dim)",display:"block",marginBottom:2}}>תפקיד מבצע</label>
+                      <select value={editRoleId} onChange={e=>setEditRoleId(e.target.value)} style={{padding:"6px 8px",fontSize:13,borderRadius:6,border:"1px solid var(--c-border)",background:"var(--c-deep)",color:"var(--c-text)",fontFamily:"inherit"}}>
+                        <option value="">— ללא —</option>
+                        {EXECUTION_ROLES.map(r=><option key={r} value={r}>{ROLES[r].icon} {ROLES[r].label}</option>)}
+                      </select>
+                    </div>
+                    <div>
+                      <label style={{fontSize:11,color:"var(--c-dim)",display:"block",marginBottom:2}}>זמן (דק'/יח')</label>
+                      <input type="number" value={editMinutes} onChange={e=>setEditMinutes(e.target.value)} style={{width:80,padding:"5px 8px",fontSize:13,borderRadius:6,border:"1px solid var(--c-border)",background:"var(--c-deep)",color:"var(--c-text)",fontFamily:"inherit"}}/>
+                    </div>
                   </div>
                   <div style={{display:"flex",gap:8}}>
                     <Btn color="#10b981" onClick={()=>saveStage(s.id)} small>✅ שמור שינויים</Btn>
@@ -2779,10 +3011,12 @@ function StagesManagement({stages,setStages,stageBlocks,setStageBlocks,persist})
                     <span style={{fontSize:16,fontWeight:800,color:s.color,minWidth:24}}>{i+1}</span>
                     <div style={{width:10,height:10,borderRadius:3,background:s.color}}/>
                     <span style={{fontWeight:600}}>{s.name}</span>
+                    {s.roleId&&ROLES[s.roleId]&&<span style={{fontSize:11,color:ROLES[s.roleId].color,padding:"2px 7px",borderRadius:6,background:ROLES[s.roleId].color+"1a",border:`1px solid ${ROLES[s.roleId].color}33`}}>{ROLES[s.roleId].icon} {ROLES[s.roleId].label}</span>}
+                    {s.minutes>0&&<span style={{fontSize:11,color:"#06b6d4",padding:"2px 6px",borderRadius:6,background:"var(--c-deep)"}}>⏱️ {s.minutes} דק'/יח'</span>}
                     <span style={{fontSize:11,color:(s.price||s.hourlyRate)?"#a78bfa":"var(--c-dim)",padding:"2px 6px",borderRadius:6,background:"var(--c-deep)"}}>{s.price?`₪${s.price}/יח'`:""}{s.hourlyRate?`${s.price?" · ":""}₪${s.hourlyRate}/שע'`:""}{!s.price&&!s.hourlyRate?"ללא תמחור":""}</span>
                   </div>
                   <div style={{display:"flex",gap:3}}>
-                    <IBtn onClick={()=>{setEditId(s.id);setEditStageName(s.name);setEditStageColor(s.color);setEditPrice(s.price||0);setEditHourly(s.hourlyRate||0)}} title="ערוך שלב">✏️</IBtn>
+                    <IBtn onClick={()=>{setEditId(s.id);setEditStageName(s.name);setEditStageColor(s.color);setEditPrice(s.price||0);setEditHourly(s.hourlyRate||0);setEditRoleId(s.roleId||"");setEditMinutes(s.minutes||0)}} title="ערוך שלב">✏️</IBtn>
                     <IBtn onClick={()=>move(s.id,-1)}>⬆️</IBtn>
                     <IBtn onClick={()=>move(s.id,1)}>⬇️</IBtn>
                     <IBtn onClick={()=>del(s.id)}>🗑️</IBtn>
@@ -4273,6 +4507,8 @@ function App(){
   const [workLogs,setWorkLogs]=useState([]);
   const [customTasks,setCustomTasks]=useState([]);
   const [departments,setDepartments]=useState([]);
+  const [dailyPlans,setDailyPlans]=useState([]);
+  const [workdayHours,setWorkdayHours]=useState(()=>{const v=Number(LS.get(WORKDAY_LS_KEY));return v>0?v:8});
   const [loading,setLoading]=useState(true);
   const [sync,setSync]=useState("ok");
   // PWA state
@@ -4286,6 +4522,7 @@ function App(){
   const canUseFeature=useCallback((key)=>{if(currentUser?.role==="admin")return true;const f=PLAN_FEATURES[companyPlan]||PLAN_FEATURES.free;return f[key]===true||(typeof f[key]==="number"&&f[key]>0)},[companyPlan,currentUser]);
   const swRegRef=useRef(null);
   const oRef=useRef(orders),pRef=useRef(projects),sRef=useRef(stages),wRef=useRef(workLogs);
+  const setWorkdayHoursPersist=(h)=>{const v=Number(h)>0?Number(h):8;setWorkdayHours(v);LS.set(WORKDAY_LS_KEY,v)};
 
   useEffect(()=>{
     document.body.classList.toggle("light-mode",lightMode);
@@ -4330,6 +4567,7 @@ function App(){
       const lct=LS.get("customTasks");if(lct)setCustomTasks(lct);
       const lsb=LS.get("stageBlocks");if(lsb)setStageBlocks(lsb);
       const ldp=LS.get("departments");if(ldp)setDepartments(ldp);
+      const lpl=LS.get("dailyPlans");if(lpl)setDailyPlans(lpl);
     }
 
     // Then always load from Supabase (Supabase is the source of truth)
@@ -4343,6 +4581,7 @@ function App(){
         setCustomTasks(data.customTasks||[]);LS.set("customTasks",data.customTasks||[]);
         setStageBlocks(data.stageBlocks||[]);LS.set("stageBlocks",data.stageBlocks||[]);
         setDepartments(data.departments||[]);LS.set("departments",data.departments||[]);
+        setDailyPlans(data.dailyPlans||[]);LS.set("dailyPlans",data.dailyPlans||[]);
         LS.set("session_company",_companyId);
       }
       if(users?.length){LS.set("users",users)}
@@ -4436,6 +4675,7 @@ function App(){
           if(data.projects){setProjects(data.projects);LS.set("projects",data.projects)}
           if(data.stageBlocks){setStageBlocks(data.stageBlocks);LS.set("stageBlocks",data.stageBlocks)}
           if(data.departments){setDepartments(data.departments);LS.set("departments",data.departments)}
+          if(data.dailyPlans){setDailyPlans(data.dailyPlans);LS.set("dailyPlans",data.dailyPlans)}
         }
         setSync("ok");
       }catch(e){console.warn("Poll error",e)}
@@ -4452,7 +4692,7 @@ function App(){
         ws=new WebSocket(wsUrl);
         ws.onopen=()=>{
           console.log("Realtime WS connected");
-          const tables=["orders","work_logs","custom_tasks","stages","projects","stage_blocks","departments"];
+          const tables=["orders","work_logs","custom_tasks","stages","projects","stage_blocks","departments","daily_plans"];
           tables.forEach((t,i)=>{
             ws.send(JSON.stringify({
               topic:`realtime:public:${t}`,
@@ -4488,6 +4728,7 @@ function App(){
             if(["projects"].includes(tbl)){const rows=await SB.get("projects",cf+"order=name.asc");setProjects(rows.map(dbToProject));LS.set("projects",rows.map(dbToProject))}
             if(["stage_blocks"].includes(tbl)){const rows=await SB.get("stage_blocks",cf+"order=created_at.asc");setStageBlocks(rows.map(dbToBlock));LS.set("stageBlocks",rows.map(dbToBlock))}
             if(["departments"].includes(tbl)){const rows=await SB.get("departments",cf+"order=name.asc");setDepartments(rows.map(dbToDept));LS.set("departments",rows.map(dbToDept))}
+            if(["daily_plans"].includes(tbl)){const rows=await SB.get("daily_plans",cf+"order=created_at.asc");setDailyPlans(rows.map(dbToPlan));LS.set("dailyPlans",rows.map(dbToPlan))}
           }catch(err){console.warn("Realtime msg error",err)}
         };
         ws.onclose=()=>{
@@ -4510,11 +4751,13 @@ function App(){
   useEffect(()=>{sbRef.current=stageBlocks},[stageBlocks]);
   const dpRef=useRef(departments);
   useEffect(()=>{dpRef.current=departments},[departments]);
+  const plRef=useRef(dailyPlans);
+  useEffect(()=>{plRef.current=dailyPlans},[dailyPlans]);
 
-  const persist=(no,np,ns,nw,nct,nsb,ndp)=>{
-    const o=no??oRef.current,p=np??pRef.current,s=ns??sRef.current,w=nw??wRef.current,ct=nct??ctRef.current,sb=nsb??sbRef.current,dp=ndp??dpRef.current;
+  const persist=(no,np,ns,nw,nct,nsb,ndp,npl)=>{
+    const o=no??oRef.current,p=np??pRef.current,s=ns??sRef.current,w=nw??wRef.current,ct=nct??ctRef.current,sb=nsb??sbRef.current,dp=ndp??dpRef.current,pl=npl??plRef.current;
     // Always save to localStorage immediately
-    LS.set("orders",o);LS.set("projects",p);LS.set("stages",s);LS.set("workLogs",w);LS.set("customTasks",ct);LS.set("stageBlocks",sb);LS.set("departments",dp);
+    LS.set("orders",o);LS.set("projects",p);LS.set("stages",s);LS.set("workLogs",w);LS.set("customTasks",ct);LS.set("stageBlocks",sb);LS.set("departments",dp);LS.set("dailyPlans",pl);
     lastPersistRef.current=Date.now();
     setSync("saving");clearTimeout(saveTimer);
     saveTimer=setTimeout(async()=>{
@@ -4527,6 +4770,7 @@ function App(){
           SB.upsert("work_logs",w.map(logToDb)),
           SB.upsert("custom_tasks",ct.map(taskToDb)),
           SB.upsert("departments",dp.map(deptToDb)),
+          SB.upsert("daily_plans",pl.map(planToDb)),
         ]);
         setSync("ok");
       }catch(e){console.warn("Supabase save error",e);setSync("error")}
@@ -4539,8 +4783,8 @@ function App(){
     setCompanyId(cid);
     // If company changed — clear stale cache immediately so no data leaks between companies
     if(cid!==prevCid){
-      setOrders([]);setProjects(DEF_PROJ);setStages(DEF_STAGES);setWorkLogs([]);setCustomTasks([]);setStageBlocks([]);setDepartments([]);
-      ["orders","projects","stages","workLogs","customTasks","stageBlocks","departments"].forEach(k=>{try{localStorage.removeItem(LS_PREFIX+k)}catch{}});
+      setOrders([]);setProjects(DEF_PROJ);setStages(DEF_STAGES);setWorkLogs([]);setCustomTasks([]);setStageBlocks([]);setDepartments([]);setDailyPlans([]);
+      ["orders","projects","stages","workLogs","customTasks","stageBlocks","departments","dailyPlans"].forEach(k=>{try{localStorage.removeItem(LS_PREFIX+k)}catch{}});
     }
     setCurrentUser(u);
     try{localStorage.setItem(LS_PREFIX+"session",JSON.stringify({id:u.id,username:u.username,companyId:cid}))}catch{}
@@ -4661,6 +4905,10 @@ function App(){
   const handleMarkPartialTask=(taskId)=>{setCustomTasks(prev=>{const next=prev.map(t=>t.id===taskId?{...t,partial:!t.partial}:t);persist(null,null,null,null,next);return next})};
   const handleMarkDoneTask=(taskId)=>{setCustomTasks(prev=>{const next=prev.map(t=>t.id===taskId?{...t,completed:true,partial:false,endTime:t.endTime||nowISO()}:t);persist(null,null,null,null,next);return next})};
   const handleUpdateTask=(taskId,updates)=>{setCustomTasks(prev=>{const next=prev.map(t=>t.id===taskId?{...t,...updates}:t);persist(null,null,null,null,next);return next})};
+  // Daily work plans — managers assign, workers see them and work the assigned units
+  const handleAddPlan=(plan)=>{setDailyPlans(prev=>{const next=[...prev,plan];persist(null,null,null,null,null,null,null,next);return next});if(plan.userName)PushNotify.send("📅 תוכנית עבודה חדשה",`${plan.userName}, הוקצתה לך עבודה ליום ${fmt(plan.date)}`,`plan_${plan.id}`)};
+  const handleDeletePlan=(planId)=>{setDailyPlans(prev=>{const next=prev.filter(p=>p.id!==planId);persist(null,null,null,null,null,null,null,next);return next});SB.del("daily_plans",{id:planId}).catch(()=>{})};
+  const handleTogglePlanDone=(planId)=>{setDailyPlans(prev=>{const next=prev.map(p=>p.id===planId?{...p,done:!p.done}:p);persist(null,null,null,null,null,null,null,next);return next})};
   const handleDeleteLog=(ids)=>{setWorkLogs(prev=>{const next=prev.filter(w=>!ids.includes(w.id));persist(null,null,null,next);return next});ids.forEach(id=>SB.del("work_logs",{id}).catch(()=>{}))};
   // Undo a completed work log — revert to uncompleted state (effectively delete it)
   const handleUndoWorkLog=(logId)=>{
@@ -4839,7 +5087,7 @@ function App(){
   };
   useEffect(()=>{const isi=window.matchMedia("(display-mode:standalone)").matches||window.navigator.standalone;if(isi){setIsStandalone(true);return;}const h=e=>{e.preventDefault();setInstallPrompt(e);setShowInstall(true)};window.addEventListener("beforeinstallprompt",h);window.addEventListener("appinstalled",()=>{setShowInstall(false);setInstallPrompt(null);setIsStandalone(true)});return()=>window.removeEventListener("beforeinstallprompt",h)},[]);
   // Service Worker
-  useEffect(()=>{if(!("serviceWorker" in navigator))return;navigator.serviceWorker.register("./sw.js?v=20").then(reg=>{swRegRef.current=reg;if(reg.waiting)setShowUpdate(true);reg.addEventListener("updatefound",()=>{const nw=reg.installing;if(!nw)return;nw.addEventListener("statechange",()=>{if(nw.state==="installed"&&navigator.serviceWorker.controller)setShowUpdate(true)})});setInterval(()=>reg.update(),30*60*1000)}).catch(()=>{});navigator.serviceWorker.addEventListener("controllerchange",()=>window.location.reload())},[]);
+  useEffect(()=>{if(!("serviceWorker" in navigator))return;navigator.serviceWorker.register("./sw.js?v=22").then(reg=>{swRegRef.current=reg;if(reg.waiting)setShowUpdate(true);reg.addEventListener("updatefound",()=>{const nw=reg.installing;if(!nw)return;nw.addEventListener("statechange",()=>{if(nw.state==="installed"&&navigator.serviceWorker.controller)setShowUpdate(true)})});setInterval(()=>reg.update(),30*60*1000)}).catch(()=>{});navigator.serviceWorker.addEventListener("controllerchange",()=>window.location.reload())},[]);
   // Network status
   useEffect(()=>{const on=()=>{setIsOffline(false);toast("החיבור חזר — מסנכרן נתונים...","success");refreshFromDB(true)};const off=()=>{setIsOffline(true)};window.addEventListener("online",on);window.addEventListener("offline",off);return()=>{window.removeEventListener("online",on);window.removeEventListener("offline",off)}},[]);
   // PWA Install
@@ -4872,11 +5120,11 @@ function App(){
       )}
       <main className="main-content" style={{maxWidth:1440,margin:"0 auto",padding:"16px 14px",paddingBottom:showInstall?"100px":"calc(16px + env(safe-area-inset-bottom,0px))"}}>
         {tab==="dashboard"&&<Dashboard orders={filteredOrders} projects={filteredProjects} stages={stages} users={getUsers()} workLogs={filteredWorkLogs} departments={departments} customTasks={customTasks}/>}
-        {tab==="team"&&isLead&&<TeamDashboard users={getUsers()} workLogs={filteredWorkLogs} orders={filteredOrders} stages={stages} customTasks={customTasks} departments={departments} onAddTask={handleAddTask} onDeleteTask={handleDeleteTask} onMarkPartialTask={handleMarkPartialTask} onMarkDoneTask={handleMarkDoneTask}/>}
-        {tab==="orders"&&<Orders orders={filteredOrders} projects={filteredProjects} stages={stages} stageBlocks={stageBlocks} updO={updO} workLogs={filteredWorkLogs} onWorkLog={handleStartWork}/>}
+        {tab==="team"&&isLead&&<TeamDashboard users={getUsers()} workLogs={filteredWorkLogs} orders={filteredOrders} stages={stages} customTasks={customTasks} departments={departments} onAddTask={handleAddTask} onDeleteTask={handleDeleteTask} onMarkPartialTask={handleMarkPartialTask} onMarkDoneTask={handleMarkDoneTask} dailyPlans={dailyPlans} onAddPlan={handleAddPlan} onDeletePlan={handleDeletePlan} onTogglePlanDone={handleTogglePlanDone}/>}
+        {tab==="orders"&&<Orders orders={filteredOrders} projects={filteredProjects} stages={stages} stageBlocks={stageBlocks} updO={updO} workLogs={filteredWorkLogs} onWorkLog={handleStartWork} workdayHours={workdayHours} setWorkdayHours={setWorkdayHoursPersist}/>}
         {tab==="shortages"&&<Shortages orders={filteredOrders} updO={updO} projects={filteredProjects}/>}
-        {tab==="mywork"&&<MyWork orders={filteredOrders} stages={stages} workLogs={filteredWorkLogs} onStartWork={handleStartWork} onEndWork={handleEndWork} onPauseWork={handlePauseWork} onResumeWork={handleResumeWork} customTasks={customTasks} onAddTask={handleAddTask} onStartTask={handleStartTask} onEndTask={handleEndTask} onPauseTask={handlePauseTask} onResumeTask={handleResumeTask} onDeleteTask={handleDeleteTask} onMarkPartialTask={handleMarkPartialTask} onMarkDoneTask={handleMarkDoneTask} users={getUsers()}/>}
-        {tab==="workers"&&isAdmin&&<WorkersDashboard users={getUsers()} workLogs={filteredWorkLogs} orders={filteredOrders} stages={stages} customTasks={customTasks} onAddTask={handleAddTask} onDeleteLog={handleDeleteLog} onDeleteTask={handleDeleteTask} onMarkPartialTask={handleMarkPartialTask} onMarkDoneTask={handleMarkDoneTask}/>}
+        {tab==="mywork"&&<MyWork orders={filteredOrders} stages={stages} workLogs={filteredWorkLogs} onStartWork={handleStartWork} onEndWork={handleEndWork} onPauseWork={handlePauseWork} onResumeWork={handleResumeWork} customTasks={customTasks} onAddTask={handleAddTask} onStartTask={handleStartTask} onEndTask={handleEndTask} onPauseTask={handlePauseTask} onResumeTask={handleResumeTask} onDeleteTask={handleDeleteTask} onMarkPartialTask={handleMarkPartialTask} onMarkDoneTask={handleMarkDoneTask} users={getUsers()} dailyPlans={dailyPlans}/>}
+        {tab==="workers"&&isAdmin&&<WorkersDashboard users={getUsers()} workLogs={filteredWorkLogs} orders={filteredOrders} stages={stages} customTasks={customTasks} onAddTask={handleAddTask} onDeleteLog={handleDeleteLog} onDeleteTask={handleDeleteTask} onMarkPartialTask={handleMarkPartialTask} onMarkDoneTask={handleMarkDoneTask} dailyPlans={dailyPlans} onAddPlan={handleAddPlan} onDeletePlan={handleDeletePlan} onTogglePlanDone={handleTogglePlanDone}/>}
         {tab==="yield"&&<YieldDashboard orders={filteredOrders} projects={filteredProjects} stages={stages} workLogs={filteredWorkLogs}/>}
         {tab==="stages"&&isAdmin&&<StagesManagement stages={stages} setStages={setStages} stageBlocks={stageBlocks} setStageBlocks={setStageBlocks} persist={persist}/>}
         {tab==="projects"&&<Projects projects={filteredProjects} orders={filteredOrders} updP={updP} stages={stages} workLogs={filteredWorkLogs}/>}

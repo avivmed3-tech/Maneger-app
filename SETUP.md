@@ -140,3 +140,43 @@ ALTER TABLE public.stages    ADD COLUMN IF NOT EXISTS hourly_rate numeric DEFAUL
 > ⚠️ **אבטחה:** העמודה `password_plain` שומרת את סיסמת העובד כטקסט גלוי כדי לאפשר
 > למנהל לצפות בה. סיסמאות שנוצרו לפני העדכון מאוחסנות בהצפנה (hash) בלבד ולא ניתן
 > לשחזרן — יש לאפס אותן דרך עריכת המשתמש כדי שיופיעו בכפתור הצפייה.
+
+---
+
+## 🆕 עדכון סכימה — תפקיד לשלב, זמן עבודה ותוכניות עבודה יומיות
+
+הגרסה החדשה מוסיפה: שיוך תפקיד מבצע + זמן עבודה (דקות ליחידה) לכל שלב,
+וטבלת תוכניות עבודה יומיות (שיבוץ עובד לפק"ע + שלב ליום מסוים). הרץ ב-SQL Editor:
+
+```sql
+-- שלב: תפקיד מבצע (מרכיב/טכנאי/מבקר/חיווט...) וזמן עבודה משוער ליחידה (דקות)
+ALTER TABLE public.stages ADD COLUMN IF NOT EXISTS role_id text;
+ALTER TABLE public.stages ADD COLUMN IF NOT EXISTS minutes numeric DEFAULT 0;
+
+-- תוכניות עבודה יומיות — מנהל משבץ לעובד פק"ע + שלב ליום נתון
+CREATE TABLE IF NOT EXISTS public.daily_plans (
+  id text PRIMARY KEY,
+  user_id text NOT NULL,
+  user_name text,
+  plan_date date NOT NULL,
+  order_id text,
+  stage_id text,
+  target_qty numeric DEFAULT 0,
+  note text,
+  done boolean DEFAULT false,
+  created_by text,
+  created_by_name text,
+  created_at timestamptz DEFAULT now(),
+  updated_at timestamptz DEFAULT now(),
+  company_id uuid DEFAULT '00000000-0000-0000-0000-000000000001'::uuid REFERENCES public.companies(id)
+);
+CREATE INDEX IF NOT EXISTS daily_plans_company_user_date_idx ON public.daily_plans (company_id, user_id, plan_date);
+ALTER TABLE public.daily_plans ENABLE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS anon_all_daily_plans ON public.daily_plans;
+CREATE POLICY anon_all_daily_plans ON public.daily_plans FOR ALL USING (true) WITH CHECK (true);
+ALTER PUBLICATION supabase_realtime ADD TABLE public.daily_plans;
+```
+
+> 💡 **זמן משוער לסיום פק"ע:** המערכת מחשבת צפי לפי סכום זמני השלבים × יחידות,
+> חלקי "יום עבודה נטו" (ברירת מחדל 8 שע', ניתן לשינוי במסך הפק"ע). אם הפק"ע נבנתה
+> מבלוק עם זמנים מוגדרים — הזמנים מהבלוק קודמים לזמן השלב הכללי.
