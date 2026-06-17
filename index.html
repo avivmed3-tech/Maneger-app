@@ -3362,7 +3362,7 @@ function AdminPanel({projects,stages,onClose,lightMode,updO,departments,updD}){
 
       {/* Edit User Modal */}
       {editUser&&(
-        <div onClick={()=>setEditUser(null)} style={{position:"fixed",inset:0,background:"#000000cc",zIndex:400,display:"flex",alignItems:"center",justifyContent:"center",padding:16}}>
+        <div onClick={e=>{e.stopPropagation();setEditUser(null)}} style={{position:"fixed",inset:0,background:"#000000cc",zIndex:400,display:"flex",alignItems:"center",justifyContent:"center",padding:16}}>
           <div onClick={e=>e.stopPropagation()} style={{background:card,borderRadius:16,padding:28,maxWidth:560,width:"100%",border:`1px solid ${border}`,maxHeight:"90vh",overflowY:"auto"}}>
             <div style={{fontWeight:700,fontSize:17,color:"var(--c-accent)",marginBottom:18}}>✏️ עריכת משתמש: {editUser.name}</div>
             <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(150px,1fr))",gap:10,marginBottom:12}}>
@@ -3434,7 +3434,7 @@ function AdminPanel({projects,stages,onClose,lightMode,updO,departments,updD}){
 
       {/* Edit Department Modal */}
       {editDept&&(
-        <div onClick={()=>setEditDept(null)} style={{position:"fixed",inset:0,background:"#000000cc",zIndex:400,display:"flex",alignItems:"center",justifyContent:"center",padding:16}}>
+        <div onClick={e=>{e.stopPropagation();setEditDept(null)}} style={{position:"fixed",inset:0,background:"#000000cc",zIndex:400,display:"flex",alignItems:"center",justifyContent:"center",padding:16}}>
           <div onClick={e=>e.stopPropagation()} style={{background:card,borderRadius:16,padding:28,maxWidth:420,width:"100%",border:`1px solid ${border}`}}>
             <div style={{fontWeight:700,fontSize:17,color:"var(--c-accent)",marginBottom:18}}>✏️ עריכת מחלקה</div>
             <div style={{display:"flex",flexDirection:"column",gap:12,marginBottom:16}}>
