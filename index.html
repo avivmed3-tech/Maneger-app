@@ -2104,7 +2104,7 @@ function AdminTasksBoard({customTasks,onDeleteTask,onMarkPartialTask,onMarkDoneT
 // ══════════════════════════════════════════════════════════════════════════
 // ═══ MY WORK (Worker View) — Enhanced with Break, Bulk, Custom Tasks ════
 // ══════════════════════════════════════════════════════════════════════════
-function MyWork({orders,stages,workLogs,onStartWork,onEndWork,onPauseWork,onResumeWork,customTasks,onAddTask,onStartTask,onEndTask,onPauseTask,onResumeTask,onDeleteTask,onMarkPartialTask,onMarkDoneTask,users,dailyPlans}){
+function MyWork({orders,stages,workLogs,onStartWork,onEndWork,onPauseWork,onResumeWork,customTasks,onAddTask,onStartTask,onEndTask,onPauseTask,onResumeTask,onDeleteTask,onMarkPartialTask,onMarkDoneTask,users,dailyPlans,onMarkPlanDone}){
   const {toast}=useToast();
   const {currentUser}=useAuth();
   const myAccess=currentUser.stageAccess==="all"?stages.map(s=>s.id):(Array.isArray(currentUser.stageAccess)?currentUser.stageAccess:[]);
@@ -2118,8 +2118,18 @@ function MyWork({orders,stages,workLogs,onStartWork,onEndWork,onPauseWork,onResu
 
   const accessible=orders.filter(o=>(o.stageIds||[]).some(sid=>myAccess.includes(sid)));
   // Today's work plan assigned to me by my manager
-  const myPlans=(dailyPlans||[]).filter(p=>p.userId===currentUser.id&&p.date===todays());
+  const myPlans=(dailyPlans||[]).filter(p=>p.userId===currentUser.id&&p.date===todays()).sort((a,b)=>{const sa=stages.find(s=>s.id===a.stageId),sb=stages.find(s=>s.id===b.stageId);return (sa?.order||0)-(sb?.order||0)});
   const planPending=(orderId,stageId)=>{const o=orders.find(x=>x.id===orderId);if(!o)return [];return (o.serials||[]).filter(sr=>!workLogs.some(w=>w.serialId===sr.id&&w.stageId===stageId&&w.completed)&&!workLogs.some(w=>w.serialId===sr.id&&w.stageId===stageId&&!w.completed))};
+  // Auto sign-off: when every unit of an assigned plan's stage is completed, mark the plan done.
+  useEffect(()=>{
+    if(!onMarkPlanDone)return;
+    myPlans.forEach(p=>{
+      if(p.done)return;
+      const o=orders.find(x=>x.id===p.orderId);if(!o||!(o.serials||[]).length)return;
+      const allDone=(o.serials||[]).every(sr=>workLogs.some(w=>w.serialId===sr.id&&w.stageId===p.stageId&&w.completed));
+      if(allDone)onMarkPlanDone(p.id);
+    });
+  },[workLogs,dailyPlans]);
 
   const startWork=(serialId,stageId,orderId)=>{
     if(myActiveLog&&!myActiveLog.paused){toast("יש לך עבודה פעילה. סיים או עצור לפני שמתחיל חדשה.","warning");return}
@@ -2627,17 +2637,44 @@ function DailyPlanBoard({dailyPlans,workers,orders,stages,workLogs,onAddPlan,onD
   const [pStage,setPStage]=useState("");
   const [pQty,setPQty]=useState("");
   const [pNote,setPNote]=useState("");
+  const [queue,setQueue]=useState([]); // pending assignment lines (פק"ע+שלב) before saving
   const canAssign=Array.isArray(workers)&&workers.length>0&&!!onAddPlan;
   const selOrder=(orders||[]).find(o=>o.id===pOrder);
   const orderStages=selOrder?(selOrder.stageIds||[]).map(sid=>stages.find(s=>s.id===sid)).filter(Boolean).sort((a,b)=>a.order-b.order):[];
+  // ── Permissions of the currently-selected worker ──
+  const allStageIds=stages.map(s=>s.id);
+  const selWorker=workers.find(w=>w.id===pWorker);
+  const wAccess=selWorker?(selWorker.stageAccess==="all"?allStageIds:(Array.isArray(selWorker.stageAccess)?selWorker.stageAccess:[])):[];
+  const wStageNames=selWorker?(selWorker.stageAccess==="all"?"כל השלבים":(stages.filter(s=>wAccess.includes(s.id)).sort((a,b)=>a.order-b.order).map(s=>s.name).join(", ")||"לא הוגדרו שלבים")):"";
+  const hasAccess=(stageId)=>wAccess.includes(stageId);
+  const selStage=stages.find(s=>s.id===pStage);
+  const lacksAccess=!!(selWorker&&selStage&&!hasAccess(selStage.id));
+  const roleMismatch=!!(selWorker&&selStage&&selStage.roleId&&selStage.roleId!==selWorker.role);
   // Units of an order still needing a given stage (not yet completed there).
   const pendingFor=(orderId,stageId)=>{const o=(orders||[]).find(x=>x.id===orderId);if(!o)return 0;return (o.serials||[]).filter(sr=>!(workLogs||[]).some(w=>w.serialId===sr.id&&w.stageId===stageId&&w.completed)).length};
+  const stageOrder=(stageId)=>{const s=stages.find(x=>x.id===stageId);return s?.order||0};
+  const addToQueue=()=>{
+    if(!pOrder||!pStage){toast('בחר פק"ע ושלב להוספה',"warning");return}
+    if(queue.some(q=>q.orderId===pOrder&&q.stageId===pStage)){toast("שיבוץ זה כבר ברשימה","warning");return}
+    if(lacksAccess&&!confirm(`⚠️ ל${selWorker?.name||"עובד"} אין הרשאה לשלב "${selStage?.name}". להוסיף בכל זאת?`))return;
+    setQueue(q=>[...q,{key:uid(),orderId:pOrder,stageId:pStage,targetQty:Number(pQty)||0,note:pNote.trim(),lacksAccess}]);
+    setPStage("");setPQty("");setPNote("");
+  };
   const submit=()=>{
-    if(!pWorker||!pOrder||!pStage){toast('יש לבחור עובד, פק"ע ושלב',"warning");return}
+    if(!pWorker){toast("יש לבחור עובד","warning");return}
+    let items=[...queue];
+    // include the currently-typed line if not yet queued
+    if(pOrder&&pStage&&!items.some(q=>q.orderId===pOrder&&q.stageId===pStage)){
+      if(lacksAccess&&!confirm(`⚠️ ל${selWorker?.name||"עובד"} אין הרשאה לשלב "${selStage?.name}". לשבץ בכל זאת?`))return;
+      items.push({key:uid(),orderId:pOrder,stageId:pStage,targetQty:Number(pQty)||0,note:pNote.trim(),lacksAccess});
+    }
+    if(items.length===0){toast('יש לבחור לפחות פק"ע ושלב אחד',"warning");return}
+    // Sort by stage sequence (לפי סידורי) so the worker sees the work in order.
+    items.sort((a,b)=>stageOrder(a.stageId)-stageOrder(b.stageId));
     const u=workers.find(w=>w.id===pWorker);
-    onAddPlan({id:uid(),userId:pWorker,userName:u?.name||"",date,orderId:pOrder,stageId:pStage,targetQty:Number(pQty)||0,note:pNote.trim(),done:false,createdBy:currentUser.id,createdByName:currentUser.name,createdAt:nowISO()});
-    setPOrder("");setPStage("");setPQty("");setPNote("");setShowForm(false);
-    toast("התוכנית נשמרה","success");
+    items.forEach(it=>onAddPlan({id:uid(),userId:pWorker,userName:u?.name||"",date,orderId:it.orderId,stageId:it.stageId,targetQty:it.targetQty,note:it.note,done:false,createdBy:currentUser.id,createdByName:currentUser.name,createdAt:nowISO()}));
+    setQueue([]);setPOrder("");setPStage("");setPQty("");setPNote("");setShowForm(false);
+    toast(items.length>1?`${items.length} שיבוצים נשמרו`:"התוכנית נשמרה","success");
   };
   const dayPlans=(dailyPlans||[]).filter(p=>p.date===date&&workers.some(w=>w.id===p.userId));
   const byWorker={};
@@ -2657,7 +2694,7 @@ function DailyPlanBoard({dailyPlans,workers,orders,stages,workLogs,onAddPlan,onD
           <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(160px,1fr))",gap:10}}>
             <div style={{display:"flex",flexDirection:"column",gap:3}}>
               <label style={{fontSize:11,color:"var(--c-dim)"}}>עובד *</label>
-              <select value={pWorker} onChange={e=>setPWorker(e.target.value)}><option value="">— בחר עובד —</option>{workers.map(w=><option key={w.id} value={w.id}>{w.name}</option>)}</select>
+              <select value={pWorker} onChange={e=>{setPWorker(e.target.value);setQueue([])}}><option value="">— בחר עובד —</option>{workers.map(w=><option key={w.id} value={w.id}>{w.name}{ROLES[w.role]?` · ${ROLES[w.role].label}`:""}</option>)}</select>
             </div>
             <div style={{display:"flex",flexDirection:"column",gap:3}}>
               <label style={{fontSize:11,color:"var(--c-dim)"}}>פק"ע *</label>
@@ -2665,7 +2702,7 @@ function DailyPlanBoard({dailyPlans,workers,orders,stages,workLogs,onAddPlan,onD
             </div>
             <div style={{display:"flex",flexDirection:"column",gap:3}}>
               <label style={{fontSize:11,color:"var(--c-dim)"}}>שלב *</label>
-              <select value={pStage} onChange={e=>setPStage(e.target.value)} disabled={!selOrder}><option value="">— בחר שלב —</option>{orderStages.map(st=><option key={st.id} value={st.id}>{st.name}{st.roleId&&ROLES[st.roleId]?` (${ROLES[st.roleId].label})`:""}</option>)}</select>
+              <select value={pStage} onChange={e=>setPStage(e.target.value)} disabled={!selOrder}><option value="">— בחר שלב —</option>{orderStages.map(st=><option key={st.id} value={st.id}>{st.name}{st.roleId&&ROLES[st.roleId]?` (${ROLES[st.roleId].label})`:""}{selWorker&&!hasAccess(st.id)?" ⚠️ אין הרשאה":""}</option>)}</select>
             </div>
             <div style={{display:"flex",flexDirection:"column",gap:3}}>
               <label style={{fontSize:11,color:"var(--c-dim)"}}>יעד יחידות (0=הכל)</label>
@@ -2676,10 +2713,38 @@ function DailyPlanBoard({dailyPlans,workers,orders,stages,workLogs,onAddPlan,onD
               <input value={pNote} onChange={e=>setPNote(e.target.value)} placeholder="הנחיות נוספות..."/>
             </div>
           </div>
+          {/* Selected worker — role + which stages they're allowed to do */}
+          {selWorker&&(
+            <div style={{display:"flex",alignItems:"center",gap:8,flexWrap:"wrap",marginTop:8,fontSize:11}}>
+              <span style={{background:(ROLES[selWorker.role]?.color||"#3b82f6")+"22",color:ROLES[selWorker.role]?.color||"#3b82f6",padding:"2px 8px",borderRadius:10,fontWeight:700}}>{ROLES[selWorker.role]?.icon||""} {ROLES[selWorker.role]?.label||selWorker.role}</span>
+              <span style={{color:"var(--c-dim)"}}>מורשה לשלבים: {wStageNames}</span>
+            </div>
+          )}
+          {/* Permission warning to the manager */}
+          {lacksAccess&&<div style={{marginTop:8,padding:"8px 10px",borderRadius:8,background:"#ef444415",border:"1px solid #ef444455",color:"#f87171",fontSize:12,fontWeight:600}}>⚠️ ל{selWorker?.name} אין הרשאה לשלב "{selStage?.name}". אפשר לשבץ בכל זאת — אך מומלץ לבחור עובד מורשה או לעדכן את הרשאותיו.</div>}
+          {!lacksAccess&&roleMismatch&&<div style={{marginTop:8,padding:"8px 10px",borderRadius:8,background:"#f59e0b15",border:"1px solid #f59e0b55",color:"#f59e0b",fontSize:12}}>ℹ️ השלב מיועד לתפקיד {ROLES[selStage.roleId]?.label||selStage.roleId}, והעובד הוא {ROLES[selWorker.role]?.label||selWorker.role}. יש לו הרשאה לשלב, אך התפקיד שונה.</div>}
           {pOrder&&pStage&&<div style={{fontSize:11,color:"var(--c-dim)",marginTop:8}}>זמינות לשלב זה: {pendingFor(pOrder,pStage)} יחידות ממתינות</div>}
-          <div style={{display:"flex",gap:8,marginTop:10,justifyContent:"flex-end"}}>
-            <Btn small onClick={()=>{setShowForm(false)}}>ביטול</Btn>
-            <Btn color="#06b6d4" small onClick={submit}>✅ שבץ</Btn>
+          {/* Queue of assignment lines (multiple orders / stages) */}
+          {queue.length>0&&(
+            <div style={{marginTop:10,background:"var(--c-card)",borderRadius:8,padding:"8px 10px",border:"1px solid var(--c-border)"}}>
+              <div style={{fontSize:11,color:"var(--c-dim)",marginBottom:6}}>שיבוצים שיישמרו ({queue.length}) — לפי סדר השלבים:</div>
+              <div style={{display:"flex",flexDirection:"column",gap:5}}>
+                {[...queue].sort((a,b)=>stageOrder(a.stageId)-stageOrder(b.stageId)).map(it=>{const o=(orders||[]).find(x=>x.id===it.orderId);const st=stages.find(s=>s.id===it.stageId);return(
+                  <div key={it.key} style={{display:"flex",alignItems:"center",gap:8,flexWrap:"wrap",fontSize:12}}>
+                    <span style={{fontWeight:700,color:"#60a5fa"}}>{o?.woNumber||'פק"ע'}</span>
+                    {st&&<span style={{color:st.color}}>← {st.name}</span>}
+                    <span style={{color:"var(--c-dim)"}}>{it.targetQty>0?`יעד ${it.targetQty}`:"כל היחידות"}</span>
+                    {it.lacksAccess&&<span style={{color:"#f87171"}}>⚠️ ללא הרשאה</span>}
+                    {it.note&&<span style={{color:"var(--c-muted)"}}>📝 {it.note}</span>}
+                    <IBtn onClick={()=>setQueue(q=>q.filter(x=>x.key!==it.key))}>🗑️</IBtn>
+                  </div>);})}
+              </div>
+            </div>
+          )}
+          <div style={{display:"flex",gap:8,marginTop:10,justifyContent:"flex-end",flexWrap:"wrap"}}>
+            <Btn small onClick={()=>{setShowForm(false);setQueue([])}}>ביטול</Btn>
+            <Btn color="#3b82f6" small onClick={addToQueue} disabled={!pOrder||!pStage}>➕ הוסף עוד</Btn>
+            <Btn color="#06b6d4" small onClick={submit}>✅ שבץ{queue.length>0?` (${queue.length+(pOrder&&pStage&&!queue.some(q=>q.orderId===pOrder&&q.stageId===pStage)?1:0)})`:""}</Btn>
           </div>
         </div>
       )}
@@ -2690,6 +2755,7 @@ function DailyPlanBoard({dailyPlans,workers,orders,stages,workLogs,onAddPlan,onD
               <div style={{fontWeight:700,fontSize:13,marginBottom:6,display:"flex",alignItems:"center",gap:6}}>
                 <span style={{width:24,height:24,borderRadius:"50%",background:(ROLES[w.role]?.color||"#3b82f6")+"22",color:ROLES[w.role]?.color||"#3b82f6",display:"inline-flex",alignItems:"center",justifyContent:"center",fontSize:12,fontWeight:800}}>{w.name?.charAt(0)}</span>
                 {w.name}
+                {ROLES[w.role]&&<span style={{fontSize:10,color:ROLES[w.role].color,fontWeight:600}}>{ROLES[w.role].icon} {ROLES[w.role].label}</span>}
                 <span style={{fontSize:11,color:"var(--c-dim)"}}>({byWorker[w.id].length} שיבוצים)</span>
               </div>
               <div style={{display:"flex",flexDirection:"column",gap:5}}>
@@ -4964,6 +5030,8 @@ function App(){
   const handleAddPlan=(plan)=>{setDailyPlans(prev=>{const next=[...prev,plan];persist(null,null,null,null,null,null,null,next);return next});if(plan.userName)PushNotify.send("📅 תוכנית עבודה חדשה",`${plan.userName}, הוקצתה לך עבודה ליום ${fmt(plan.date)}`,`plan_${plan.id}`)};
   const handleDeletePlan=(planId)=>{setDailyPlans(prev=>{const next=prev.filter(p=>p.id!==planId);persist(null,null,null,null,null,null,null,next);return next});SB.del("daily_plans",{id:planId}).catch(()=>{})};
   const handleTogglePlanDone=(planId)=>{setDailyPlans(prev=>{const next=prev.map(p=>p.id===planId?{...p,done:!p.done}:p);persist(null,null,null,null,null,null,null,next);return next})};
+  // Auto sign-off: mark a plan done once all its units in the stage are completed.
+  const handleMarkPlanDone=(planId)=>{setDailyPlans(prev=>{if(!prev.some(p=>p.id===planId&&!p.done))return prev;const next=prev.map(p=>p.id===planId?{...p,done:true,autoDone:true}:p);persist(null,null,null,null,null,null,null,next);return next})};
   const handleDeleteLog=(ids)=>{setWorkLogs(prev=>{const next=prev.filter(w=>!ids.includes(w.id));persist(null,null,null,next);return next});ids.forEach(id=>SB.del("work_logs",{id}).catch(()=>{}))};
   // Undo a completed work log — revert to uncompleted state (effectively delete it)
   const handleUndoWorkLog=(logId)=>{
@@ -5169,7 +5237,7 @@ function App(){
         {tab==="team"&&isLead&&<TeamDashboard users={getUsers()} workLogs={filteredWorkLogs} orders={filteredOrders} stages={stages} customTasks={customTasks} departments={departments} onAddTask={handleAddTask} onDeleteTask={handleDeleteTask} onMarkPartialTask={handleMarkPartialTask} onMarkDoneTask={handleMarkDoneTask} dailyPlans={dailyPlans} onAddPlan={handleAddPlan} onDeletePlan={handleDeletePlan} onTogglePlanDone={handleTogglePlanDone}/>}
         {tab==="orders"&&<Orders orders={filteredOrders} projects={filteredProjects} stages={stages} stageBlocks={stageBlocks} updO={updO} workLogs={filteredWorkLogs} onWorkLog={handleStartWork} workdayHours={workdayHours} setWorkdayHours={setWorkdayHoursPersist}/>}
         {tab==="shortages"&&<Shortages orders={filteredOrders} updO={updO} projects={filteredProjects}/>}
-        {tab==="mywork"&&<MyWork orders={filteredOrders} stages={stages} workLogs={filteredWorkLogs} onStartWork={handleStartWork} onEndWork={handleEndWork} onPauseWork={handlePauseWork} onResumeWork={handleResumeWork} customTasks={customTasks} onAddTask={handleAddTask} onStartTask={handleStartTask} onEndTask={handleEndTask} onPauseTask={handlePauseTask} onResumeTask={handleResumeTask} onDeleteTask={handleDeleteTask} onMarkPartialTask={handleMarkPartialTask} onMarkDoneTask={handleMarkDoneTask} users={getUsers()} dailyPlans={dailyPlans}/>}
+        {tab==="mywork"&&<MyWork orders={filteredOrders} stages={stages} workLogs={filteredWorkLogs} onStartWork={handleStartWork} onEndWork={handleEndWork} onPauseWork={handlePauseWork} onResumeWork={handleResumeWork} customTasks={customTasks} onAddTask={handleAddTask} onStartTask={handleStartTask} onEndTask={handleEndTask} onPauseTask={handlePauseTask} onResumeTask={handleResumeTask} onDeleteTask={handleDeleteTask} onMarkPartialTask={handleMarkPartialTask} onMarkDoneTask={handleMarkDoneTask} users={getUsers()} dailyPlans={dailyPlans} onMarkPlanDone={handleMarkPlanDone}/>}
         {tab==="workers"&&isAdmin&&<WorkersDashboard users={getUsers()} workLogs={filteredWorkLogs} orders={filteredOrders} stages={stages} customTasks={customTasks} onAddTask={handleAddTask} onDeleteLog={handleDeleteLog} onDeleteTask={handleDeleteTask} onMarkPartialTask={handleMarkPartialTask} onMarkDoneTask={handleMarkDoneTask} dailyPlans={dailyPlans} onAddPlan={handleAddPlan} onDeletePlan={handleDeletePlan} onTogglePlanDone={handleTogglePlanDone}/>}
         {tab==="yield"&&<YieldDashboard orders={filteredOrders} projects={filteredProjects} stages={stages} workLogs={filteredWorkLogs}/>}
         {tab==="stages"&&isAdmin&&<StagesManagement stages={stages} setStages={setStages} stageBlocks={stageBlocks} setStageBlocks={setStageBlocks} persist={persist}/>}
