@@ -105,6 +105,16 @@ button{font-family:inherit;cursor:pointer}
 .fd-box:hover{transform:translateY(-3px);box-shadow:var(--shadow-md)}
 .fd-box:active{transform:translateY(-1px)}
 @media(max-width:600px){.fd-rail{gap:12px}.fd-rail::before{left:18px;right:18px}}
+/* Horizontal org-chart variant (RTL: root on the right, hierarchy grows to the left) */
+.fd-tree-h{display:flex;flex-direction:row;align-items:center;width:max-content}
+.fd-trunk-h{width:28px;height:2px;background:var(--c-border2);flex-shrink:0}
+.fd-rail-outer-h{display:flex;align-items:center}
+.fd-rail-h{position:relative;display:flex;flex-direction:column;justify-content:center;align-items:flex-start;gap:16px;padding-right:28px}
+.fd-rail-h::before{content:"";position:absolute;right:0;top:34px;bottom:34px;width:2px;background:var(--c-border2)}
+.fd-rail-h.fd-single::before{display:none}
+.fd-node-h{position:relative;display:flex;flex-direction:row;align-items:center}
+.fd-node-h::before{content:"";position:absolute;right:-28px;top:50%;transform:translateY(-50%);height:2px;width:28px;background:var(--c-border2)}
+@media(max-width:600px){.fd-rail-h{gap:10px;padding-right:20px}.fd-rail-h::before{top:26px;bottom:26px}.fd-trunk-h{width:20px}.fd-node-h::before{right:-20px;width:20px}}
 @keyframes toastIn{from{opacity:0;transform:translateY(-12px) scale(.95)}to{opacity:1;transform:none}}
 @keyframes toastOut{from{opacity:1;transform:none}to{opacity:0;transform:translateY(-12px) scale(.95)}}
 .toast-in{animation:toastIn .25s ease-out forwards}
@@ -3860,16 +3870,17 @@ const PushNotify={
 // ═══ LIVE FACTORY BOARD (מסך מפעל) ════════════════════════════════════
 // ══════════════════════════════════════════════════════════════════════════
 // Recursive org-chart branch (top-down node + connectors + children rail)
-function OrgBranch({node,isRoot}){
+function OrgBranch({node,isRoot,horizontal}){
   const has=node.children&&node.children.length>0;
+  const h=horizontal?"-h":"";
   return(
-    <div className={isRoot?"fd-tree":"fd-node"}>
+    <div className={(isRoot?"fd-tree":"fd-node")+h}>
       {node.box}
       {has&&(<>
-        <div className="fd-trunk"/>
-        <div className="fd-rail-outer">
-          <div className={"fd-rail"+(node.children.length<=1?" fd-single":"")}>
-            {node.children.map(c=><OrgBranch key={c.key} node={c}/>)}
+        <div className={"fd-trunk"+h}/>
+        <div className={"fd-rail-outer"+h}>
+          <div className={"fd-rail"+h+(node.children.length<=1?" fd-single":"")}>
+            {node.children.map(c=><OrgBranch key={c.key} node={c} horizontal={horizontal}/>)}
           </div>
         </div>
       </>)}
@@ -3883,6 +3894,7 @@ function LiveFactoryBoard({orders,workLogs,stages,customTasks,users,departments,
   const [selMonth,setSelMonth]=useState("all");   // month filter (cumulative stats)
   const [selDept,setSelDept]=useState(null);       // open department (id | "__none__")
   const [selWorker,setSelWorker]=useState(null);   // open worker (id)
+  const [orgHorizontal,setOrgHorizontal]=useState(true); // org-chart orientation (true=לרוחב)
   const lm=lightMode;
   const bg=lm?"#f0f2f5":"#05080f";
   const cardBg=lm?"#ffffff":"#0d1120";
@@ -4226,11 +4238,16 @@ function LiveFactoryBoard({orders,workLogs,stages,customTasks,users,departments,
           )}
 
           {/* Org chart */}
-          <div style={{fontWeight:700,fontSize:13.5,color:textC,marginBottom:12}}>🗂️ תרשים ארגוני — לחץ על עובד לכרטיס אישי</div>
-          <div style={{overflowX:"auto",paddingBottom:8}}>
-            <OrgBranch node={buildDeptTree(d,members)} isRoot/>
+          <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",gap:8,flexWrap:"wrap",marginBottom:12}}>
+            <div style={{fontWeight:700,fontSize:13.5,color:textC}}>🗂️ תרשים ארגוני — לחץ על עובד לכרטיס אישי</div>
+            <button onClick={()=>setOrgHorizontal(v=>!v)} style={{display:"inline-flex",alignItems:"center",gap:6,background:innerBg,border:`1px solid ${borderC}`,borderRadius:8,padding:"6px 11px",fontSize:12,fontWeight:700,color:mutedC,fontFamily:"inherit",cursor:"pointer"}}>
+              {orgHorizontal?"↕ תצוגה אנכית":"↔ תצוגה לרוחב"}
+            </button>
           </div>
-        </>),()=>setSelDept(null),960,600);
+          <div style={{overflow:"auto",paddingBottom:8,maxHeight:orgHorizontal?"68vh":"none"}}>
+            <OrgBranch node={buildDeptTree(d,members)} isRoot horizontal={orgHorizontal}/>
+          </div>
+        </>),()=>setSelDept(null),1120,600);
       })()}
 
       {/* ── Worker detail card ── */}
