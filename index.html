@@ -3895,6 +3895,7 @@ function LiveFactoryBoard({orders,workLogs,stages,customTasks,users,departments,
   const [selDept,setSelDept]=useState(null);       // open department (id | "__none__")
   const [selWorker,setSelWorker]=useState(null);   // open worker (id)
   const [orgHorizontal,setOrgHorizontal]=useState(true); // org-chart orientation (true=לרוחב)
+  const [stageOpen,setStageOpen]=useState(true); // "תפוקה לפי שלב" panel collapsed/expanded
   const lm=lightMode;
   const bg=lm?"#f0f2f5":"#05080f";
   const cardBg=lm?"#ffffff":"#0d1120";
@@ -4222,18 +4223,23 @@ function LiveFactoryBoard({orders,workLogs,stages,customTasks,users,departments,
             <div style={{display:"flex",flexWrap:"wrap",gap:8,marginBottom:18}}>{liveMembers.map(m=><MemberBox key={m.id} u={m} onClick={()=>setSelWorker(m.id)}/>)}</div>
           )}
 
-          {/* Stage output */}
+          {/* Stage output — collapsible to free up room for the org chart */}
           {stageData.length>0&&(
             <div style={{background:innerBg,borderRadius:12,padding:14,marginBottom:18}}>
-              <div style={{display:"flex",alignItems:"center",gap:7,marginBottom:10}}>
-                <div style={{fontWeight:700,fontSize:13,color:textC}}>🔧 תפוקה לפי שלב</div>
+              <div style={{display:"flex",alignItems:"center",gap:7,marginBottom:stageOpen?10:0}}>
+                <button onClick={()=>setStageOpen(v=>!v)} aria-expanded={stageOpen}
+                  style={{display:"inline-flex",alignItems:"center",gap:7,background:"none",border:"none",padding:0,cursor:"pointer",fontFamily:"inherit",flex:1,textAlign:"right"}}>
+                  <span style={{fontSize:11,color:dimC,transform:stageOpen?"rotate(0deg)":"rotate(-90deg)",transition:"transform .2s ease",display:"inline-block"}}>▼</span>
+                  <span style={{fontWeight:700,fontSize:13,color:textC}}>🔧 תפוקה לפי שלב</span>
+                  {!stageOpen&&<span style={{fontSize:11,color:dimC,fontWeight:600}}>· {stageData.length} שלבים</span>}
+                </button>
                 <ChartInfo title="תפוקה לפי שלב — מחלקה"
                   shows="עמודות אופקיות שמראות כמה פעולות בוצעו בכל שלב ייצור על ידי חברי המחלקה במהלך החודש הנוכחי."
                   data="מספר הפעולות שהושלמו בכל שלב, מדורג מהשלב הפעיל ביותר לפחות."
                   how="המערכת סופרת רק רישומי עבודה שהושלמו, של עובדי המחלקה, שתאריך סיומם נופל בחודש הנוכחי, ומקבצת אותם לפי שלב."
                   tip="כך רואים במבט אחד על אילו שלבי ייצור המחלקה הכי פעילה החודש."/>
               </div>
-              <HBarChart data={stageData} formatVal={v=>`${v} פעולות`}/>
+              {stageOpen&&<HBarChart data={stageData} formatVal={v=>`${v} פעולות`}/>}
             </div>
           )}
 
