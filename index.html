@@ -369,14 +369,47 @@ async function dbLoadUsers(){
   const rows=await SB.get("app_users",`company_id=eq.${cid}&order=name.asc`);
   return rows.map(dbToUser);
 }
-const FALLBACK_USERS=[
-  {id:"admin",username:"admin",password:"admin123",role:"admin",name:"מנהל מערכת",projectAccess:"all",stageAccess:"all",canEdit:true,canView:true,active:true,hourlyRate:0},
-  {id:"w1",username:"yossi",password:"1234",role:"worker",name:"יוסי כהן",projectAccess:"all",stageAccess:["s1","s2","s3"],canEdit:false,canView:true,active:true,hourlyRate:55},
-  {id:"w2",username:"dana",password:"1234",role:"worker",name:"דנה לוי",projectAccess:"all",stageAccess:["s2","s3","s4"],canEdit:false,canView:true,active:true,hourlyRate:60},
-  {id:"w3",username:"moshe",password:"1234",role:"worker",name:"משה אברהם",projectAccess:"all",stageAccess:["s4","s5","s6"],canEdit:false,canView:true,active:true,hourlyRate:50},
-  {id:"w4",username:"ronit",password:"1234",role:"worker",name:"רונית שרון",projectAccess:["p1"],stageAccess:["s1","s5","s6"],canEdit:false,canView:true,active:true,hourlyRate:65},
-  {id:"w5",username:"avi",password:"1234",role:"worker",name:"אבי מזרחי",projectAccess:["p2","p3"],stageAccess:["s2","s3"],canEdit:false,canView:true,active:true,hourlyRate:52}
+// Demo departments — each has one manager (dept_manager) + two team leads, every team lead has ≥3 workers.
+const DEF_DEPTS=[
+  {id:"demo_d1",name:"מחלקת הרכבה",color:"#8b5cf6",managerId:"dm1"},
+  {id:"demo_d2",name:"מחלקת בדיקות",color:"#06b6d4",managerId:"dm2"}
 ];
+// Full demo organization covering every role type, with a logical department → team-lead → worker hierarchy.
+const FALLBACK_USERS=[
+  {id:"admin",username:"admin",password:"admin123",role:"admin",name:"מנהל מערכת",projectAccess:"all",stageAccess:"all",canEdit:true,canView:true,active:true,hourlyRate:0,saleRate:0},
+
+  // ── מחלקת הרכבה (demo_d1) — מנהל: אבי מזרחי ──
+  {id:"dm1",username:"avi",password:"1234",role:"dept_manager",name:"אבי מזרחי",projectAccess:"all",stageAccess:"all",canEdit:true,canView:true,active:true,hourlyRate:120,saleRate:240,departmentId:"demo_d1"},
+  // צוות א' — ראש צוות יוסי כהן
+  {id:"tl1",username:"yossi",password:"1234",role:"team_lead",name:"יוסי כהן",projectAccess:"all",stageAccess:"all",canEdit:false,canView:true,active:true,hourlyRate:90,saleRate:180,departmentId:"demo_d1",managerId:"dm1"},
+  {id:"w1",username:"dana",password:"1234",role:"mechanical_assembler",name:"דנה לוי",projectAccess:"all",stageAccess:["s1","s2"],canEdit:false,canView:true,active:true,hourlyRate:60,saleRate:120,departmentId:"demo_d1",managerId:"tl1"},
+  {id:"w2",username:"moshe",password:"1234",role:"soldering",name:"משה אברהם",projectAccess:"all",stageAccess:["s2","s3"],canEdit:false,canView:true,active:true,hourlyRate:58,saleRate:116,departmentId:"demo_d1",managerId:"tl1"},
+  {id:"w3",username:"ronit",password:"1234",role:"wiring",name:"רונית שרון",projectAccess:"all",stageAccess:["s2","s3"],canEdit:false,canView:true,active:true,hourlyRate:55,saleRate:110,departmentId:"demo_d1",managerId:"tl1"},
+  // צוות ב' — ראש צוות נועה ברק
+  {id:"tl2",username:"noa",password:"1234",role:"team_lead",name:"נועה ברק",projectAccess:"all",stageAccess:"all",canEdit:false,canView:true,active:true,hourlyRate:88,saleRate:176,departmentId:"demo_d1",managerId:"dm1"},
+  {id:"w4",username:"itay",password:"1234",role:"worker",name:"איתי כץ",projectAccess:"all",stageAccess:["s1","s2","s6"],canEdit:false,canView:true,active:true,hourlyRate:52,saleRate:104,departmentId:"demo_d1",managerId:"tl2"},
+  {id:"w5",username:"galit",password:"1234",role:"mechanical_assembler",name:"גלית רון",projectAccess:"all",stageAccess:["s1","s2"],canEdit:false,canView:true,active:true,hourlyRate:61,saleRate:122,departmentId:"demo_d1",managerId:"tl2"},
+  {id:"w6",username:"omer",password:"1234",role:"soldering",name:"עומר שלו",projectAccess:"all",stageAccess:["s2","s3"],canEdit:false,canView:true,active:true,hourlyRate:57,saleRate:114,departmentId:"demo_d1",managerId:"tl2"},
+
+  // ── מחלקת בדיקות (demo_d2) — מנהלת: תמר אדרי ──
+  {id:"dm2",username:"tamar",password:"1234",role:"dept_manager",name:"תמר אדרי",projectAccess:"all",stageAccess:"all",canEdit:true,canView:true,active:true,hourlyRate:122,saleRate:244,departmentId:"demo_d2"},
+  // צוות ג' — ראש צוות דוד פרץ
+  {id:"tl3",username:"david",password:"1234",role:"team_lead",name:"דוד פרץ",projectAccess:"all",stageAccess:"all",canEdit:false,canView:true,active:true,hourlyRate:91,saleRate:182,departmentId:"demo_d2",managerId:"dm2"},
+  {id:"w7",username:"lior",password:"1234",role:"technician",name:"ליאור גל",projectAccess:"all",stageAccess:["s3","s4"],canEdit:false,canView:true,active:true,hourlyRate:70,saleRate:140,departmentId:"demo_d2",managerId:"tl3"},
+  {id:"w8",username:"shira",password:"1234",role:"quality_inspector",name:"שירה דהן",projectAccess:"all",stageAccess:["s4","s5"],canEdit:false,canView:true,active:true,hourlyRate:68,saleRate:136,departmentId:"demo_d2",managerId:"tl3"},
+  {id:"w9",username:"roi",password:"1234",role:"worker",name:"רועי בן דוד",projectAccess:"all",stageAccess:["s5","s6"],canEdit:false,canView:true,active:true,hourlyRate:53,saleRate:106,departmentId:"demo_d2",managerId:"tl3"},
+  // צוות ד' — ראש צוות מיכל אזולאי
+  {id:"tl4",username:"michal",password:"1234",role:"team_lead",name:"מיכל אזולאי",projectAccess:"all",stageAccess:"all",canEdit:false,canView:true,active:true,hourlyRate:89,saleRate:178,departmentId:"demo_d2",managerId:"dm2"},
+  {id:"w10",username:"yoav",password:"1234",role:"technician",name:"יואב סויסה",projectAccess:"all",stageAccess:["s3","s4"],canEdit:false,canView:true,active:true,hourlyRate:71,saleRate:142,departmentId:"demo_d2",managerId:"tl4"},
+  {id:"w11",username:"hadas",password:"1234",role:"quality_inspector",name:"הדס מור",projectAccess:"all",stageAccess:["s4","s5"],canEdit:false,canView:true,active:true,hourlyRate:67,saleRate:134,departmentId:"demo_d2",managerId:"tl4"},
+  {id:"w12",username:"uri",password:"1234",role:"wiring",name:"אורי נחום",projectAccess:"all",stageAccess:["s2","s3"],canEdit:false,canView:true,active:true,hourlyRate:56,saleRate:112,departmentId:"demo_d2",managerId:"tl4"},
+
+  // ── תפקידים נוספים (לבדיקת כלל סוגי המשתמשים) ──
+  {id:"ed1",username:"anat",password:"1234",role:"editor",name:"ענת לביא",projectAccess:"all",stageAccess:"all",canEdit:true,canView:true,active:true,hourlyRate:75,saleRate:150,departmentId:"demo_d1"},
+  {id:"vw1",username:"viewer",password:"1234",role:"viewer",name:"צופה כללי",projectAccess:"all",stageAccess:"all",canEdit:false,canView:true,active:true,hourlyRate:0,saleRate:0}
+];
+// Worker IDs that perform production stages (used to generate demo work logs / tasks).
+const DEMO_WORKER_IDS=["w1","w2","w3","w4","w5","w6","w7","w8","w9","w10","w11","w12"];
 const DEF_PROJ=[{id:"p1",name:"פרויקט אלפא"},{id:"p2",name:"פרויקט בטא"},{id:"p3",name:"פרויקט גמא"}];
 const DEF_STAGES=[
   {id:"s1",name:"קליטה וקלט",order:1,color:"#3b82f6",price:0},
@@ -957,32 +990,30 @@ function OrgStructure({users,departments,workLogs,customTasks}){
       </div>
     );
   };
-  // Render one pool of members: leads with their direct reports, then unattached members
+  // Render one pool of members as a nested tree: manager → team leads → workers.
   const TeamBlock=({members})=>{
-    const leads=members.filter(m=>isLeadRole(m.role));
-    const leadIds=new Set(leads.map(l=>l.id));
-    const unattached=members.filter(m=>!isLeadRole(m.role)&&!leadIds.has(m.managerId));
+    const ids=new Set(members.map(m=>m.id));
+    const childrenOf=id=>members.filter(m=>m.managerId===id);
+    // Roots = members whose direct manager isn't part of this pool (top of the local hierarchy).
+    const roots=members.filter(m=>!m.managerId||!ids.has(m.managerId));
+    const Node=({u})=>{
+      const reports=childrenOf(u.id);
+      const lead=isLeadRole(u.role)||reports.length>0;
+      return(
+        <div>
+          <PersonChip u={u} lead={lead}/>
+          {reports.length>0&&(
+            <div style={{marginRight:18,marginTop:6,paddingRight:14,borderRight:`2px solid ${(ROLES[u.role]?.color||"#3b82f6")}44`,display:"flex",flexDirection:"column",gap:6}}>
+              {reports.map(r=><Node key={r.id} u={r}/>)}
+            </div>
+          )}
+          {reports.length===0&&isLeadRole(u.role)&&<div style={{marginRight:18,marginTop:4,fontSize:11,color:"var(--c-dim)"}}>אין עובדים משויכים</div>}
+        </div>
+      );
+    };
     return(
       <div style={{display:"flex",flexDirection:"column",gap:10}}>
-        {leads.map(lead=>{
-          const reports=staff.filter(w=>w.managerId===lead.id);
-          return(
-            <div key={lead.id}>
-              <PersonChip u={lead} lead/>
-              {reports.length>0&&(
-                <div style={{marginRight:18,marginTop:6,paddingRight:14,borderRight:`2px solid ${(ROLES[lead.role]?.color||"#3b82f6")}44`,display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(190px,1fr))",gap:6}}>
-                  {reports.map(w=><PersonChip key={w.id} u={w}/>)}
-                </div>
-              )}
-              {reports.length===0&&<div style={{marginRight:18,marginTop:4,fontSize:11,color:"var(--c-dim)"}}>אין עובדים משויכים</div>}
-            </div>
-          );
-        })}
-        {unattached.length>0&&(
-          <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(190px,1fr))",gap:6}}>
-            {unattached.map(w=><PersonChip key={w.id} u={w}/>)}
-          </div>
-        )}
+        {roots.map(r=><Node key={r.id} u={r}/>)}
       </div>
     );
   };
@@ -3199,7 +3230,7 @@ function AdminPanel({projects,stages,onClose,lightMode,updO,departments,updD}){
                   <div style={{fontWeight:700,marginBottom:10,color:text}}>משתמש חדש</div>
                   <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(150px,1fr))",gap:10,marginBottom:10}}>
                     {[["שם מלא","name","text"],["שם משתמש","username","text"],["סיסמה","password","password"],["תעריף עלות ₪/שעה","hourlyRate","number"],["תעריף מכירה ₪/שעה","saleRate","number"]].map(([l,k,t])=>(
-                      <div key={k}><label style={{fontSize:11,color:muted,display:"block",marginBottom:3}}>{l}</label><input style={inp} type={t} value={newUser[k]||""} onChange={e=>setNewUser(p=>({...p,[k]:t==="number"?Number(e.target.value):e.target.value}))}/></div>
+                      <div key={k}><label style={{fontSize:11,color:muted,display:"block",marginBottom:3}}>{l}</label><input style={inp} type={t} name={"nu_"+k} autoComplete={t==="password"?"new-password":"off"} value={newUser[k]||""} onChange={e=>setNewUser(p=>({...p,[k]:t==="number"?Number(e.target.value):e.target.value}))}/></div>
                     ))}
                     <div><label style={{fontSize:11,color:muted,display:"block",marginBottom:3}}>תפקיד</label>
                       <select style={inp} value={newUser.role} onChange={e=>setNewUser(p=>({...p,role:e.target.value,canEdit:["admin","editor","dept_manager"].includes(e.target.value)}))}>
@@ -3367,11 +3398,11 @@ function AdminPanel({projects,stages,onClose,lightMode,updO,departments,updD}){
             <div style={{fontWeight:700,fontSize:17,color:"var(--c-accent)",marginBottom:18}}>✏️ עריכת משתמש: {editUser.name}</div>
             <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(150px,1fr))",gap:10,marginBottom:12}}>
               {[["שם מלא","name","text"],["שם משתמש","username","text"],["תעריף עלות ₪/שעה","hourlyRate","number"],["תעריף מכירה ₪/שעה","saleRate","number"]].map(([l,k,t])=>(
-                <div key={k}><label style={{fontSize:11,color:muted,display:"block",marginBottom:3}}>{l}</label><input style={inp} type={t} value={editUser[k]||""} onChange={e=>setEditUser(p=>({...p,[k]:t==="number"?Number(e.target.value):e.target.value}))}/></div>
+                <div key={k}><label style={{fontSize:11,color:muted,display:"block",marginBottom:3}}>{l}</label><input style={inp} type={t} name={"eu_"+k} autoComplete="off" value={editUser[k]||""} onChange={e=>setEditUser(p=>({...p,[k]:t==="number"?Number(e.target.value):e.target.value}))}/></div>
               ))}
               <div><label style={{fontSize:11,color:muted,display:"block",marginBottom:3}}>סיסמה (ריק = ללא שינוי)</label>
                 <div style={{position:"relative"}}>
-                  <input style={inp} type={editShowPw?"text":"password"} value={editUser.password||""} placeholder={editShowPw?(editUser.passwordPlain||"לא זמין"):"••••••"} onChange={e=>setEditUser(p=>({...p,password:e.target.value}))}/>
+                  <input style={inp} type={editShowPw?"text":"password"} name="eu_password" autoComplete="new-password" value={editUser.password||""} placeholder={editShowPw?(editUser.passwordPlain||"לא זמין"):"••••••"} onChange={e=>setEditUser(p=>({...p,password:e.target.value}))}/>
                   <button onClick={()=>setEditShowPw(s=>!s)} title={editShowPw?"הסתר":"הצג"} style={{position:"absolute",left:8,top:"50%",transform:"translateY(-50%)",background:"none",border:"none",fontSize:15,cursor:"pointer",lineHeight:1}}>{editShowPw?"🙈":"👁️"}</button>
                 </div>
                 {editShowPw&&<div style={{fontSize:10,color:editUser.passwordPlain?"#f59e0b":"#ef4444",marginTop:3}}>{editUser.passwordPlain?`נוכחית: ${editUser.passwordPlain}`:"הסיסמה הנוכחית לא נשמרה כטקסט — הקלד סיסמה חדשה"}</div>}
@@ -4593,13 +4624,14 @@ function App(){
       if(!data?.stages?.length){
         SB.upsert("stages",DEF_STAGES.map(stageToDb)).catch(()=>{});
       }
-      // Seed fallback users with hashed passwords if no users in DB
+      // Seed fallback users + their departments with hashed passwords if no users in DB
       if(!users?.length){
         try{
+          await SB.upsert("departments",DEF_DEPTS.map(d=>deptToDb({...d,companyId:_companyId}))).catch(()=>{});
           const seeded=[];
           for(const fu of FALLBACK_USERS){
             const h=await sha256(fu.password);
-            seeded.push(userToDb({...fu,password_hash:h,password:undefined}));
+            seeded.push(userToDb({...fu,companyId:_companyId,password_hash:h,passwordPlain:fu.password,password:undefined}));
           }
           await SB.upsert("app_users",seeded);
           LS.set("users",FALLBACK_USERS.map(fu=>({...fu,password:undefined})));
@@ -4966,7 +4998,8 @@ function App(){
     if(!confirm("זה יטען נתוני דמו לשנה שלמה. להמשיך?"))return;
     setSync("saving");
     try{
-      const W={w1:"יוסי כהן",w2:"דנה לוי",w3:"משה אברהם",w4:"רונית שרון",w5:"אבי מזרחי"};
+      const W=Object.fromEntries(DEMO_WORKER_IDS.map(id=>[id,(FALLBACK_USERS.find(u=>u.id===id)||{}).name||id]));
+      const WIDS=DEMO_WORKER_IDS;
       const dProj=[{id:"p1",name:"פרויקט אלפא"},{id:"p2",name:"פרויקט בטא"},{id:"p3",name:"פרויקט גמא"},{id:"p4",name:"פרויקט דלתא"}];
       const dStages=[{id:"s1",name:"קליטה וקלט",stage_order:1,color:"#3b82f6",price:80},{id:"s2",name:"הרכבה",stage_order:2,color:"#8b5cf6",price:150},{id:"s3",name:"בדיקת חשמל",stage_order:3,color:"#06b6d4",price:120},{id:"s4",name:"בדיקת מכנית",stage_order:4,color:"#f59e0b",price:100},{id:"s5",name:"QC סופי",stage_order:5,color:"#10b981",price:90},{id:"s6",name:"אריזה ומשלוח",stage_order:6,color:"#ec4899",price:60}];
 
@@ -4992,7 +5025,7 @@ function App(){
             id:`def_${oId}`,title:defectTitles[pi%defectTitles.length],
             serialId:serials[0]?.id,type:defectTypes[pi%6],
             severity:defectSev[pi%4],description:"פגם שזוהה בבדיקה",
-            responsible:W[`w${(pi%5)+1}`],discoveredDate:new Date(baseDate.getTime()+7*864e5).toISOString().slice(0,10),
+            responsible:W[WIDS[pi%WIDS.length]],discoveredDate:new Date(baseDate.getTime()+7*864e5).toISOString().slice(0,10),
             status:month<10?"closed":"open",closedDate:month<10?new Date(baseDate.getTime()+14*864e5).toISOString().slice(0,10):null
           }]:[];
           const shortages=pi%4===0?[{id:`sh_${oId}`,item:`רכיב ${pn}-R${pi}`,sku:`SKU-${1000+pi}`,missing:qty,orderedDate:baseDate.toISOString().slice(0,10),received:month<9,receivedDate:month<9?new Date(baseDate.getTime()+10*864e5).toISOString().slice(0,10):null}]:[];
@@ -5003,7 +5036,7 @@ function App(){
           if(completedMonths>0){
             serials.slice(0,Math.ceil(serials.length*(completedMonths/10))).forEach((sr,si)=>{
               stageIds.forEach((sid,stIdx)=>{
-                const wId=`w${((si+stIdx)%5)+1}`;
+                const wId=WIDS[(si+stIdx)%WIDS.length];
                 const startT=new Date(baseDate.getTime()+(si*2+stIdx)*864e5+(8*3600000));
                 const dur=20+Math.round(Math.random()*60);
                 const breaks=Math.random()>0.7?[{start:new Date(startT.getTime()+20*60000).toISOString(),end:new Date(startT.getTime()+35*60000).toISOString()}]:[];
@@ -5017,7 +5050,7 @@ function App(){
       // Custom tasks - spread across the year
       const taskNames=["הכנת דוח חודשי","סידור מחסן","ניקוי ציוד","הדרכת עובד חדש","בדיקת מלאי","עדכון נהלים","תיקון כלי עבודה","ביקורת בטיחות"];
       for(let i=0;i<20;i++){
-        const wId=`w${(i%5)+1}`;
+        const wId=WIDS[i%WIDS.length];
         const startT=new Date(2025,i%12,1+i*1.5|0,8,0,0);
         const dur=30+i*7;
         tasks.push({id:`demo_t_${i}`,user_id:wId,user_name:W[wId],name:taskNames[i%8],description:"משימה שהוקצתה ע״י המנהל",price:100+(i*50),active:false,completed:i<16,partial:i===16||i===17,start_time:startT.toISOString(),end_time:i<16?new Date(startT.getTime()+dur*60000).toISOString():null,duration_min:i<16?dur:0,paused:false,pause_start:null,total_pause_min:0,pause_log:[],updated_at:new Date().toISOString()});
@@ -5026,23 +5059,13 @@ function App(){
       // Save to Supabase
       const CHUNK=50;
       const chunked=(arr,n)=>Array.from({length:Math.ceil(arr.length/n)},(_,i)=>arr.slice(i*n,(i+1)*n));
-      // Demo departments + team hierarchy
-      const dDepts=[
-        {id:"demo_d1",name:"מחלקת הרכבה",color:"#8b5cf6",manager_id:"w1",company_id:_companyId},
-        {id:"demo_d2",name:"מחלקת בדיקות",color:"#06b6d4",manager_id:"w4",company_id:_companyId}
-      ];
-      const demoHier={
-        w1:{role:"team_lead",departmentId:"demo_d1"},
-        w2:{departmentId:"demo_d1",managerId:"w1"},
-        w3:{departmentId:"demo_d1",managerId:"w1"},
-        w4:{role:"dept_manager",departmentId:"demo_d2"},
-        w5:{departmentId:"demo_d2",managerId:"w4"}
-      };
-      // Seed demo users with hashed passwords
+      // Demo departments + full team hierarchy (manager → 2 team leads → ≥3 workers each)
+      const dDepts=DEF_DEPTS.map(d=>deptToDb({...d,companyId:_companyId}));
+      // Seed demo users with hashed passwords (kept as plain text so managers can view them)
       const demoUsers=[];
       for(const fu of FALLBACK_USERS){
         const h=await sha256(fu.password);
-        demoUsers.push(userToDb({...fu,...(demoHier[fu.id]||{}),password_hash:h,password:undefined}));
+        demoUsers.push(userToDb({...fu,companyId:_companyId,password_hash:h,passwordPlain:fu.password,password:undefined}));
       }
       await SB.upsert("app_users",demoUsers);
       await SB.upsert("departments",dDepts);
