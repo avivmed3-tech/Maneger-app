@@ -4995,7 +4995,7 @@ function App(){
 
   // ── Demo Data ───────────────────────────────────────────────────
   const loadDemoData=async()=>{
-    if(!confirm("זה יטען נתוני דמו לשנה שלמה. להמשיך?"))return;
+    if(!confirm("זה יטען נתוני דמו לשנה שלמה (מחלקות, צוותים, פק\"ע, לוגים) ויחליף משתמשי דמו קיימים. להמשיך?"))return;
     setSync("saving");
     try{
       const W=Object.fromEntries(DEMO_WORKER_IDS.map(id=>[id,(FALLBACK_USERS.find(u=>u.id===id)||{}).name||id]));
@@ -5066,6 +5066,12 @@ function App(){
       for(const fu of FALLBACK_USERS){
         const h=await sha256(fu.password);
         demoUsers.push(userToDb({...fu,companyId:_companyId,password_hash:h,passwordPlain:fu.password,password:undefined}));
+      }
+      // Idempotent re-seed: app_users.username is UNIQUE, so remove any prior demo users
+      // holding these usernames (keep the logged-in user) before upserting the fresh set.
+      const demoNames=FALLBACK_USERS.map(u=>u.username).filter(n=>n!==currentUser.username);
+      if(demoNames.length){
+        await fetch(`${SB_URL}/rest/v1/app_users?company_id=eq.${_companyId}&id=neq.${currentUser.id}&username=in.(${demoNames.join(",")})`,{method:"DELETE",headers:sbHeaders()}).catch(()=>{});
       }
       await SB.upsert("app_users",demoUsers);
       await SB.upsert("departments",dDepts);
