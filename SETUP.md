@@ -181,6 +181,7 @@ CREATE TABLE IF NOT EXISTS public.daily_plans (
   order_id text,
   stage_id text,
   target_qty numeric DEFAULT 0,
+  serial_ids jsonb DEFAULT '[]'::jsonb,
   note text,
   done boolean DEFAULT false,
   created_by text,
@@ -189,6 +190,7 @@ CREATE TABLE IF NOT EXISTS public.daily_plans (
   updated_at timestamptz DEFAULT now(),
   company_id uuid DEFAULT '00000000-0000-0000-0000-000000000001'::uuid REFERENCES public.companies(id)
 );
+ALTER TABLE public.daily_plans ADD COLUMN IF NOT EXISTS serial_ids jsonb DEFAULT '[]'::jsonb;  -- מספרים סידוריים ספציפיים ששובצו (ריק = לפי כמות/הכל)
 CREATE INDEX IF NOT EXISTS daily_plans_company_user_date_idx ON public.daily_plans (company_id, user_id, plan_date);
 ALTER TABLE public.daily_plans ENABLE ROW LEVEL SECURITY;
 DROP POLICY IF EXISTS anon_all_daily_plans ON public.daily_plans;
