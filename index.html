@@ -350,8 +350,8 @@ const projectToDb=p=>({id:p.id,name:p.name,company_id:p.companyId||DEFAULT_COMPA
 const dbToDept=r=>({id:r.id,name:r.name,color:r.color||"#3b82f6",managerId:r.manager_id||""});
 const deptToDb=d=>({id:d.id,name:d.name,color:d.color||"#3b82f6",manager_id:d.managerId||null,company_id:d.companyId||DEFAULT_COMPANY_ID});
 // Daily work plans — a manager assigns a worker an order+stage to work on for a given day.
-const dbToPlan=r=>({id:r.id,userId:r.user_id,userName:r.user_name,date:r.plan_date,orderId:r.order_id||"",stageId:r.stage_id||"",targetQty:Number(r.target_qty||0),note:r.note||"",done:r.done||false,createdBy:r.created_by||"",createdByName:r.created_by_name||"",createdAt:r.created_at});
-const planToDb=p=>({id:p.id,user_id:p.userId,user_name:p.userName||null,plan_date:p.date,order_id:p.orderId||null,stage_id:p.stageId||null,target_qty:Number(p.targetQty||0),note:p.note||null,done:p.done||false,created_by:p.createdBy||null,created_by_name:p.createdByName||null,company_id:p.companyId||DEFAULT_COMPANY_ID,updated_at:new Date().toISOString()});
+const dbToPlan=r=>({id:r.id,userId:r.user_id,userName:r.user_name,date:r.plan_date,orderId:r.order_id||"",stageId:r.stage_id||"",targetQty:Number(r.target_qty||0),serialIds:Array.isArray(r.serial_ids)?r.serial_ids:[],note:r.note||"",done:r.done||false,createdBy:r.created_by||"",createdByName:r.created_by_name||"",createdAt:r.created_at});
+const planToDb=p=>({id:p.id,user_id:p.userId,user_name:p.userName||null,plan_date:p.date,order_id:p.orderId||null,stage_id:p.stageId||null,target_qty:Number(p.targetQty||0),serial_ids:Array.isArray(p.serialIds)?p.serialIds:[],note:p.note||null,done:p.done||false,created_by:p.createdBy||null,created_by_name:p.createdByName||null,company_id:p.companyId||DEFAULT_COMPANY_ID,updated_at:new Date().toISOString()});
 
 // ── DB load all ────────────────────────────────────────────────────────────
 async function dbLoadAll(){
@@ -2119,14 +2119,17 @@ function MyWork({orders,stages,workLogs,onStartWork,onEndWork,onPauseWork,onResu
   const accessible=orders.filter(o=>(o.stageIds||[]).some(sid=>myAccess.includes(sid)));
   // Today's work plan assigned to me by my manager
   const myPlans=(dailyPlans||[]).filter(p=>p.userId===currentUser.id&&p.date===todays()).sort((a,b)=>{const sa=stages.find(s=>s.id===a.stageId),sb=stages.find(s=>s.id===b.stageId);return (sa?.order||0)-(sb?.order||0)});
-  const planPending=(orderId,stageId)=>{const o=orders.find(x=>x.id===orderId);if(!o)return [];return (o.serials||[]).filter(sr=>!workLogs.some(w=>w.serialId===sr.id&&w.stageId===stageId&&w.completed)&&!workLogs.some(w=>w.serialId===sr.id&&w.stageId===stageId&&!w.completed))};
+  const planPending=(orderId,stageId,serialIds)=>{const o=orders.find(x=>x.id===orderId);if(!o)return [];let sers=o.serials||[];if(Array.isArray(serialIds)&&serialIds.length){sers=sers.filter(sr=>serialIds.includes(sr.id))}return sers.filter(sr=>!workLogs.some(w=>w.serialId===sr.id&&w.stageId===stageId&&w.completed)&&!workLogs.some(w=>w.serialId===sr.id&&w.stageId===stageId&&!w.completed))};
   // Auto sign-off: when every unit of an assigned plan's stage is completed, mark the plan done.
   useEffect(()=>{
     if(!onMarkPlanDone)return;
     myPlans.forEach(p=>{
       if(p.done)return;
       const o=orders.find(x=>x.id===p.orderId);if(!o||!(o.serials||[]).length)return;
-      const allDone=(o.serials||[]).every(sr=>workLogs.some(w=>w.serialId===sr.id&&w.stageId===p.stageId&&w.completed));
+      // When specific serials were assigned, only they count toward completion; otherwise all order units.
+      const scope=(Array.isArray(p.serialIds)&&p.serialIds.length)?(o.serials||[]).filter(sr=>p.serialIds.includes(sr.id)):(o.serials||[]);
+      if(!scope.length)return;
+      const allDone=scope.every(sr=>workLogs.some(w=>w.serialId===sr.id&&w.stageId===p.stageId&&w.completed));
       if(allDone)onMarkPlanDone(p.id);
     });
   },[workLogs,dailyPlans]);
@@ -2253,7 +2256,8 @@ function MyWork({orders,stages,workLogs,onStartWork,onEndWork,onPauseWork,onResu
           <div style={{display:"flex",flexDirection:"column",gap:8}}>
             {myPlans.map(p=>{
               const o=orders.find(x=>x.id===p.orderId);const st=stages.find(s=>s.id===p.stageId);
-              const pend=planPending(p.orderId,p.stageId);
+              const hasSpecific=Array.isArray(p.serialIds)&&p.serialIds.length>0;
+              const pend=planPending(p.orderId,p.stageId,p.serialIds);
               const canStart=st&&myAccess.includes(st.id);
               return(
                 <div key={p.id} style={{background:"var(--c-deep)",borderRadius:10,padding:"10px 12px",border:`1px solid ${p.done?"#10b98144":"#06b6d433"}`,opacity:p.done?.65:1}}>
@@ -2261,7 +2265,7 @@ function MyWork({orders,stages,workLogs,onStartWork,onEndWork,onPauseWork,onResu
                     <span style={{fontWeight:700,color:"#60a5fa"}}>{o?.woNumber||'פק"ע נמחקה'}</span>
                     {o?.pn&&<span style={{fontSize:11,color:"#a78bfa"}}>P/N: {o.pn}</span>}
                     {st&&<span style={{fontSize:12,color:st.color}}>← {st.name}</span>}
-                    <span style={{fontSize:11,color:"var(--c-dim)"}}>{p.targetQty>0?`יעד: ${p.targetQty} יח'`:"כל היחידות"} · נותרו {pend.length}</span>
+                    <span style={{fontSize:11,color:"var(--c-dim)"}}>{hasSpecific?`${p.serialIds.length} מספרים סידוריים משובצים`:(p.targetQty>0?`יעד: ${p.targetQty} יח'`:"כל היחידות")} · נותרו {pend.length}</span>
                     {p.done&&<span style={{fontSize:11,color:"#10b981"}}>✅ בוצע</span>}
                     {p.createdByName&&<span style={{fontSize:11,color:"var(--c-dim)"}}>· שובץ ע"י {p.createdByName}</span>}
                   </div>
@@ -2636,6 +2640,7 @@ function DailyPlanBoard({dailyPlans,workers,orders,stages,workLogs,onAddPlan,onD
   const [pOrder,setPOrder]=useState("");
   const [pStage,setPStage]=useState("");
   const [pQty,setPQty]=useState("");
+  const [pSerials,setPSerials]=useState([]); // specific serial IDs assigned for the current line (empty = by quantity / all)
   const [pNote,setPNote]=useState("");
   const [queue,setQueue]=useState([]); // pending assignment lines (פק"ע+שלב) before saving
   const canAssign=Array.isArray(workers)&&workers.length>0&&!!onAddPlan;
@@ -2650,15 +2655,20 @@ function DailyPlanBoard({dailyPlans,workers,orders,stages,workLogs,onAddPlan,onD
   const selStage=stages.find(s=>s.id===pStage);
   const lacksAccess=!!(selWorker&&selStage&&!hasAccess(selStage.id));
   const roleMismatch=!!(selWorker&&selStage&&selStage.roleId&&selStage.roleId!==selWorker.role);
-  // Units of an order still needing a given stage (not yet completed there).
-  const pendingFor=(orderId,stageId)=>{const o=(orders||[]).find(x=>x.id===orderId);if(!o)return 0;return (o.serials||[]).filter(sr=>!(workLogs||[]).some(w=>w.serialId===sr.id&&w.stageId===stageId&&w.completed)).length};
+  // Serial units of an order still needing a given stage (not yet completed there).
+  const pendingSerialsFor=(orderId,stageId)=>{const o=(orders||[]).find(x=>x.id===orderId);if(!o)return [];return (o.serials||[]).filter(sr=>!(workLogs||[]).some(w=>w.serialId===sr.id&&w.stageId===stageId&&w.completed))};
+  const pendingFor=(orderId,stageId)=>pendingSerialsFor(orderId,stageId).length;
+  // Remaining (not-yet-completed) units for a saved plan — respects specific serial assignments.
+  const planRemain=(p)=>{if(Array.isArray(p.serialIds)&&p.serialIds.length){return p.serialIds.filter(id=>!(workLogs||[]).some(w=>w.serialId===id&&w.stageId===p.stageId&&w.completed)).length}return pendingFor(p.orderId,p.stageId)};
   const stageOrder=(stageId)=>{const s=stages.find(x=>x.id===stageId);return s?.order||0};
+  const availSerials=(pOrder&&pStage)?pendingSerialsFor(pOrder,pStage):[];
+  const toggleSerial=(id)=>setPSerials(arr=>arr.includes(id)?arr.filter(x=>x!==id):[...arr,id]);
   const addToQueue=()=>{
     if(!pOrder||!pStage){toast('בחר פק"ע ושלב להוספה',"warning");return}
     if(queue.some(q=>q.orderId===pOrder&&q.stageId===pStage)){toast("שיבוץ זה כבר ברשימה","warning");return}
     if(lacksAccess&&!confirm(`⚠️ ל${selWorker?.name||"עובד"} אין הרשאה לשלב "${selStage?.name}". להוסיף בכל זאת?`))return;
-    setQueue(q=>[...q,{key:uid(),orderId:pOrder,stageId:pStage,targetQty:Number(pQty)||0,note:pNote.trim(),lacksAccess}]);
-    setPStage("");setPQty("");setPNote("");
+    setQueue(q=>[...q,{key:uid(),orderId:pOrder,stageId:pStage,targetQty:pSerials.length>0?pSerials.length:(Number(pQty)||0),serialIds:[...pSerials],note:pNote.trim(),lacksAccess}]);
+    setPStage("");setPQty("");setPSerials([]);setPNote("");
   };
   const submit=()=>{
     if(!pWorker){toast("יש לבחור עובד","warning");return}
@@ -2666,14 +2676,14 @@ function DailyPlanBoard({dailyPlans,workers,orders,stages,workLogs,onAddPlan,onD
     // include the currently-typed line if not yet queued
     if(pOrder&&pStage&&!items.some(q=>q.orderId===pOrder&&q.stageId===pStage)){
       if(lacksAccess&&!confirm(`⚠️ ל${selWorker?.name||"עובד"} אין הרשאה לשלב "${selStage?.name}". לשבץ בכל זאת?`))return;
-      items.push({key:uid(),orderId:pOrder,stageId:pStage,targetQty:Number(pQty)||0,note:pNote.trim(),lacksAccess});
+      items.push({key:uid(),orderId:pOrder,stageId:pStage,targetQty:pSerials.length>0?pSerials.length:(Number(pQty)||0),serialIds:[...pSerials],note:pNote.trim(),lacksAccess});
     }
     if(items.length===0){toast('יש לבחור לפחות פק"ע ושלב אחד',"warning");return}
     // Sort by stage sequence (לפי סידורי) so the worker sees the work in order.
     items.sort((a,b)=>stageOrder(a.stageId)-stageOrder(b.stageId));
     const u=workers.find(w=>w.id===pWorker);
-    items.forEach(it=>onAddPlan({id:uid(),userId:pWorker,userName:u?.name||"",date,orderId:it.orderId,stageId:it.stageId,targetQty:it.targetQty,note:it.note,done:false,createdBy:currentUser.id,createdByName:currentUser.name,createdAt:nowISO()}));
-    setQueue([]);setPOrder("");setPStage("");setPQty("");setPNote("");setShowForm(false);
+    items.forEach(it=>onAddPlan({id:uid(),userId:pWorker,userName:u?.name||"",date,orderId:it.orderId,stageId:it.stageId,targetQty:it.targetQty,serialIds:Array.isArray(it.serialIds)?it.serialIds:[],note:it.note,done:false,createdBy:currentUser.id,createdByName:currentUser.name,createdAt:nowISO()}));
+    setQueue([]);setPOrder("");setPStage("");setPQty("");setPSerials([]);setPNote("");setShowForm(false);
     toast(items.length>1?`${items.length} שיבוצים נשמרו`:"התוכנית נשמרה","success");
   };
   const dayPlans=(dailyPlans||[]).filter(p=>p.date===date&&workers.some(w=>w.id===p.userId));
@@ -2694,19 +2704,19 @@ function DailyPlanBoard({dailyPlans,workers,orders,stages,workLogs,onAddPlan,onD
           <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(160px,1fr))",gap:10}}>
             <div style={{display:"flex",flexDirection:"column",gap:3}}>
               <label style={{fontSize:11,color:"var(--c-dim)"}}>עובד *</label>
-              <select value={pWorker} onChange={e=>{setPWorker(e.target.value);setQueue([])}}><option value="">— בחר עובד —</option>{workers.map(w=><option key={w.id} value={w.id}>{w.name}{ROLES[w.role]?` · ${ROLES[w.role].label}`:""}</option>)}</select>
+              <select value={pWorker} onChange={e=>{setPWorker(e.target.value);setQueue([]);setPSerials([])}}><option value="">— בחר עובד —</option>{workers.map(w=><option key={w.id} value={w.id}>{w.name}{ROLES[w.role]?` · ${ROLES[w.role].label}`:""}</option>)}</select>
             </div>
             <div style={{display:"flex",flexDirection:"column",gap:3}}>
               <label style={{fontSize:11,color:"var(--c-dim)"}}>פק"ע *</label>
-              <select value={pOrder} onChange={e=>{setPOrder(e.target.value);setPStage("")}}><option value="">— בחר פק"ע —</option>{(orders||[]).map(o=><option key={o.id} value={o.id}>{o.woNumber}{o.pn?` · ${o.pn}`:""}</option>)}</select>
+              <select value={pOrder} onChange={e=>{setPOrder(e.target.value);setPStage("");setPSerials([])}}><option value="">— בחר פק"ע —</option>{(orders||[]).map(o=><option key={o.id} value={o.id}>{o.woNumber}{o.pn?` · ${o.pn}`:""}</option>)}</select>
             </div>
             <div style={{display:"flex",flexDirection:"column",gap:3}}>
               <label style={{fontSize:11,color:"var(--c-dim)"}}>שלב *</label>
-              <select value={pStage} onChange={e=>setPStage(e.target.value)} disabled={!selOrder}><option value="">— בחר שלב —</option>{orderStages.map(st=><option key={st.id} value={st.id}>{st.name}{st.roleId&&ROLES[st.roleId]?` (${ROLES[st.roleId].label})`:""}{selWorker&&!hasAccess(st.id)?" ⚠️ אין הרשאה":""}</option>)}</select>
+              <select value={pStage} onChange={e=>{setPStage(e.target.value);setPSerials([])}} disabled={!selOrder}><option value="">— בחר שלב —</option>{orderStages.map(st=><option key={st.id} value={st.id}>{st.name}{st.roleId&&ROLES[st.roleId]?` (${ROLES[st.roleId].label})`:""}{selWorker&&!hasAccess(st.id)?" ⚠️ אין הרשאה":""}</option>)}</select>
             </div>
             <div style={{display:"flex",flexDirection:"column",gap:3}}>
               <label style={{fontSize:11,color:"var(--c-dim)"}}>יעד יחידות (0=הכל)</label>
-              <input type="number" min="0" value={pQty} onChange={e=>setPQty(e.target.value)} placeholder="0"/>
+              <input type="number" min="0" value={pSerials.length>0?pSerials.length:pQty} onChange={e=>setPQty(e.target.value)} placeholder="0" disabled={pSerials.length>0} title={pSerials.length>0?"נקבע אוטומטית לפי המספרים הסידוריים שנבחרו":""}/>
             </div>
             <div style={{display:"flex",flexDirection:"column",gap:3,gridColumn:"1 / -1"}}>
               <label style={{fontSize:11,color:"var(--c-dim)"}}>הערה (לא חובה)</label>
@@ -2724,6 +2734,23 @@ function DailyPlanBoard({dailyPlans,workers,orders,stages,workLogs,onAddPlan,onD
           {lacksAccess&&<div style={{marginTop:8,padding:"8px 10px",borderRadius:8,background:"#ef444415",border:"1px solid #ef444455",color:"#f87171",fontSize:12,fontWeight:600}}>⚠️ ל{selWorker?.name} אין הרשאה לשלב "{selStage?.name}". אפשר לשבץ בכל זאת — אך מומלץ לבחור עובד מורשה או לעדכן את הרשאותיו.</div>}
           {!lacksAccess&&roleMismatch&&<div style={{marginTop:8,padding:"8px 10px",borderRadius:8,background:"#f59e0b15",border:"1px solid #f59e0b55",color:"#f59e0b",fontSize:12}}>ℹ️ השלב מיועד לתפקיד {ROLES[selStage.roleId]?.label||selStage.roleId}, והעובד הוא {ROLES[selWorker.role]?.label||selWorker.role}. יש לו הרשאה לשלב, אך התפקיד שונה.</div>}
           {pOrder&&pStage&&<div style={{fontSize:11,color:"var(--c-dim)",marginTop:8}}>זמינות לשלב זה: {pendingFor(pOrder,pStage)} יחידות ממתינות</div>}
+          {/* Optional: assign specific serial numbers instead of a plain quantity */}
+          {pOrder&&pStage&&availSerials.length>0&&(
+            <div style={{marginTop:8,background:"var(--c-card)",borderRadius:8,padding:"8px 10px",border:"1px solid var(--c-border)"}}>
+              <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",flexWrap:"wrap",gap:6,marginBottom:6}}>
+                <span style={{fontSize:11,color:"var(--c-dim)"}}>🔢 בחר מספרים סידוריים ספציפיים (לא חובה) — אם לא תבחר, ישובצו כל היחידות / לפי היעד{pSerials.length>0?` · נבחרו ${pSerials.length}`:""}</span>
+                <span style={{display:"flex",gap:6}}>
+                  <button type="button" onClick={()=>setPSerials(availSerials.map(s=>s.id))} style={{background:"transparent",border:"1px solid var(--c-border)",borderRadius:6,padding:"2px 7px",fontSize:11,color:"var(--c-muted)",fontFamily:"inherit",cursor:"pointer"}}>בחר הכל</button>
+                  {pSerials.length>0&&<button type="button" onClick={()=>setPSerials([])} style={{background:"transparent",border:"1px solid var(--c-border)",borderRadius:6,padding:"2px 7px",fontSize:11,color:"var(--c-muted)",fontFamily:"inherit",cursor:"pointer"}}>נקה</button>}
+                </span>
+              </div>
+              <div style={{display:"flex",flexWrap:"wrap",gap:6,maxHeight:140,overflowY:"auto"}}>
+                {availSerials.map(s=>{const sel=pSerials.includes(s.id);return(
+                  <button key={s.id} type="button" onClick={()=>toggleSerial(s.id)} style={{background:sel?(selStage?.color||"#06b6d4")+"33":"var(--c-deep)",border:`1px solid ${sel?(selStage?.color||"#06b6d4"):"var(--c-border)"}`,borderRadius:6,padding:"3px 9px",fontSize:11,color:sel?(selStage?.color||"#06b6d4"):"var(--c-muted)",fontFamily:"inherit",cursor:"pointer",fontWeight:sel?700:400}}>{sel?"✓ ":""}{s.sn}</button>
+                );})}
+              </div>
+            </div>
+          )}
           {/* Queue of assignment lines (multiple orders / stages) */}
           {queue.length>0&&(
             <div style={{marginTop:10,background:"var(--c-card)",borderRadius:8,padding:"8px 10px",border:"1px solid var(--c-border)"}}>
@@ -2733,7 +2760,8 @@ function DailyPlanBoard({dailyPlans,workers,orders,stages,workLogs,onAddPlan,onD
                   <div key={it.key} style={{display:"flex",alignItems:"center",gap:8,flexWrap:"wrap",fontSize:12}}>
                     <span style={{fontWeight:700,color:"#60a5fa"}}>{o?.woNumber||'פק"ע'}</span>
                     {st&&<span style={{color:st.color}}>← {st.name}</span>}
-                    <span style={{color:"var(--c-dim)"}}>{it.targetQty>0?`יעד ${it.targetQty}`:"כל היחידות"}</span>
+                    <span style={{color:"var(--c-dim)"}}>{it.serialIds&&it.serialIds.length>0?`${it.serialIds.length} ס"נ נבחרו`:(it.targetQty>0?`יעד ${it.targetQty}`:"כל היחידות")}</span>
+                    {it.serialIds&&it.serialIds.length>0&&(()=>{const o2=(orders||[]).find(x=>x.id===it.orderId);const sns=it.serialIds.map(id=>(o2?.serials||[]).find(s=>s.id===id)?.sn).filter(Boolean);return <span style={{color:"#7eb8ff",fontSize:11}}>🔢 {sns.slice(0,6).join(", ")}{sns.length>6?` +${sns.length-6}`:""}</span>;})()}
                     {it.lacksAccess&&<span style={{color:"#f87171"}}>⚠️ ללא הרשאה</span>}
                     {it.note&&<span style={{color:"var(--c-muted)"}}>📝 {it.note}</span>}
                     <IBtn onClick={()=>setQueue(q=>q.filter(x=>x.key!==it.key))}>🗑️</IBtn>
@@ -2760,12 +2788,14 @@ function DailyPlanBoard({dailyPlans,workers,orders,stages,workLogs,onAddPlan,onD
               </div>
               <div style={{display:"flex",flexDirection:"column",gap:5}}>
                 {byWorker[w.id].map(p=>{
-                  const o=(orders||[]).find(x=>x.id===p.orderId);const st=stages.find(s=>s.id===p.stageId);const remain=pendingFor(p.orderId,p.stageId);
+                  const o=(orders||[]).find(x=>x.id===p.orderId);const st=stages.find(s=>s.id===p.stageId);const remain=planRemain(p);
+                  const planSns=(Array.isArray(p.serialIds)&&p.serialIds.length>0)?p.serialIds.map(id=>(o?.serials||[]).find(s=>s.id===id)?.sn).filter(Boolean):[];
                   return(
                     <div key={p.id} style={{display:"flex",alignItems:"center",gap:8,flexWrap:"wrap",background:"var(--c-card)",borderRadius:8,padding:"7px 10px",border:`1px solid ${p.done?"#10b98144":"var(--c-border)"}`,opacity:p.done?.7:1}}>
                       <span style={{fontWeight:700,color:"#60a5fa",fontSize:13}}>{o?.woNumber||"פק\"ע נמחקה"}</span>
                       {st&&<span style={{fontSize:11,color:st.color}}>← {st.name}</span>}
-                      <span style={{fontSize:11,color:"var(--c-dim)"}}>{p.targetQty>0?`יעד ${p.targetQty}`:"כל היחידות"} · נותרו {remain}</span>
+                      <span style={{fontSize:11,color:"var(--c-dim)"}}>{planSns.length>0?`${planSns.length} ס"נ`:(p.targetQty>0?`יעד ${p.targetQty}`:"כל היחידות")} · נותרו {remain}</span>
+                      {planSns.length>0&&<span style={{fontSize:11,color:"#7eb8ff"}}>🔢 {planSns.slice(0,6).join(", ")}{planSns.length>6?` +${planSns.length-6}`:""}</span>}
                       {p.note&&<span style={{fontSize:11,color:"var(--c-muted)"}}>📝 {p.note}</span>}
                       <div style={{marginInlineStart:"auto",display:"flex",gap:4,alignItems:"center"}}>
                         <button onClick={()=>onTogglePlanDone&&onTogglePlanDone(p.id)} title="סמן כבוצע" style={{background:p.done?"#10b98133":"transparent",border:"1px solid #10b98144",borderRadius:6,padding:"2px 7px",fontSize:11,color:"#10b981",fontFamily:"inherit",cursor:"pointer"}}>✅</button>
