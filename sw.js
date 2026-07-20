@@ -1,4 +1,4 @@
-const CACHE='pml-v23';
+const CACHE='pml-v24';
 const ASSETS=['./','./index.html','./manifest.json','./app-icon-192.png','./app-icon-512.png'];
 
 self.addEventListener('install',e=>{
