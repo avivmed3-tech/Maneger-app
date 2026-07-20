@@ -183,7 +183,7 @@ button{font-family:inherit;cursor:pointer}
 const {useState,useEffect,useCallback,useRef,useMemo}=React;
 
 // ── Config ─────────────────────────────────────────────────────────────────
-const APP_VERSION="4.1.0";const APP_DATE="2026-06-15";
+const APP_VERSION="4.2.0";const APP_DATE="2026-07-20";
 const SB_URL="https://lwiurzkiojctwzllpnmr.supabase.co";
 const SB_KEY="eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imx3aXVyemtpb2pjdHd6bGxwbm1yIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzQ2MjU4NTAsImV4cCI6MjA5MDIwMTg1MH0.jWOnAtsjbefoY18ofSd46WMdgY47Vv4k7LgcHdOrj6Q";
 const SB_H={"Content-Type":"application/json","apikey":SB_KEY,"Authorization":"Bearer "+SB_KEY};
@@ -3845,7 +3845,7 @@ function OfflineBanner({lm}){return(
 // ══════════════════════════════════════════════════════════════════════════
 // ═══ NAVBAR ═════════════════════════════════════════════════════════════
 // ══════════════════════════════════════════════════════════════════════════
-function Navbar({tab,setTab,tabs,lightMode,toggleLight,sync,onAdmin,onLogout,alertCount,onAlerts,onRefresh,onLiveBoard,onReport,onHistory,isAdmin,onLoadDemo,onDeleteDemo,onInstall,canInstall}){
+function Navbar({tab,setTab,tabs,lightMode,toggleLight,sync,onAdmin,onLogout,alertCount,onAlerts,onRefresh,onLiveBoard,onReport,onHistory,isAdmin,isManager,onLoadDemo,onDeleteDemo,onInstall,canInstall}){
   const {currentUser}=useAuth();
   const [menuOpen,setMenuOpen]=useState(false);
   const lm=lightMode;
@@ -3874,20 +3874,20 @@ function Navbar({tab,setTab,tabs,lightMode,toggleLight,sync,onAdmin,onLogout,ale
             {sync==="ok"&&<span style={{display:"inline-block",width:6,height:6,borderRadius:"50%",background:"#10b981",animation:"pulse 2s infinite"}}/>}
             {sync==="ok"?"בזמן אמת":sync==="saving"?"⏳":"❌"}
           </div>
-          {isAdmin&&(
+          {isManager&&(
             <div style={{position:"relative"}}>
               <button onClick={()=>setMenuOpen(p=>!p)} style={{background:"#f59e0b22",border:"1px solid #f59e0b44",color:"#f59e0b",borderRadius:8,padding:"5px 10px",fontSize:13,fontWeight:700,fontFamily:"inherit",display:"flex",alignItems:"center",gap:4}}>
                 🛡️ <span style={{fontSize:11}}>ניהול ▾</span>
               </button>
               {menuOpen&&(
                 <div style={{position:"absolute",top:"calc(100% + 6px)",left:0,background:navBg,border:`1px solid ${navBorder}`,borderRadius:10,padding:8,minWidth:160,zIndex:200,boxShadow:"0 8px 24px #0004",display:"flex",flexDirection:"column",gap:4}}>
-                  <button onClick={()=>{onAdmin();setMenuOpen(false)}} style={{background:"transparent",border:"none",color:"#f59e0b",borderRadius:7,padding:"8px 12px",fontSize:13,fontWeight:600,fontFamily:"inherit",textAlign:"right",cursor:"pointer",whiteSpace:"nowrap"}}>🛡️ ניהול מערכת</button>
+                  {isAdmin&&<button onClick={()=>{onAdmin();setMenuOpen(false)}} style={{background:"transparent",border:"none",color:"#f59e0b",borderRadius:7,padding:"8px 12px",fontSize:13,fontWeight:600,fontFamily:"inherit",textAlign:"right",cursor:"pointer",whiteSpace:"nowrap"}}>🛡️ ניהול מערכת</button>}
                   <button onClick={()=>{onLiveBoard();setMenuOpen(false)}} style={{background:"transparent",border:"none",color:"#06b6d4",borderRadius:7,padding:"8px 12px",fontSize:13,fontWeight:600,fontFamily:"inherit",textAlign:"right",cursor:"pointer",whiteSpace:"nowrap"}}>📡 מסך מפעל</button>
                   <button onClick={()=>{onReport();setMenuOpen(false)}} style={{background:"transparent",border:"none",color:"#10b981",borderRadius:7,padding:"8px 12px",fontSize:13,fontWeight:600,fontFamily:"inherit",textAlign:"right",cursor:"pointer",whiteSpace:"nowrap"}}>📄 דוח חודשי</button>
                   <button onClick={()=>{onHistory();setMenuOpen(false)}} style={{background:"transparent",border:"none",color:"#8b5cf6",borderRadius:7,padding:"8px 12px",fontSize:13,fontWeight:600,fontFamily:"inherit",textAlign:"right",cursor:"pointer",whiteSpace:"nowrap"}}>📋 היסטוריה</button>
-                  <div style={{borderTop:`1px solid ${navBorder}`,margin:"4px 0"}}/>
+                  {isAdmin&&<><div style={{borderTop:`1px solid ${navBorder}`,margin:"4px 0"}}/>
                   <button onClick={()=>{onLoadDemo();setMenuOpen(false)}} style={{background:"transparent",border:"none",color:"#06b6d4",borderRadius:7,padding:"8px 12px",fontSize:13,fontWeight:600,fontFamily:"inherit",textAlign:"right",cursor:"pointer",whiteSpace:"nowrap"}}>🧪 טען נתוני דמו</button>
-                  <button onClick={()=>{onDeleteDemo();setMenuOpen(false)}} style={{background:"transparent",border:"none",color:"#ef4444",borderRadius:7,padding:"8px 12px",fontSize:13,fontWeight:600,fontFamily:"inherit",textAlign:"right",cursor:"pointer",whiteSpace:"nowrap"}}>🗑️ מחק נתוני דמו</button>
+                  <button onClick={()=>{onDeleteDemo();setMenuOpen(false)}} style={{background:"transparent",border:"none",color:"#ef4444",borderRadius:7,padding:"8px 12px",fontSize:13,fontWeight:600,fontFamily:"inherit",textAlign:"right",cursor:"pointer",whiteSpace:"nowrap"}}>🗑️ מחק נתוני דמו</button></>}
                   <div style={{borderTop:`1px solid ${navBorder}`,margin:"4px 0"}}/>
                   {canInstall&&<button onClick={()=>{onInstall();setMenuOpen(false)}} style={{background:"transparent",border:"none",color:"#3b82f6",borderRadius:7,padding:"8px 12px",fontSize:13,fontWeight:600,fontFamily:"inherit",textAlign:"right",cursor:"pointer",whiteSpace:"nowrap"}}>📲 התקן אפליקציה</button>}
                   <button onClick={()=>{onLogout();setMenuOpen(false)}} style={{background:"transparent",border:"none",color:"#ef4444",borderRadius:7,padding:"8px 12px",fontSize:13,fontWeight:600,fontFamily:"inherit",textAlign:"right",cursor:"pointer"}}>🚪 יציאה</button>
@@ -3897,7 +3897,7 @@ function Navbar({tab,setTab,tabs,lightMode,toggleLight,sync,onAdmin,onLogout,ale
           )}
           <div style={{display:"flex",alignItems:"center",gap:6,padding:"4px 10px",background:lm?"#e2e8f0":"#0d1120",borderRadius:8,border:`1px solid ${navBorder}`}}>
             <span style={{fontSize:12,color:navActive,fontWeight:700}}>{currentUser?.name}</span>
-            {!isAdmin&&<><span style={{color:navMuted}}>·</span><button onClick={onLogout} style={{background:"none",border:"none",color:"#ef4444",fontSize:12,padding:0,fontWeight:600,fontFamily:"inherit"}}>יציאה</button></>}
+            {!isManager&&<><span style={{color:navMuted}}>·</span><button onClick={onLogout} style={{background:"none",border:"none",color:"#ef4444",fontSize:12,padding:0,fontWeight:600,fontFamily:"inherit"}}>יציאה</button></>}
           </div>
         </div>
         <div className="show-mobile-only" style={{display:"flex",gap:6,alignItems:"center",marginRight:"auto"}}>
@@ -3924,15 +3924,15 @@ function Navbar({tab,setTab,tabs,lightMode,toggleLight,sync,onAdmin,onLogout,ale
             </div>
             <div style={{display:"flex",flexDirection:"column",gap:2,padding:"0 8px"}}>
               <button onClick={()=>{toggleLight();setMenuOpen(false)}} style={{background:"transparent",border:"none",borderRadius:8,padding:"10px 14px",fontSize:14,color:navMuted,fontFamily:"inherit",textAlign:"right",display:"flex",alignItems:"center",gap:10}}><span style={{fontSize:18}}>{lm?"🌙":"☀️"}</span>{lm?"מצב כהה":"מצב בהיר"}</button>
-              {isAdmin&&<><div style={{padding:"8px 14px",fontSize:11,color:navMuted,fontWeight:700,textTransform:"uppercase",letterSpacing:".05em"}}>ניהול</div>
-              <button onClick={()=>{onAdmin();setMenuOpen(false)}} style={{background:"transparent",border:"none",borderRadius:8,padding:"10px 14px",fontSize:14,color:navMuted,fontFamily:"inherit",textAlign:"right",display:"flex",alignItems:"center",gap:10}}><span style={{fontSize:18}}>🛡️</span>ניהול מערכת</button>
+              {isManager&&<><div style={{padding:"8px 14px",fontSize:11,color:navMuted,fontWeight:700,textTransform:"uppercase",letterSpacing:".05em"}}>ניהול</div>
+              {isAdmin&&<button onClick={()=>{onAdmin();setMenuOpen(false)}} style={{background:"transparent",border:"none",borderRadius:8,padding:"10px 14px",fontSize:14,color:navMuted,fontFamily:"inherit",textAlign:"right",display:"flex",alignItems:"center",gap:10}}><span style={{fontSize:18}}>🛡️</span>ניהול מערכת</button>}
               <button onClick={()=>{onLiveBoard();setMenuOpen(false)}} style={{background:"transparent",border:"none",borderRadius:8,padding:"10px 14px",fontSize:14,color:navMuted,fontFamily:"inherit",textAlign:"right",display:"flex",alignItems:"center",gap:10}}><span style={{fontSize:18}}>📡</span>מסך מפעל חי</button>
               <button onClick={()=>{onReport();setMenuOpen(false)}} style={{background:"transparent",border:"none",borderRadius:8,padding:"10px 14px",fontSize:14,color:navMuted,fontFamily:"inherit",textAlign:"right",display:"flex",alignItems:"center",gap:10}}><span style={{fontSize:18}}>📄</span>דוח חודשי</button>
               <button onClick={()=>{onHistory();setMenuOpen(false)}} style={{background:"transparent",border:"none",borderRadius:8,padding:"10px 14px",fontSize:14,color:navMuted,fontFamily:"inherit",textAlign:"right",display:"flex",alignItems:"center",gap:10}}><span style={{fontSize:18}}>📋</span>היסטוריה</button>
-              <div style={{borderTop:`1px solid ${navBorder}`,margin:"6px 8px"}}/>
+              {isAdmin&&<><div style={{borderTop:`1px solid ${navBorder}`,margin:"6px 8px"}}/>
               <div style={{padding:"8px 14px",fontSize:11,color:navMuted,fontWeight:700,textTransform:"uppercase",letterSpacing:".05em"}}>נתונים</div>
               <button onClick={()=>{onLoadDemo();setMenuOpen(false)}} style={{background:"transparent",border:"none",borderRadius:8,padding:"10px 14px",fontSize:14,color:"#06b6d4",fontFamily:"inherit",textAlign:"right",display:"flex",alignItems:"center",gap:10}}><span style={{fontSize:18}}>🧪</span>טען נתוני דמו</button>
-              <button onClick={()=>{onDeleteDemo();setMenuOpen(false)}} style={{background:"transparent",border:"none",borderRadius:8,padding:"10px 14px",fontSize:14,color:"#ef4444",fontFamily:"inherit",textAlign:"right",display:"flex",alignItems:"center",gap:10}}><span style={{fontSize:18}}>🗑️</span>מחק נתוני דמו</button></>}
+              <button onClick={()=>{onDeleteDemo();setMenuOpen(false)}} style={{background:"transparent",border:"none",borderRadius:8,padding:"10px 14px",fontSize:14,color:"#ef4444",fontFamily:"inherit",textAlign:"right",display:"flex",alignItems:"center",gap:10}}><span style={{fontSize:18}}>🗑️</span>מחק נתוני דמו</button></>}</>}
               <div style={{borderTop:`1px solid ${navBorder}`,margin:"6px 8px"}}/>
               {canInstall&&<button onClick={()=>{onInstall();setMenuOpen(false)}} style={{background:"#3b82f611",border:"none",borderRadius:8,padding:"10px 14px",fontSize:14,color:"#3b82f6",fontFamily:"inherit",textAlign:"right",display:"flex",alignItems:"center",gap:10,fontWeight:600}}><span style={{fontSize:18}}>📲</span>התקן אפליקציה</button>}
               <button onClick={()=>{onLogout();setMenuOpen(false)}} style={{background:"transparent",border:"none",borderRadius:8,padding:"10px 14px",fontSize:14,color:"#ef4444",fontFamily:"inherit",textAlign:"right",display:"flex",alignItems:"center",gap:10}}><span style={{fontSize:18}}>🚪</span>יציאה מהמערכת</button>
@@ -4782,10 +4782,22 @@ function App(){
 
   // ── Refresh from Supabase ──────────────────────────────────────
   const lastPersistRef=useRef(0);
+  const pendingSaveRef=useRef(false); // local changes not yet confirmed saved to Supabase
+  const saveRunningRef=useRef(false); // an upsert batch is currently in flight
+  const doSaveRef=useRef(null);
+  // Applying remote data must be blocked while a local change is unsaved, a save is
+  // in flight, or a save just landed — a fetch that started before the save finished
+  // returns stale rows and would overwrite the local change (the "click resets" bug).
+  const remoteApplyBlocked=()=>pendingSaveRef.current||saveRunningRef.current||Date.now()-lastPersistRef.current<5000;
   const refreshFromDB=useCallback(async(force)=>{
-    if(!force&&Date.now()-lastPersistRef.current<5000)return;
+    if(!force&&remoteApplyBlocked())return;
     setSync("saving");
     try{
+      // A manual refresh must not clobber unsaved local changes — wait for any
+      // in-flight save, flush any pending one, and bail if the data still isn't saved
+      for(let i=0;i<50&&saveRunningRef.current;i++)await new Promise(r=>setTimeout(r,100));
+      if(pendingSaveRef.current){clearTimeout(saveTimer);await doSaveRef.current?.()}
+      if(pendingSaveRef.current||saveRunningRef.current)throw new Error("unsaved local changes");
       const [data,users]=await Promise.all([dbLoadAll(),dbLoadUsers()]);
       if(data){
         if(data.orders){setOrders(data.orders);LS.set("orders",data.orders)}
@@ -4795,6 +4807,7 @@ function App(){
         if(data.customTasks){setCustomTasks(data.customTasks);LS.set("customTasks",data.customTasks)}
         if(data.stageBlocks){setStageBlocks(data.stageBlocks);LS.set("stageBlocks",data.stageBlocks)}
         if(data.departments){setDepartments(data.departments);LS.set("departments",data.departments)}
+        if(data.dailyPlans){setDailyPlans(data.dailyPlans);LS.set("dailyPlans",data.dailyPlans)}
       }
       if(users?.length)LS.set("users",users);
       setSync("ok");
@@ -4813,12 +4826,14 @@ function App(){
     // Polling fallback — always active, faster when realtime fails
     const poll=async()=>{
       if(dead)return;
-      // Skip if we just persisted locally (avoid overwriting local changes)
-      if(Date.now()-lastPersistRef.current<3000){pollTimer=setTimeout(poll,realtimeWorking?30000:8000);return}
+      // Skip while a local change is unsaved / just saved (avoid overwriting it)
+      if(remoteApplyBlocked()){pollTimer=setTimeout(poll,realtimeWorking?30000:8000);return}
       try{
         const data=await dbLoadAll();
         if(dead)return;
-        if(data){
+        // Re-check — the user may have clicked an action while the fetch was in flight,
+        // in which case this data is stale and applying it would undo the click.
+        if(data&&!remoteApplyBlocked()){
           if(data.orders){setOrders(data.orders);LS.set("orders",data.orders)}
           if(data.workLogs){setWorkLogs(data.workLogs);LS.set("workLogs",data.workLogs)}
           if(data.customTasks){setCustomTasks(data.customTasks);LS.set("customTasks",data.customTasks)}
@@ -4827,8 +4842,8 @@ function App(){
           if(data.stageBlocks){setStageBlocks(data.stageBlocks);LS.set("stageBlocks",data.stageBlocks)}
           if(data.departments){setDepartments(data.departments);LS.set("departments",data.departments)}
           if(data.dailyPlans){setDailyPlans(data.dailyPlans);LS.set("dailyPlans",data.dailyPlans)}
+          setSync("ok");
         }
-        setSync("ok");
       }catch(e){console.warn("Poll error",e)}
       if(!dead)pollTimer=setTimeout(poll,realtimeWorking?30000:8000);
     };
@@ -4869,17 +4884,22 @@ function App(){
             const tbl=msg.payload?.data?.table||msg.payload?.table||msg.topic?.split(":")?.[2];
             if(!tbl)return;
             console.log("Realtime change:",tbl);
+            // Never refetch/apply while a local change is unsaved — the change event may be
+            // ours (mid-save) or someone else's, and either way stale rows would undo the click.
+            if(remoteApplyBlocked())return;
             // Small delay to let write finish
             await new Promise(r=>setTimeout(r,300));
             const cf=`company_id=eq.${_companyId}&`;
-            if(["orders"].includes(tbl)){const rows=await SB.get("orders",cf+"order=created_at.asc");setOrders(rows.map(dbToOrder));LS.set("orders",rows.map(dbToOrder))}
-            if(["work_logs"].includes(tbl)){const rows=await SB.get("work_logs",cf+"order=created_at.asc");setWorkLogs(rows.map(dbToLog));LS.set("workLogs",rows.map(dbToLog))}
-            if(["custom_tasks"].includes(tbl)){const rows=await SB.get("custom_tasks",cf+"order=created_at.asc");setCustomTasks(rows.map(dbToTask));LS.set("customTasks",rows.map(dbToTask))}
-            if(["stages"].includes(tbl)){const rows=await SB.get("stages",cf+"order=stage_order.asc");setStages(rows.map(dbToStage));LS.set("stages",rows.map(dbToStage))}
-            if(["projects"].includes(tbl)){const rows=await SB.get("projects",cf+"order=name.asc");setProjects(rows.map(dbToProject));LS.set("projects",rows.map(dbToProject))}
-            if(["stage_blocks"].includes(tbl)){const rows=await SB.get("stage_blocks",cf+"order=created_at.asc");setStageBlocks(rows.map(dbToBlock));LS.set("stageBlocks",rows.map(dbToBlock))}
-            if(["departments"].includes(tbl)){const rows=await SB.get("departments",cf+"order=name.asc");setDepartments(rows.map(dbToDept));LS.set("departments",rows.map(dbToDept))}
-            if(["daily_plans"].includes(tbl)){const rows=await SB.get("daily_plans",cf+"order=created_at.asc");setDailyPlans(rows.map(dbToPlan));LS.set("dailyPlans",rows.map(dbToPlan))}
+            // apply() re-checks the guard — a click may have happened during the fetch
+            const apply=(setter,lsKey,rows)=>{if(remoteApplyBlocked())return;setter(rows);LS.set(lsKey,rows)};
+            if(["orders"].includes(tbl)){const rows=(await SB.get("orders",cf+"order=created_at.asc")).map(dbToOrder);apply(setOrders,"orders",rows)}
+            if(["work_logs"].includes(tbl)){const rows=(await SB.get("work_logs",cf+"order=created_at.asc")).map(dbToLog);apply(setWorkLogs,"workLogs",rows)}
+            if(["custom_tasks"].includes(tbl)){const rows=(await SB.get("custom_tasks",cf+"order=created_at.asc")).map(dbToTask);apply(setCustomTasks,"customTasks",rows)}
+            if(["stages"].includes(tbl)){const rows=(await SB.get("stages",cf+"order=stage_order.asc")).map(dbToStage);apply(setStages,"stages",rows)}
+            if(["projects"].includes(tbl)){const rows=(await SB.get("projects",cf+"order=name.asc")).map(dbToProject);apply(setProjects,"projects",rows)}
+            if(["stage_blocks"].includes(tbl)){const rows=(await SB.get("stage_blocks",cf+"order=created_at.asc")).map(dbToBlock);apply(setStageBlocks,"stageBlocks",rows)}
+            if(["departments"].includes(tbl)){const rows=(await SB.get("departments",cf+"order=name.asc")).map(dbToDept);apply(setDepartments,"departments",rows)}
+            if(["daily_plans"].includes(tbl)){const rows=(await SB.get("daily_plans",cf+"order=created_at.asc")).map(dbToPlan);apply(setDailyPlans,"dailyPlans",rows)}
           }catch(err){console.warn("Realtime msg error",err)}
         };
         ws.onclose=()=>{
@@ -4905,27 +4925,42 @@ function App(){
   const plRef=useRef(dailyPlans);
   useEffect(()=>{plRef.current=dailyPlans},[dailyPlans]);
 
+  // Saves the latest state (from refs) to Supabase. Marks the data "unsaved" again and
+  // retries on failure, so polling/realtime never overwrite a change that didn't land.
+  const doSave=async()=>{
+    if(saveRunningRef.current){clearTimeout(saveTimer);saveTimer=setTimeout(doSave,1000);return}
+    saveRunningRef.current=true;
+    pendingSaveRef.current=false;
+    try{
+      await Promise.all([
+        SB.upsert("orders",oRef.current.map(orderToDb)),
+        SB.upsert("projects",pRef.current.map(projectToDb)),
+        SB.upsert("stages",sRef.current.map(stageToDb)),
+        SB.upsert("stage_blocks",sbRef.current.map(blockToDb)),
+        SB.upsert("work_logs",wRef.current.map(logToDb)),
+        SB.upsert("custom_tasks",ctRef.current.map(taskToDb)),
+        SB.upsert("departments",dpRef.current.map(deptToDb)),
+        SB.upsert("daily_plans",plRef.current.map(planToDb)),
+      ]);
+      lastPersistRef.current=Date.now();
+      setSync("ok");
+    }catch(e){
+      console.warn("Supabase save error",e);setSync("error");
+      pendingSaveRef.current=true;
+      clearTimeout(saveTimer);saveTimer=setTimeout(doSave,4000);
+    }finally{saveRunningRef.current=false}
+  };
+  doSaveRef.current=doSave;
   const persist=(no,np,ns,nw,nct,nsb,ndp,npl)=>{
     const o=no??oRef.current,p=np??pRef.current,s=ns??sRef.current,w=nw??wRef.current,ct=nct??ctRef.current,sb=nsb??sbRef.current,dp=ndp??dpRef.current,pl=npl??plRef.current;
+    // Refs lag one render behind the state — sync them now so doSave sees this change
+    oRef.current=o;pRef.current=p;sRef.current=s;wRef.current=w;ctRef.current=ct;sbRef.current=sb;dpRef.current=dp;plRef.current=pl;
     // Always save to localStorage immediately
     LS.set("orders",o);LS.set("projects",p);LS.set("stages",s);LS.set("workLogs",w);LS.set("customTasks",ct);LS.set("stageBlocks",sb);LS.set("departments",dp);LS.set("dailyPlans",pl);
     lastPersistRef.current=Date.now();
+    pendingSaveRef.current=true;
     setSync("saving");clearTimeout(saveTimer);
-    saveTimer=setTimeout(async()=>{
-      try{
-        await Promise.all([
-          SB.upsert("orders",o.map(orderToDb)),
-          SB.upsert("projects",p.map(projectToDb)),
-          SB.upsert("stages",s.map(stageToDb)),
-          SB.upsert("stage_blocks",sb.map(blockToDb)),
-          SB.upsert("work_logs",w.map(logToDb)),
-          SB.upsert("custom_tasks",ct.map(taskToDb)),
-          SB.upsert("departments",dp.map(deptToDb)),
-          SB.upsert("daily_plans",pl.map(planToDb)),
-        ]);
-        setSync("ok");
-      }catch(e){console.warn("Supabase save error",e);setSync("error")}
-    },800);
+    saveTimer=setTimeout(doSave,800);
   };
 
   const handleLogin=u=>{
@@ -4952,11 +4987,16 @@ function App(){
 
   // ── Role-based data visibility ──────────────────────────────────────────
   // Only admins, department managers and team leads see beyond their own work.
+  const isDeptMgr=currentUser?.role==="dept_manager";
   const allUsers=getUsers();
   const allStageIds=stages.map(s=>s.id);
   const scopeIds=overseeingUserIds(currentUser,allUsers,departments);
   const scopeIdSet=scopeIds==null?null:new Set(scopeIds);
   const scopeUsers=scopeIds==null?allUsers:allUsers.filter(u=>scopeIdSet.has(u.id));
+  // The user list handed to dashboards/panels — admins see everyone, scoped roles
+  // (dept managers, team leads) see only the people they oversee.
+  const visibleUsers=scopeIds==null?allUsers:scopeUsers;
+  const visibleDepartments=isDeptMgr?departments.filter(d=>d.id===currentUser.departmentId||d.managerId===currentUser.id):departments;
   // Leads/managers are created with broad personal access, so their own access must
   // not widen the scope — for them relevance is driven by the people they oversee.
   // A plain employee's scope is simply their own defined work.
@@ -4977,7 +5017,10 @@ function App(){
 
   const filteredOrders=orders.filter(orderVisible);
   const filteredProjects=projects.filter(p=>currentUser?.role==="admin"||filteredOrders.some(o=>o.projectId===p.id));
-  const filteredWorkLogs=workLogs;
+  // Scoped roles see the logs of their own people, plus any log on an order they can
+  // view (so serial/stage progress done by others still renders correctly).
+  const visibleOrderIds=new Set(filteredOrders.map(o=>o.id));
+  const filteredWorkLogs=scopeIdSet?workLogs.filter(w=>scopeIdSet.has(w.userId)||visibleOrderIds.has(w.orderId)):workLogs;
 
   const updO=useCallback((fn)=>{setOrders(prev=>{const next=typeof fn==="function"?fn(prev):fn;persist(next,null,null,null);return next})},[]);
   const updP=useCallback((fn)=>{setProjects(prev=>{const next=typeof fn==="function"?fn(prev):fn;persist(null,next,null,null);return next})},[]);
@@ -5025,11 +5068,8 @@ function App(){
       persist(null,null,null,next);
       const log=next.find(w=>w.id===logId);
       if(log?.orderId)setTimeout(()=>checkAutoDelivery(log.orderId,next),100);
-      // Push notification to admin
-      if(pushEnabled&&currentUser?.role!=="admin"){
-        const stage=stages.find(s=>s.id===log?.stageId);
-        PushNotify.send("✅ שלב הושלם",`${log?.userName} סיים ${stage?.name||""} — ${log?.serialSn}`,"work-done");
-      }
+      // Note: the completion notification is NOT shown here (this device belongs to the
+      // worker) — the direct manager's device picks it up via the sync effect below.
       return next;
     });
     const log=workLogs.find(w=>w.id===logId);
@@ -5073,6 +5113,37 @@ function App(){
       return next;
     });
   };
+  // ── Completion notifications → the worker's direct manager ─────────────
+  // Every client syncs work_logs/custom_tasks; the client whose logged-in user is the
+  // worker's direct manager (managerId, or the department manager as fallback) shows
+  // the notification. The worker's own device stays silent.
+  const notifSeenRef=useRef(null);
+  useEffect(()=>{
+    const doneLogs=new Set(workLogs.filter(w=>w.completed).map(w=>w.id));
+    const doneTasks=new Set(customTasks.filter(t=>t.completed).map(t=>t.id));
+    const prev=notifSeenRef.current;
+    notifSeenRef.current={logs:doneLogs,tasks:doneTasks};
+    if(!prev||loading||!currentUser||!pushEnabled)return;
+    const users=getUsers();
+    // Only fresh completions — prevents a burst of stale notifications after login/refresh
+    const isRecent=iso=>iso&&Date.now()-new Date(iso).getTime()<10*60*1000;
+    const directManagerId=uid=>{
+      const u=users.find(x=>x.id===uid);if(!u)return null;
+      return u.managerId||(departments.find(d=>d.id===u.departmentId)?.managerId)||null;
+    };
+    workLogs.forEach(w=>{
+      if(!w.completed||prev.logs.has(w.id)||w.userId===currentUser.id)return;
+      if(directManagerId(w.userId)!==currentUser.id||!isRecent(w.endTime))return;
+      const stage=stages.find(s=>s.id===w.stageId);
+      PushNotify.send("✅ שלב הושלם",`${w.userName} סיים ${stage?.name||""}${w.serialSn?` — ${w.serialSn}`:""}`,`done_${w.id}`);
+    });
+    customTasks.forEach(t=>{
+      if(!t.completed||prev.tasks.has(t.id)||t.userId===currentUser.id)return;
+      if(directManagerId(t.userId)!==currentUser.id||!isRecent(t.endTime))return;
+      PushNotify.send("✅ משימה הושלמה",`${t.userName} סיים את "${t.name}"`,`taskdone_${t.id}`);
+    });
+  },[workLogs,customTasks]);
+
   // Expose stages globally so HistoryPanel can access them for matching
   window.__pml_stages=stages;
   // Listen for delete from WorkersDashboard
@@ -5093,6 +5164,16 @@ function App(){
     {id:"stages",label:"🔧 שלבים"},
     {id:"projects",label:"🏗️ פרויקטים"},
     {id:"excel",label:"📂 Excel"},
+  ]:isDeptMgr?[
+    // Department managers get the full admin view-set, scoped to their own
+    // department's people and projects (no system config: stages/excel/admin panel).
+    {id:"dashboard",label:"📊 דאשבורד"},
+    {id:"orders",label:'📋 פק"ע'},
+    {id:"shortages",label:"⚠️ חוסרים"},
+    {id:"mywork",label:"🔨 עבודה"},
+    {id:"workers",label:"👥 עובדים"},
+    {id:"yield",label:"📉 Yield"},
+    {id:"projects",label:"🏗️ פרויקטים"},
   ]:isLead?[
     {id:"team",label:"👥 הצוות שלי"},
     {id:"mywork",label:"🔨 העבודה שלי"},
@@ -5102,12 +5183,13 @@ function App(){
     {id:"orders",label:'📋 פק"ע'},
   ];
 
-  // Push notification enable on login for admin
+  // Push notification enable on login for admins and managers (they receive the
+  // completion notifications of the workers they directly manage)
   useEffect(()=>{
-    if(isAdmin&&Notification?.permission==="default"){
+    if((isAdmin||isLead)&&Notification?.permission==="default"){
       PushNotify.request().then(ok=>setPushEnabled(ok));
     }
-  },[isAdmin]);
+  },[isAdmin,isLead]);
 
   // Alert count for badge
   const alertCount=useMemo(()=>{let c=0;const dm=dismissedAlerts;filteredOrders.forEach(o=>(o.defects||[]).filter(d=>d.status!=="closed"&&(d.severity==="critical"||d.severity==="high")).forEach(d=>{if(!dm.includes(`def_${o.id}_${d.id}`))c++}));filteredOrders.filter(o=>o.targetDate&&new Date(o.targetDate)<new Date()).forEach(o=>{if(!dm.includes(`late_${o.id}`))c++});filteredWorkLogs.filter(w=>!w.completed).forEach(w=>{if(Math.round((Date.now()-new Date(w.startTime).getTime())/60000)>120&&!dm.includes(`stuck_${w.id}`))c++});return c},[filteredOrders,filteredWorkLogs,dismissedAlerts]);
@@ -5231,7 +5313,7 @@ function App(){
   };
   useEffect(()=>{const isi=window.matchMedia("(display-mode:standalone)").matches||window.navigator.standalone;if(isi){setIsStandalone(true);return;}const h=e=>{e.preventDefault();setInstallPrompt(e);setShowInstall(true)};window.addEventListener("beforeinstallprompt",h);window.addEventListener("appinstalled",()=>{setShowInstall(false);setInstallPrompt(null);setIsStandalone(true)});return()=>window.removeEventListener("beforeinstallprompt",h)},[]);
   // Service Worker
-  useEffect(()=>{if(!("serviceWorker" in navigator))return;navigator.serviceWorker.register("./sw.js?v=22").then(reg=>{swRegRef.current=reg;if(reg.waiting)setShowUpdate(true);reg.addEventListener("updatefound",()=>{const nw=reg.installing;if(!nw)return;nw.addEventListener("statechange",()=>{if(nw.state==="installed"&&navigator.serviceWorker.controller)setShowUpdate(true)})});setInterval(()=>reg.update(),30*60*1000)}).catch(()=>{});navigator.serviceWorker.addEventListener("controllerchange",()=>window.location.reload())},[]);
+  useEffect(()=>{if(!("serviceWorker" in navigator))return;navigator.serviceWorker.register("./sw.js?v=23").then(reg=>{swRegRef.current=reg;if(reg.waiting)setShowUpdate(true);reg.addEventListener("updatefound",()=>{const nw=reg.installing;if(!nw)return;nw.addEventListener("statechange",()=>{if(nw.state==="installed"&&navigator.serviceWorker.controller)setShowUpdate(true)})});setInterval(()=>reg.update(),30*60*1000)}).catch(()=>{});navigator.serviceWorker.addEventListener("controllerchange",()=>window.location.reload())},[]);
   // Network status
   useEffect(()=>{const on=()=>{setIsOffline(false);toast("החיבור חזר — מסנכרן נתונים...","success");refreshFromDB(true)};const off=()=>{setIsOffline(true)};window.addEventListener("online",on);window.addEventListener("offline",off);return()=>{window.removeEventListener("online",on);window.removeEventListener("offline",off)}},[]);
   // PWA Install
@@ -5246,16 +5328,16 @@ function App(){
   if(!currentUser)return(<AuthCtx.Provider value={{currentUser,canEdit:false,canViewProject:()=>false}}><LoginScreen onLogin={handleLogin} lightMode={lightMode} toggleLight={()=>setLightMode(p=>!p)}/></AuthCtx.Provider>);
   if(loading)return(<AppLoading/>);
 
-  // Default tab for workers and team leads
+  // Default tab for workers and team leads (dept managers land on the dashboard like admins)
   if(isWorker&&tab==="dashboard")setTab("mywork");
-  if(isLead&&tab==="dashboard")setTab("team");
+  if(currentUser?.role==="team_lead"&&tab==="dashboard")setTab("team");
   const lm=lightMode;
 
   return(
     <AuthCtx.Provider value={{currentUser,canEdit,canViewProject}}>
       {isOffline&&<OfflineBanner lm={lm}/>}
       {showUpdate&&!isOffline&&<UpdateBanner onUpdate={handleUpdate} onDismiss={()=>setShowUpdate(false)} lm={lm}/>}
-      <Navbar tab={tab} setTab={setTab} tabs={TABS} lightMode={lightMode} toggleLight={()=>setLightMode(p=>!p)} sync={sync} onAdmin={()=>setShowAdmin(true)} onLogout={handleLogout} alertCount={alertCount} onAlerts={()=>setShowAlerts(true)} onRefresh={()=>refreshFromDB(true)} onLiveBoard={()=>setShowLiveBoard(true)} onReport={()=>setShowReport(true)} onHistory={()=>setShowHistory(true)} isAdmin={isAdmin} onLoadDemo={loadDemoData} onDeleteDemo={deleteDemoData} onInstall={handleInstall} canInstall={!isStandalone}/>
+      <Navbar tab={tab} setTab={setTab} tabs={TABS} lightMode={lightMode} toggleLight={()=>setLightMode(p=>!p)} sync={sync} onAdmin={()=>setShowAdmin(true)} onLogout={handleLogout} alertCount={alertCount} onAlerts={()=>setShowAlerts(true)} onRefresh={()=>refreshFromDB(true)} onLiveBoard={()=>setShowLiveBoard(true)} onReport={()=>setShowReport(true)} onHistory={()=>setShowHistory(true)} isAdmin={isAdmin} isManager={isAdmin||isDeptMgr} onLoadDemo={loadDemoData} onDeleteDemo={deleteDemoData} onInstall={handleInstall} canInstall={!isStandalone}/>
       {currentUser?.isDemo&&(
         <div style={{background:lm?"#eff6ff":"#0c1e3a",borderBottom:`1px solid ${lm?"#bfdbfe":"#1e3a5f"}`,padding:"8px 16px",display:"flex",alignItems:"center",justifyContent:"center",gap:10,flexWrap:"wrap"}}>
           <span style={{fontSize:13,color:lm?"#1d4ed8":"#93c5fd"}}>🔍 מצב דמו — הנתונים לא נשמרים</span>
@@ -5263,12 +5345,12 @@ function App(){
         </div>
       )}
       <main className="main-content" style={{maxWidth:1440,margin:"0 auto",padding:"16px 14px",paddingBottom:showInstall?"100px":"calc(16px + env(safe-area-inset-bottom,0px))"}}>
-        {tab==="dashboard"&&<Dashboard orders={filteredOrders} projects={filteredProjects} stages={stages} users={getUsers()} workLogs={filteredWorkLogs} departments={departments} customTasks={customTasks}/>}
+        {tab==="dashboard"&&<Dashboard orders={filteredOrders} projects={filteredProjects} stages={stages} users={visibleUsers} workLogs={filteredWorkLogs} departments={visibleDepartments} customTasks={customTasks}/>}
         {tab==="team"&&isLead&&<TeamDashboard users={getUsers()} workLogs={filteredWorkLogs} orders={filteredOrders} stages={stages} customTasks={customTasks} departments={departments} onAddTask={handleAddTask} onDeleteTask={handleDeleteTask} onMarkPartialTask={handleMarkPartialTask} onMarkDoneTask={handleMarkDoneTask} dailyPlans={dailyPlans} onAddPlan={handleAddPlan} onDeletePlan={handleDeletePlan} onTogglePlanDone={handleTogglePlanDone}/>}
         {tab==="orders"&&<Orders orders={filteredOrders} projects={filteredProjects} stages={stages} stageBlocks={stageBlocks} updO={updO} workLogs={filteredWorkLogs} onWorkLog={handleStartWork} workdayHours={workdayHours} setWorkdayHours={setWorkdayHoursPersist}/>}
         {tab==="shortages"&&<Shortages orders={filteredOrders} updO={updO} projects={filteredProjects}/>}
         {tab==="mywork"&&<MyWork orders={filteredOrders} stages={stages} workLogs={filteredWorkLogs} onStartWork={handleStartWork} onEndWork={handleEndWork} onPauseWork={handlePauseWork} onResumeWork={handleResumeWork} customTasks={customTasks} onAddTask={handleAddTask} onStartTask={handleStartTask} onEndTask={handleEndTask} onPauseTask={handlePauseTask} onResumeTask={handleResumeTask} onDeleteTask={handleDeleteTask} onMarkPartialTask={handleMarkPartialTask} onMarkDoneTask={handleMarkDoneTask} users={getUsers()} dailyPlans={dailyPlans} onMarkPlanDone={handleMarkPlanDone}/>}
-        {tab==="workers"&&isAdmin&&<WorkersDashboard users={getUsers()} workLogs={filteredWorkLogs} orders={filteredOrders} stages={stages} customTasks={customTasks} onAddTask={handleAddTask} onDeleteLog={handleDeleteLog} onDeleteTask={handleDeleteTask} onMarkPartialTask={handleMarkPartialTask} onMarkDoneTask={handleMarkDoneTask} dailyPlans={dailyPlans} onAddPlan={handleAddPlan} onDeletePlan={handleDeletePlan} onTogglePlanDone={handleTogglePlanDone}/>}
+        {tab==="workers"&&(isAdmin||isDeptMgr)&&<WorkersDashboard users={visibleUsers} workLogs={filteredWorkLogs} orders={filteredOrders} stages={stages} customTasks={customTasks} onAddTask={handleAddTask} onDeleteLog={handleDeleteLog} onDeleteTask={handleDeleteTask} onMarkPartialTask={handleMarkPartialTask} onMarkDoneTask={handleMarkDoneTask} dailyPlans={dailyPlans} onAddPlan={handleAddPlan} onDeletePlan={handleDeletePlan} onTogglePlanDone={handleTogglePlanDone}/>}
         {tab==="yield"&&<YieldDashboard orders={filteredOrders} projects={filteredProjects} stages={stages} workLogs={filteredWorkLogs}/>}
         {tab==="stages"&&isAdmin&&<StagesManagement stages={stages} setStages={setStages} stageBlocks={stageBlocks} setStageBlocks={setStageBlocks} persist={persist}/>}
         {tab==="projects"&&<Projects projects={filteredProjects} orders={filteredOrders} updP={updP} stages={stages} workLogs={filteredWorkLogs}/>}
@@ -5276,10 +5358,10 @@ function App(){
       </main>
       {showInstall&&<InstallBanner onInstall={handleInstall} onDismiss={()=>setShowInstall(false)} lm={lm}/>}
       {showAdmin&&isAdmin&&<AdminPanel projects={projects} stages={stages} onClose={()=>setShowAdmin(false)} lightMode={lightMode} updO={updO} departments={departments} updD={updD}/>}
-      {showAlerts&&<AlertsPanel orders={filteredOrders} stages={stages} workLogs={filteredWorkLogs} users={getUsers()} onClose={()=>setShowAlerts(false)} dismissedAlerts={dismissedAlerts} onDismissAll={ids=>setDismissedAlerts(prev=>[...new Set([...prev,...ids])])}/>}
-      {showLiveBoard&&isAdmin&&(canUseFeature("live_board")?<LiveFactoryBoard orders={filteredOrders} workLogs={filteredWorkLogs} stages={stages} customTasks={customTasks} users={getUsers()} departments={departments} onClose={()=>setShowLiveBoard(false)} lightMode={lightMode}/>:<Modal onClose={()=>setShowLiveBoard(false)}><UpgradePrompt feature="לוח חי"/></Modal>)}
-      {showReport&&isAdmin&&(canUseFeature("pdf_reports")?<MonthlyReportModal orders={filteredOrders} workLogs={filteredWorkLogs} stages={stages} projects={filteredProjects} users={getUsers()} onClose={()=>setShowReport(false)}/>:<Modal onClose={()=>setShowReport(false)}><UpgradePrompt feature="דוחות PDF"/></Modal>)}
-      {showHistory&&isAdmin&&<HistoryPanel orders={filteredOrders} updO={updO} onClose={()=>setShowHistory(false)} workLogs={filteredWorkLogs} onDeleteLog={handleDeleteLog} onUndoWorkLog={handleUndoWorkLog} customTasks={customTasks} onDeleteTask={handleDeleteTask}/>}
+      {showAlerts&&<AlertsPanel orders={filteredOrders} stages={stages} workLogs={filteredWorkLogs} users={visibleUsers} onClose={()=>setShowAlerts(false)} dismissedAlerts={dismissedAlerts} onDismissAll={ids=>setDismissedAlerts(prev=>[...new Set([...prev,...ids])])}/>}
+      {showLiveBoard&&(isAdmin||isDeptMgr)&&(canUseFeature("live_board")?<LiveFactoryBoard orders={filteredOrders} workLogs={filteredWorkLogs} stages={stages} customTasks={customTasks} users={visibleUsers} departments={visibleDepartments} onClose={()=>setShowLiveBoard(false)} lightMode={lightMode}/>:<Modal onClose={()=>setShowLiveBoard(false)}><UpgradePrompt feature="לוח חי"/></Modal>)}
+      {showReport&&(isAdmin||isDeptMgr)&&(canUseFeature("pdf_reports")?<MonthlyReportModal orders={filteredOrders} workLogs={filteredWorkLogs} stages={stages} projects={filteredProjects} users={visibleUsers} onClose={()=>setShowReport(false)}/>:<Modal onClose={()=>setShowReport(false)}><UpgradePrompt feature="דוחות PDF"/></Modal>)}
+      {showHistory&&(isAdmin||isDeptMgr)&&<HistoryPanel orders={filteredOrders} updO={updO} onClose={()=>setShowHistory(false)} workLogs={filteredWorkLogs} onDeleteLog={handleDeleteLog} onUndoWorkLog={handleUndoWorkLog} customTasks={customTasks} onDeleteTask={handleDeleteTask}/>}
     </AuthCtx.Provider>
   );
 }
