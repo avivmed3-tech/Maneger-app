@@ -183,7 +183,7 @@ button{font-family:inherit;cursor:pointer}
 const {useState,useEffect,useCallback,useRef,useMemo}=React;
 
 // ── Config ─────────────────────────────────────────────────────────────────
-const APP_VERSION="4.2.0";const APP_DATE="2026-07-20";
+const APP_VERSION="4.3.0";const APP_DATE="2026-08-05";
 const SB_URL="https://lwiurzkiojctwzllpnmr.supabase.co";
 const SB_KEY="eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imx3aXVyemtpb2pjdHd6bGxwbm1yIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzQ2MjU4NTAsImV4cCI6MjA5MDIwMTg1MH0.jWOnAtsjbefoY18ofSd46WMdgY47Vv4k7LgcHdOrj6Q";
 const SB_H={"Content-Type":"application/json","apikey":SB_KEY,"Authorization":"Bearer "+SB_KEY};
@@ -4278,105 +4278,1023 @@ function YieldDashboard({orders,projects,stages,workLogs}){
 }
 
 // ══════════════════════════════════════════════════════════════════════════
-// ═══ EXCEL EXPORT / IMPORT ══════════════════════════════════════════════
+// ═══ TEAM REPORTS (דוח עובדים לפי תאריכים) ═══════════════════════════════
 // ══════════════════════════════════════════════════════════════════════════
-function doExport(orders,projects,stages,workLogs,users){
-  const FONT="Segoe UI";const wb=XLSX.utils.book_new();
-  const HS=()=>({font:{name:FONT,sz:12,bold:true,color:{rgb:"FFFFFF"}},fill:{fgColor:{rgb:"1E3A5F"}},alignment:{horizontal:"center",vertical:"center",readingOrder:2},border:{top:{style:"thin",color:{rgb:"D1D9E0"}},bottom:{style:"thin",color:{rgb:"D1D9E0"}},left:{style:"thin",color:{rgb:"D1D9E0"}},right:{style:"thin",color:{rgb:"D1D9E0"}}}});
-  const bd={top:{style:"thin",color:{rgb:"D1D9E0"}},bottom:{style:"thin",color:{rgb:"D1D9E0"}},left:{style:"thin",color:{rgb:"D1D9E0"}},right:{style:"thin",color:{rgb:"D1D9E0"}}};
-  const DS=(even)=>({font:{name:FONT,sz:11,color:{rgb:"1E293B"}},fill:{fgColor:{rgb:even?"EBF3FB":"FFFFFF"}},alignment:{horizontal:"center",vertical:"center",readingOrder:2},border:bd});
-  function mkSheet(headers,rows,cw,spFn){
-    const ws=XLSX.utils.aoa_to_sheet([headers,...rows]);
-    headers.forEach((_,c)=>{const a=XLSX.utils.encode_cell({r:0,c});if(ws[a])ws[a].s=HS()});
-    ws["!rows"]=[{hpx:28}];
-    rows.forEach((row,ri)=>{const even=ri%2===0;row.forEach((_,c)=>{const a=XLSX.utils.encode_cell({r:ri+1,c});if(!ws[a])return;ws[a].s=spFn?.(ri,c,row)||DS(even)});ws["!rows"].push({hpx:20})});
-    ws["!cols"]=cw.map(w=>({wch:w}));if(!ws["!opts"])ws["!opts"]={};ws["!opts"].rightToLeft=true;
-    return ws;
-  }
-  // 1: פקודות עבודה
-  const h1=['מספר פק"ע','P/N','תיאור','פרויקט','כמות','מחיר ליחידה','הושלמו','תאריך קבלה','יעד אספקה','תקלות פתוחות'];
-  const r1=orders.map(o=>{const pj=projects.find(p=>p.id===o.projectId);return[o.woNumber,o.pn||"",o.description||"",pj?.name||"",(o.serials||[]).length,Number(o.unitPrice||0),0,o.receivedDate||"",o.targetDate||"",(o.defects||[]).filter(d=>d.status!=="closed").length]});
-  XLSX.utils.book_append_sheet(wb,mkSheet(h1,r1,[16,14,30,14,10,14,10,13,13,10]),"פקודות עבודה");
-  // 2: סידוריים
-  const h2=['פק"ע','P/N','S/N','סטטוס'];
-  const r2=orders.flatMap(o=>(o.serials||[]).map(s=>[o.woNumber,o.pn||"",s.sn,"בתהליך"]));
-  XLSX.utils.book_append_sheet(wb,mkSheet(h2,r2.length?r2:[["","","",""]],[16,14,20,10]),"סידוריים");
-  // 3: תקלות
-  const sevL2={critical:"קריטית",high:"גבוהה",medium:"בינונית",low:"נמוכה"};
-  const typL2={quality:"איכות",process:"תהליך",material:"חומר גלם",equipment:"ציוד",human:"גורם אנושי",other:"אחר"};
-  const h3=['פק"ע','S/N','כותרת','סוג','חומרה','אחראי','תאריך גילוי','סטטוס','תיאור'];
-  const r3=orders.flatMap(o=>(o.defects||[]).map(d=>{const sn2=(o.serials||[]).find(s=>s.id===d.serialId);return[o.woNumber,sn2?.sn||"כללי",d.title,typL2[d.type]||"",sevL2[d.severity]||"",d.responsible||"",d.discoveredDate||"",d.status==="closed"?"סגורה":"פתוחה",d.description||""]}));
-  const sevSt={complete:{font:{name:FONT,sz:11,bold:true,color:{rgb:"065F46"}},fill:{fgColor:{rgb:"D1FAE5"}},alignment:{horizontal:"center",vertical:"center",readingOrder:2},border:bd},blocked:{font:{name:FONT,sz:11,bold:true,color:{rgb:"991B1B"}},fill:{fgColor:{rgb:"FEE2E2"}},alignment:{horizontal:"center",vertical:"center",readingOrder:2},border:bd}};
-  XLSX.utils.book_append_sheet(wb,mkSheet(h3,r3.length?r3:[["","","","","","","","",""]],[16,18,24,10,10,14,13,10,30],(ri,c,row)=>{if(c===7)return row[7]==="סגורה"?sevSt.complete:sevSt.blocked;return null}),"תקלות");
-  // 4: לוג עבודה
-  const h4=['עובד','פק"ע','S/N','שלב','התחלה','סיום','זמן (דק)'];
-  const r4=workLogs.filter(w=>w.completed).sort((a,b)=>(b.endTime||"").localeCompare(a.endTime||"")).map(w=>[w.userName,orders.find(o=>o.id===w.orderId)?.woNumber||"",w.serialSn,stages.find(s=>s.id===w.stageId)?.name||"",w.startTime?.slice(0,16).replace("T"," ")||"",w.endTime?.slice(0,16).replace("T"," ")||"",w.durationMin||0]);
-  XLSX.utils.book_append_sheet(wb,mkSheet(h4,r4.length?r4:[["","","","","","",0]],[14,14,18,14,18,18,10]),"לוג עבודה");
-  // 5: ביצועי עובדים
-  const h5=['עובד','תעריף שעתי','יחידות','שעות עבודה','יח/שעה','עלות','הכנסה','רווח'];
-  const r5=users.filter(u=>u.role!=="admin"&&u.active!==false).map(u=>{const logs=workLogs.filter(w=>w.userId===u.id&&w.completed&&w.durationMin);const mins=logs.reduce((s,w)=>s+w.durationMin,0);const cost=mins*(Number(u.hourlyRate||0)/60);const rev=logs.reduce((s,w)=>{const st=stages.find(s2=>s2.id===w.stageId);return s+Number(st?.price||0)},0);const wa=u.stageAccess==="all"?stages.map(s2=>s2.id):(Array.isArray(u.stageAccess)?u.stageAccess:[]);const done=new Set();logs.forEach(w=>{const o2=orders.find(o3=>(o3.serials||[]).some(sr=>sr.id===w.serialId));if(!o2)return;const ms=(o2.stageIds||[]).filter(sid=>wa.includes(sid));if(ms.every(sid=>logs.some(l=>l.serialId===w.serialId&&l.stageId===sid)))done.add(w.serialId)});return[u.name,Number(u.hourlyRate||0),done.size,Math.round(mins/60*10)/10,mins>0?Math.round(done.size/(mins/60)*10)/10:0,Math.round(cost),Math.round(rev),Math.round(rev-cost)]});
-  XLSX.utils.book_append_sheet(wb,mkSheet(h5,r5.length?r5:[["",0,0,0,0,0,0,0]],[16,12,10,12,10,12,12,12]),"ביצועי עובדים");
-  XLSX.writeFile(wb,"דוח_קו_ייצור_"+todays()+".xlsx");
+// A team lead / department manager picks a period (יומי · שבועי · חודשי · טווח)
+// and gets, per worker and per day, every action that was signed off: which
+// פק"ע, which מק"ט, which S/N, which פעולה, when it started and ended, how long
+// it actually took and how that compares with the time the price list sold for
+// it (זמן מכירה) — i.e. עמידה מול תקן. The report is previewed exactly as it
+// will print, and only then sent to the printer.
+const HEB_DAYS=["ראשון","שני","שלישי","רביעי","חמישי","שישי","שבת"];
+// Local (not UTC) calendar day — an evening shift must not roll over to tomorrow.
+const isoOf=d=>{const t=new Date(d);return new Date(t.getTime()-t.getTimezoneOffset()*6e4).toISOString().slice(0,10)};
+const addDaysISO=(iso,n)=>{const d=new Date(iso+"T00:00:00");d.setDate(d.getDate()+n);return isoOf(d)};
+const weekRangeOf=iso=>{const d=new Date(iso+"T00:00:00");const from=addDaysISO(iso,-d.getDay());return{from,to:addDaysISO(from,6)}};
+const monthRangeOf=iso=>{const[y,m]=iso.split("-").map(Number);const p=n=>String(n).padStart(2,"0");return{from:`${y}-${p(m)}-01`,to:`${y}-${p(m)}-${p(new Date(y,m,0).getDate())}`}};
+const fmtDateHeb=iso=>iso?new Date(iso+"T00:00:00").toLocaleDateString("he-IL"):"—";
+const fmtDayHeb=iso=>{if(!iso)return"—";const d=new Date(iso+"T00:00:00");return`יום ${HEB_DAYS[d.getDay()]} · ${d.toLocaleDateString("he-IL")}`};
+const fmtClock=t=>{if(!t)return"—";const d=new Date(t);return isNaN(d)?"—":d.toLocaleTimeString("he-IL",{hour:"2-digit",minute:"2-digit"})};
+const esc=s=>String(s==null?"":s).replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"})[c]);
+const hrs=m=>Math.round((Number(m)||0)/60*10)/10;
+
+// ── Report model ──────────────────────────────────────────────────────────
+// One flat row per completed work log in range, already normalised against the
+// sold time, then grouped worker → day.
+function buildTeamReport(opt){
+  const {from,to,ptype,users=[],workLogs=[],orders=[],stages=[],stageBlocks=[],projects=[],customTasks=[],dailyPlans=[],manager,scopeLabel,showEmpty}=opt||{};
+  const oMap=new Map(orders.map(o=>[o.id,o]));
+  const sMap=new Map(stages.map(s=>[s.id,s]));
+  const pMap=new Map(projects.map(p=>[p.id,p.name]));
+  const ids=new Set(users.map(u=>u.id));
+  const inR=iso=>!!iso&&iso>=from&&iso<=to;
+
+  const rows=[];
+  (workLogs||[]).forEach(w=>{
+    if(!w.completed||!ids.has(w.userId))return;
+    const when=w.endTime||w.startTime;if(!when)return;
+    const day=isoOf(new Date(when));if(!inR(day))return;
+    const o=oMap.get(w.orderId),st=sMap.get(w.stageId);
+    // A bulk log records the same elapsed time on every serial of the group, so the
+    // sold time it has to cover is the stage time × the size of the group.
+    const units=w.bulk&&Number(w.bulkCount)>1?Number(w.bulkCount):1;
+    const actual=Number(w.durationMin||0);
+    const salePer=o&&st?stageMinutesFor(o,st,stageBlocks):Number(st?.minutes||0);
+    const saleTot=salePer*units;
+    const comparable=saleTot>0&&actual>0;   // a sign-off (0 דק') carries no timing
+    rows.push({
+      id:w.id,userId:w.userId,userName:w.userName||"—",day,
+      wo:o?.woNumber||"—",pn:(o?.pn||"").trim()||"—",desc:o?.description||"",
+      project:pMap.get(o?.projectId)||"—",sn:w.serialSn||"—",
+      stage:st?.name||"—",color:st?.color||"#64748b",
+      start:w.startTime,end:w.endTime,units,actual,pause:Number(w.totalPauseMin||0),
+      perUnit:units>0?actual/units:actual,salePer,saleTot,
+      gap:comparable?actual-saleTot:null,eff:comparable?saleTot/actual*100:null,
+      signOff:!(actual>0),kind:w.bulk?"קבוצתי":(actual>0?"עבודה":"חתימה")
+    });
+  });
+  rows.sort((a,b)=>a.day.localeCompare(b.day)||String(a.start||"").localeCompare(String(b.start||"")));
+
+  const tasks=(customTasks||[]).filter(t=>ids.has(t.userId)&&(t.completed||t.partial)&&(t.endTime||t.startTime))
+    .map(t=>({userId:t.userId,userName:t.userName||"—",day:isoOf(new Date(t.endTime||t.startTime)),name:t.name||"—",
+      desc:t.description||"",start:t.startTime,end:t.endTime,min:Number(t.durationMin||0),partial:!!t.partial,price:Number(t.price||0)}))
+    .filter(t=>inR(t.day)).sort((a,b)=>a.day.localeCompare(b.day));
+
+  const plans=(dailyPlans||[]).filter(p=>ids.has(p.userId)&&inR(p.date)).map(p=>{
+    const o=oMap.get(p.orderId),st=sMap.get(p.stageId);
+    return{userId:p.userId,day:p.date,wo:o?.woNumber||"—",pn:(o?.pn||"").trim()||"—",stage:st?.name||"—",
+      target:Number(p.targetQty||0),serials:(p.serialIds||[]).length,done:!!p.done,note:p.note||"",by:p.createdByName||""};
+  }).sort((a,b)=>a.day.localeCompare(b.day));
+
+  const workers=users.map(u=>{
+    const wr=rows.filter(r=>r.userId===u.id);
+    const wt=tasks.filter(t=>t.userId===u.id);
+    const wp=plans.filter(p=>p.userId===u.id);
+    const days=[...new Set([...wr.map(r=>r.day),...wt.map(t=>t.day)])].sort();
+    const workMin=wr.reduce((s,r)=>s+r.actual,0);
+    const taskMin=wt.reduce((s,t)=>s+t.min,0);
+    const cmp=wr.filter(r=>r.eff!=null);
+    const mAct=cmp.reduce((s,r)=>s+r.actual,0),mSale=cmp.reduce((s,r)=>s+r.saleTot,0);
+    return{user:u,rows:wr,tasks:wt,plans:wp,days,workMin,taskMin,totalMin:workMin+taskMin,
+      sale:wr.reduce((s,r)=>s+r.saleTot,0),mAct,mSale,cmpN:cmp.length,
+      gap:cmp.length?mAct-mSale:null,eff:mAct>0?mSale/mAct*100:null,
+      units:wr.reduce((s,r)=>s+r.units,0),actions:wr.length,signs:wr.filter(r=>r.signOff).length,
+      orders:new Set(wr.map(r=>r.wo)).size,pns:new Set(wr.filter(r=>r.pn!=="—").map(r=>r.pn)).size,
+      planTotal:wp.length,planDone:wp.filter(p=>p.done).length};
+  }).filter(w=>showEmpty||w.rows.length||w.tasks.length||w.plans.length)
+    .sort((a,b)=>b.totalMin-a.totalMin||String(a.user.name||"").localeCompare(String(b.user.name||""),"he"));
+
+  const mAct=workers.reduce((s,w)=>s+w.mAct,0),mSale=workers.reduce((s,w)=>s+w.mSale,0);
+  const totals={
+    workers:workers.length,actions:workers.reduce((s,w)=>s+w.actions,0),
+    signs:workers.reduce((s,w)=>s+w.signs,0),units:workers.reduce((s,w)=>s+w.units,0),
+    workMin:workers.reduce((s,w)=>s+w.workMin,0),taskMin:workers.reduce((s,w)=>s+w.taskMin,0),
+    totalMin:workers.reduce((s,w)=>s+w.totalMin,0),sale:workers.reduce((s,w)=>s+w.sale,0),
+    mAct,mSale,gap:mAct>0?mAct-mSale:null,eff:mAct>0?mSale/mAct*100:null,
+    tasks:workers.reduce((s,w)=>s+w.tasks.length,0),
+    planTotal:workers.reduce((s,w)=>s+w.planTotal,0),planDone:workers.reduce((s,w)=>s+w.planDone,0),
+    days:[...new Set(workers.flatMap(w=>w.days))].length
+  };
+  return{from,to,ptype,scopeLabel:scopeLabel||"",manager,workers,totals,generatedAt:new Date()};
 }
 
-function doImport(file,projects,stages,cb){
+const reportPeriodLabel=m=>{
+  if(!m)return"";
+  if(m.from===m.to)return fmtDayHeb(m.from);
+  if(m.ptype==="month"){const[y,mo]=m.from.split("-");return`${HEB_MONTHS[Number(mo)]||mo} ${y}`}
+  return`${fmtDateHeb(m.from)} עד ${fmtDateHeb(m.to)}`;
+};
+const reportPeriodKind=t=>t==="day"?"דוח יומי":t==="week"?"דוח שבועי":t==="month"?"דוח חודשי":"דוח לתקופה";
+
+// ── Printable HTML (the preview and the printout are the same document) ────
+function reportHTML(m){
+  const T=m.totals;
+  const effCls=e=>e==null?"":e>=110?"g":e>=95?"b":e>=80?"w":"r";
+  const effTxt=e=>e==null?"—":Math.round(e)+"%";
+  // A signed number inside an RTL line has to be isolated, otherwise the sign
+  // flips to the wrong visual side ("55− דק'" instead of "−55 דק'").
+  const gapTxt=g=>{
+    if(g==null)return"—";
+    const a=Math.abs(g);
+    return`<span class="num">${g>0?"+":g<0?"−":""}${a>=100?Math.round(a):Math.round(a*10)/10}</span> דק'`;
+  };
+  const gapCls=g=>g==null?"":g<=-0.5?"g":g<0.5?"b":"w";
+  // `v` may already carry markup (an isolated signed number) — it is always
+  // generated here, never user text, so it is inserted as-is.
+  const kpi=(v,l,c)=>`<div class="kpi"><div class="kv" style="color:${c}">${v}</div><div class="kl">${esc(l)}</div></div>`;
+
+  const summaryRows=m.workers.map(w=>`<tr>
+    <td class="nm">${esc(w.user.name||"—")}</td>
+    <td>${esc(ROLES[w.user.role]?.label||w.user.role||"—")}</td>
+    <td>${w.days.length}</td><td>${w.actions}</td><td>${w.units}</td><td>${w.orders}</td>
+    <td>${esc(fmtTime(w.totalMin))}</td>
+    <td>${w.cmpN?esc(fmtTime(w.mAct)):"—"}</td>
+    <td>${w.cmpN?esc(fmtTime(w.mSale)):"—"}</td>
+    <td class="${gapCls(w.gap)}">${gapTxt(w.gap)}</td>
+    <td class="${effCls(w.eff)} b7">${effTxt(w.eff)}</td>
+    <td>${w.tasks.length?`${w.tasks.length} · ${esc(fmtTime(w.taskMin))}`:"—"}</td>
+    <td>${w.planTotal?`${w.planDone}/${w.planTotal}`:"—"}</td></tr>`).join("");
+
+  const dayTable=rs=>`<table class="det"><thead><tr>
+      <th style="width:64px">שעות</th><th style="width:78px">פק"ע</th><th style="width:78px">מק"ט</th>
+      <th style="width:86px">S/N</th><th>פעולה</th><th style="width:34px">יח'</th>
+      <th style="width:60px">בפועל</th><th style="width:60px">מכירה</th>
+      <th style="width:58px">פער</th><th style="width:48px">יעילות</th><th style="width:48px">סוג</th>
+    </tr></thead><tbody>${rs.map(r=>`<tr>
+      <td class="tm">${esc(fmtClock(r.start))}–${esc(fmtClock(r.end))}</td>
+      <td class="mono">${esc(r.wo)}</td><td class="mono">${esc(r.pn)}</td><td class="mono sn">${esc(r.sn)}</td>
+      <td class="st"><span class="dot" style="background:${esc(r.color)}"></span>${esc(r.stage)}</td>
+      <td>${r.units}</td>
+      <td>${r.signOff?'<span class="dim">חתימה</span>':esc(fmtMinP(r.actual))}</td>
+      <td>${r.eff!=null?esc(fmtMinP(r.saleTot)):"—"}</td>
+      <td class="${gapCls(r.gap)}">${gapTxt(r.gap)}</td>
+      <td class="${effCls(r.eff)} b7">${effTxt(r.eff)}</td>
+      <td class="dim">${esc(r.kind)}</td></tr>`).join("")}</tbody></table>`;
+
+  const taskTable=ts=>`<table class="det tsk"><thead><tr>
+      <th style="width:64px">שעות</th><th>משימה</th><th>פירוט</th><th style="width:60px">זמן</th><th style="width:60px">סטטוס</th>
+    </tr></thead><tbody>${ts.map(t=>`<tr>
+      <td class="tm">${esc(fmtClock(t.start))}–${esc(fmtClock(t.end))}</td>
+      <td class="st">📌 ${esc(t.name)}</td><td class="dim">${esc(t.desc||"—")}</td>
+      <td>${esc(fmtMinP(t.min))}</td>
+      <td class="${t.partial?"w":"g"} b7">${t.partial?"חלקית":"הושלמה"}</td></tr>`).join("")}</tbody></table>`;
+
+  const workerBlocks=m.workers.map(w=>{
+    const days=w.days.map(d=>{
+      const rs=w.rows.filter(r=>r.day===d),ts=w.tasks.filter(t=>t.day===d),ps=w.plans.filter(p=>p.day===d);
+      const act=rs.reduce((s,r)=>s+r.actual,0);
+      const cmp=rs.filter(r=>r.eff!=null),ca=cmp.reduce((s,r)=>s+r.actual,0),cs=cmp.reduce((s,r)=>s+r.saleTot,0);
+      const dEff=ca>0?cs/ca*100:null,dGap=cmp.length?ca-cs:null;
+      const tMin=ts.reduce((s,t)=>s+t.min,0);
+      return`<div class="day">
+        <div class="dayhead">
+          <span class="dd">${esc(fmtDayHeb(d))}</span>
+          <span class="ds">${rs.length===1?"פעולה אחת":`${rs.length} פעולות`}${ts.length?` · ${ts.length===1?"משימה אחת":`${ts.length} משימות`}`:""} · בפועל ${esc(fmtTime(act+tMin))} · נמדד מול תקן ${esc(fmtTime(ca))} מול ${esc(fmtTime(cs))} · פער <b class="${gapCls(dGap)}">${gapTxt(dGap)}</b> · יעילות <b class="${effCls(dEff)}">${effTxt(dEff)}</b></span>
+        </div>
+        ${ps.length?`<div class="plan">🗓️ תוכנית היום: ${ps.map(p=>`${esc(p.wo)} · ${esc(p.stage)}${p.target?` (${p.target} יח')`:""} ${p.done?"✔":"✖"}`).join(" | ")}</div>`:""}
+        ${rs.length?dayTable(rs):'<div class="none">לא נרשמו פעולות ייצור ביום זה</div>'}
+        ${ts.length?taskTable(ts):""}
+      </div>`;
+    }).join("");
+    return`<section class="worker">
+      <div class="whead">
+        <div class="wname">${esc(w.user.name||"—")} <span class="wrole">${esc(ROLES[w.user.role]?.label||w.user.role||"")}</span></div>
+        <div class="wsum">
+          <span>ימי עבודה <b>${w.days.length}</b></span><span>פעולות <b>${w.actions}</b></span>
+          <span>יחידות <b>${w.units}</b></span><span>בפועל <b>${esc(fmtTime(w.totalMin))}</b></span>
+          <span>נמדד <b>${w.cmpN?esc(fmtTime(w.mAct)):"—"}</b></span>
+          <span>מכירה <b>${w.cmpN?esc(fmtTime(w.mSale)):"—"}</b></span>
+          <span>פער <b class="${gapCls(w.gap)}">${gapTxt(w.gap)}</b></span>
+          <span>יעילות <b class="${effCls(w.eff)}">${effTxt(w.eff)}</b></span>
+        </div>
+      </div>
+      ${days||'<div class="none">אין פעילות בתקופה שנבחרה</div>'}
+    </section>`;
+  }).join("");
+
+  return`<!DOCTYPE html><html dir="rtl" lang="he"><head><meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>${esc(reportPeriodKind(m.ptype))} — ${esc(reportPeriodLabel(m))}</title>
+<style>
+@page{size:A4 portrait;margin:10mm}
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:'Heebo','Segoe UI',Arial,sans-serif;direction:rtl;background:#fff;color:#111827;font-size:11px;line-height:1.45;padding:18px}
+.wrap{max-width:960px;margin:0 auto}
+h1{font-size:20px;color:#1e3a5f;letter-spacing:-.02em}
+.head{border-bottom:3px solid #1e3a5f;padding-bottom:10px;margin-bottom:12px;display:flex;justify-content:space-between;align-items:flex-end;gap:14px;flex-wrap:wrap}
+.head .meta{font-size:10.5px;color:#6b7280;text-align:left;line-height:1.7}
+.sub{font-size:12.5px;color:#374151;margin-top:3px;font-weight:600}
+.kpis{display:flex;flex-wrap:wrap;gap:7px;margin-bottom:14px}
+.kpi{border:1px solid #dbe3ec;border-radius:8px;padding:8px 13px;min-width:96px;background:#f8fafc}
+.kv{font-size:17px;font-weight:800;letter-spacing:-.02em}
+.kl{font-size:9.5px;color:#6b7280;margin-top:2px}
+h2{font-size:13px;color:#1e3a5f;margin:16px 0 7px;padding-bottom:4px;border-bottom:1px solid #e5e7eb}
+table{width:100%;border-collapse:collapse;font-size:10px}
+th{background:#1e3a5f;color:#fff;padding:5px 6px;text-align:center;font-weight:700;border:1px solid #2c4a70;font-size:9.5px}
+td{padding:4px 6px;border:1px solid #e5e7eb;text-align:center;vertical-align:middle}
+tbody tr:nth-child(even){background:#f4f8fd}
+.sum th{background:#0f2942}
+.nm{font-weight:700;text-align:right}
+.mono{font-family:'Segoe UI',Consolas,monospace;font-size:9.5px}
+.sn{color:#1d4ed8}
+.st{text-align:right;font-weight:600}
+.tm{white-space:nowrap;color:#374151;font-size:9.5px;direction:ltr;unicode-bidi:isolate}
+.num{direction:ltr;unicode-bidi:isolate;display:inline-block;white-space:nowrap}
+.dot{display:inline-block;width:7px;height:7px;border-radius:2px;margin-left:5px;vertical-align:middle}
+.dim{color:#9ca3af}
+.b7{font-weight:700}
+.g{color:#047857}.b{color:#1d4ed8}.w{color:#b45309}.r{color:#b91c1c}
+.worker{margin-top:14px;page-break-inside:auto;break-inside:auto}
+.whead{background:#eff6ff;border:1px solid #bfdbfe;border-radius:8px;padding:8px 11px;margin-bottom:7px;display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap;page-break-after:avoid;break-after:avoid}
+.wname{font-size:14px;font-weight:800;color:#1e3a5f}
+.wrole{font-size:10px;font-weight:600;color:#2563eb;background:#dbeafe;border-radius:10px;padding:2px 8px;margin-right:5px}
+.wsum{display:flex;gap:12px;flex-wrap:wrap;font-size:10px;color:#4b5563}
+.wsum b{color:#111827;font-size:11px}
+.day{margin:0 0 9px;page-break-inside:avoid;break-inside:avoid}
+.dayhead{display:flex;justify-content:space-between;align-items:baseline;gap:10px;flex-wrap:wrap;background:#f3f4f6;border-right:3px solid #1e3a5f;padding:4px 9px;border-radius:4px;margin-bottom:3px}
+.dd{font-weight:700;font-size:11px;color:#1f2937}
+.ds{font-size:9.5px;color:#6b7280}
+.plan{font-size:9.5px;color:#4b5563;background:#fffbeb;border:1px solid #fde68a;border-radius:4px;padding:3px 8px;margin-bottom:3px}
+.none{font-size:10px;color:#9ca3af;padding:5px 9px}
+.tsk th{background:#4c1d95}
+.foot{margin-top:22px;padding-top:9px;border-top:1px solid #e5e7eb;font-size:9.5px;color:#9ca3af;display:flex;justify-content:space-between;gap:10px;flex-wrap:wrap}
+.legend{margin-top:9px;font-size:9.5px;color:#6b7280;background:#f9fafb;border:1px solid #eceff3;border-radius:7px;padding:7px 10px}
+@media print{body{padding:0}.wrap{max-width:none}thead{display:table-header-group}tr{page-break-inside:avoid}}
+</style></head><body><div class="wrap">
+<div class="head">
+  <div>
+    <h1>⚙️ ${esc(reportPeriodKind(m.ptype))} — ביצועי עובדים</h1>
+    <div class="sub">${esc(reportPeriodLabel(m))}${m.scopeLabel?` · ${esc(m.scopeLabel)}`:""}</div>
+  </div>
+  <div class="meta">
+    הופק על ידי: <b>${esc(m.manager?.name||"—")}</b><br/>
+    ${esc(ROLES[m.manager?.role]?.label||"")}<br/>
+    תאריך הפקה: ${esc(m.generatedAt.toLocaleDateString("he-IL"))} ${esc(m.generatedAt.toLocaleTimeString("he-IL",{hour:"2-digit",minute:"2-digit"}))}
+  </div>
+</div>
+<div class="kpis">
+  ${kpi(T.workers,"עובדים בדוח","#1d4ed8")}
+  ${kpi(T.actions,"פעולות שנחתמו","#7c3aed")}
+  ${kpi(T.units,"יחידות שטופלו","#0891b2")}
+  ${kpi(fmtTime(T.totalMin),"זמן עבודה בפועל","#111827")}
+  ${kpi(fmtTime(T.mSale),"זמן מכירה (תקן)","#047857")}
+  ${kpi(gapTxt(T.gap),"פער מול התקן",T.gap==null?"#6b7280":T.gap>0?"#b45309":"#047857")}
+  ${kpi(effTxt(T.eff),"יעילות ממוצעת",T.eff==null?"#6b7280":T.eff>=95?"#047857":"#b45309")}
+  ${kpi(T.tasks,"משימות שהושלמו","#be185d")}
+</div>
+<h2>📊 סיכום לפי עובד</h2>
+<table class="sum"><thead><tr>
+  <th>עובד</th><th>תפקיד</th><th>ימי עבודה</th><th>פעולות</th><th>יחידות</th><th>פק"ע</th>
+  <th>זמן בפועל</th><th>מתוכו נמדד</th><th>זמן מכירה</th><th>פער</th><th>יעילות</th><th>משימות</th><th>תוכנית</th>
+</tr></thead><tbody>${summaryRows||'<tr><td colspan="13" class="dim">לא נמצאה פעילות בתקופה שנבחרה</td></tr>'}</tbody></table>
+<div class="legend">
+  <b>איך קוראים את הדוח:</b> <b>זמן בפועל</b> — כל הזמן שנרשם בפועל בתקופה, כולל משימות. <b>מתוכו נמדד</b> — רק הפעולות שיש להן גם מדידת זמן וגם זמן מכירה במחירון, ורק הן נכנסות להשוואה מול התקן.
+  <b>זמן מכירה</b> — הזמן שהוקצה לאותן פעולות במחירון (זמן תקן).
+  <b>פער</b> — נמדד פחות מכירה; ערך שלילי (<span class="g">ירוק</span>) = מהיר מהתקן, חיובי (<span class="w">כתום</span>) = חריגה מהתקן.
+  <b>יעילות</b> — זמן מכירה חלקי הזמן שנמדד: 100% = בדיוק בתקן, מעל 100% = מהיר יותר. פעולות שנחתמו ללא מדידת זמן (חתימה) אינן נכללות בהשוואה.
+</div>
+${m.workers.length?`<h2>🧾 פירוט פעולות לפי עובד ולפי יום</h2>${workerBlocks}`:""}
+<div class="foot">
+  <span>דוח זה הופק אוטומטית ממערכת ניהול קו ייצור v${esc(APP_VERSION)}</span>
+  <span>${esc(reportPeriodLabel(m))} · ${T.actions} פעולות · ${T.workers} עובדים</span>
+</div>
+</div></body></html>`;
+}
+
+// Same numbers as the printed report, as a workbook — for whoever wants to slice
+// the period further in Excel.
+function exportTeamReportXlsx(m){
+  const wb=XLSX.utils.book_new();
+  const h1=['עובד','תפקיד','ימי עבודה','פעולות','יחידות','פק"ע','זמן בפועל (שע\')','מתוכו נמדד (שע\')','זמן מכירה (שע\')','פער (שע\')','יעילות %','משימות','זמן משימות (שע\')','תוכנית בוצעה','תוכנית סה"כ'];
+  const r1=m.workers.map(w=>[w.user.name||"—",ROLES[w.user.role]?.label||w.user.role||"",w.days.length,w.actions,w.units,w.orders,
+    hrs(w.totalMin),w.cmpN?hrs(w.mAct):"",w.cmpN?hrs(w.mSale):"",w.gap==null?"":hrs(w.gap),w.eff==null?"":Math.round(w.eff),
+    w.tasks.length,hrs(w.taskMin),w.planDone,w.planTotal]);
+  addSheet(wb,"סיכום לפי עובד",h1,r1,[18,14,10,10,10,10,14,15,14,12,10,10,14,12,12]);
+  const h2=['תאריך','יום','עובד','פק"ע','מק"ט','S/N','פעולה','פרויקט','התחלה','סיום','יחידות','זמן בפועל (דק\')','זמן מכירה (דק\')','פער (דק\')','יעילות %','סוג רישום'];
+  const r2=m.workers.flatMap(w=>w.rows.map(r=>[r.day,HEB_DAYS[new Date(r.day+"T00:00:00").getDay()],r.userName,r.wo,r.pn,r.sn,r.stage,r.project,
+    fmtClock(r.start),fmtClock(r.end),r.units,Math.round(r.actual*10)/10,r.eff==null?"":Math.round(r.saleTot*10)/10,
+    r.gap==null?"":Math.round(r.gap*10)/10,r.eff==null?"":Math.round(r.eff),r.kind]));
+  addSheet(wb,"פירוט פעולות",h2,r2,[12,9,16,14,14,18,18,14,10,10,9,14,14,11,10,11]);
+  const h3=['תאריך','עובד','משימה','תיאור','התחלה','סיום','זמן (דק\')','סטטוס','מחיר'];
+  const r3=m.workers.flatMap(w=>w.tasks.map(t=>[t.day,t.userName,t.name,t.desc,fmtClock(t.start),fmtClock(t.end),Math.round(t.min),t.partial?"חלקית":"הושלמה",t.price]));
+  addSheet(wb,"משימות",h3,r3,[12,16,24,30,10,10,11,11,10]);
+  XLSX.writeFile(wb,`דוח_עובדים_${m.from}_${m.to}.xlsx`);
+}
+
+function TeamReports({users,workLogs,orders,stages,stageBlocks,projects,customTasks,dailyPlans,departments}){
+  const {currentUser}=useAuth();
+  const {toast}=useToast();
+  const isAdmin=currentUser?.role==="admin";
+  const myDept=(departments||[]).find(d=>d.id===currentUser?.departmentId||d.managerId===currentUser?.id);
+  // A department manager's report really is the department's; a team lead's covers
+  // only their own reports, so it must not be labelled with the whole department.
+  const scopeLabel=isAdmin?"כלל המפעל"
+    :currentUser?.role==="dept_manager"?(myDept?.name||"המחלקה שלי")
+    :`הצוות של ${currentUser?.name||""}`.trim()+(myDept?.name?` · ${myDept.name}`:"");
+  // The report covers the people this user oversees — App already scoped `users`
+  // to that set; system admins are dropped because a report is about the floor.
+  const team=useMemo(()=>(users||[]).filter(u=>u.active!==false&&u.role!=="admin")
+    .sort((a,b)=>String(a.name||"").localeCompare(String(b.name||""),"he")),[users]);
+  const [ptype,setPtype]=useState("day");
+  const [anchor,setAnchor]=useState(todays());
+  const [cFrom,setCFrom]=useState(addDaysISO(todays(),-6));
+  const [cTo,setCTo]=useState(todays());
+  const [sel,setSel]=useState([]);           // empty = all of my people
+  const [showEmpty,setShowEmpty]=useState(false);
+  const frameRef=useRef(null);
+
+  const range=useMemo(()=>{
+    if(ptype==="week")return weekRangeOf(anchor);
+    if(ptype==="month")return monthRangeOf(anchor);
+    if(ptype==="range")return cFrom<=cTo?{from:cFrom,to:cTo}:{from:cTo,to:cFrom};
+    return{from:anchor,to:anchor};
+  },[ptype,anchor,cFrom,cTo]);
+
+  const selUsers=useMemo(()=>sel.length?team.filter(u=>sel.includes(u.id)):team,[sel,team]);
+  const model=useMemo(()=>buildTeamReport({from:range.from,to:range.to,ptype,users:selUsers,workLogs,orders,stages,stageBlocks,
+    projects,customTasks,dailyPlans,manager:currentUser,scopeLabel,showEmpty}),
+    [range,ptype,selUsers,workLogs,orders,stages,stageBlocks,projects,customTasks,dailyPlans,currentUser,scopeLabel,showEmpty]);
+  const html=useMemo(()=>reportHTML(model),[model]);
+
+  const shiftPeriod=dir=>{
+    if(ptype==="day")return setAnchor(a=>addDaysISO(a,dir));
+    if(ptype==="week")return setAnchor(a=>addDaysISO(a,dir*7));
+    if(ptype==="month")return setAnchor(a=>{const[y,mo]=a.split("-").map(Number);const d=new Date(y,mo-1+dir,1);return isoOf(d)});
+    const span=Math.max(1,Math.round((new Date(range.to)-new Date(range.from))/864e5)+1);
+    setCFrom(f=>addDaysISO(f,dir*span));setCTo(t=>addDaysISO(t,dir*span));
+  };
+  const printWindow=()=>{
+    const w=window.open("","_blank");
+    if(!w){toast("הדפדפן חסם את חלון ההדפסה — אפשר חלונות קופצים ונסה שוב","error");return false}
+    w.document.open();w.document.write(html);w.document.close();
+    let fired=false;const go=()=>{if(fired)return;fired=true;try{w.focus();w.print()}catch{}};
+    w.onload=go;setTimeout(go,700);
+    return true;
+  };
+  const doPrint=()=>{
+    const f=frameRef.current;
+    try{if(f&&f.contentWindow){f.contentWindow.focus();f.contentWindow.print();return}}catch{}
+    printWindow();
+  };
+  const doDownload=()=>{
+    const blob=new Blob(["﻿"+html],{type:"text/html;charset=utf-8"});
+    const a=document.createElement("a");a.href=URL.createObjectURL(blob);
+    a.download=`דוח_עובדים_${model.from}_${model.to}.html`;a.click();URL.revokeObjectURL(a.href);
+    toast("הדוח הורד כקובץ HTML","success");
+  };
+  const toggleUser=id=>setSel(p=>p.includes(id)?p.filter(x=>x!==id):[...p,id]);
+  const T=model.totals;
+  const inp={padding:"8px 10px",fontSize:13,fontWeight:600};
+
+  return(
+    <div className="fade-in">
+      <div style={{display:"flex",alignItems:"center",gap:10,marginBottom:4,flexWrap:"wrap"}}>
+        <h2 style={{margin:0}}>📄 דוחות עובדים</h2>
+        {myDept&&<span style={{fontSize:12,background:myDept.color+"22",color:myDept.color,padding:"3px 12px",borderRadius:14,fontWeight:700,border:`1px solid ${myDept.color}44`}}>{myDept.name}</span>}
+      </div>
+      <div style={{fontSize:12.5,color:"var(--c-muted)",marginBottom:14}}>
+        בחר תקופה ועובדים — הדוח מציג לכל עובד, יום אחר יום, אילו פק"ע ומק"ט הוא עבד עליהם, אילו פעולות נחתמו, הזמנים שנמדדו והעמידה מול זמן התקן והמכירה. התצוגה שלמטה זהה למה שיודפס.
+      </div>
+
+      <Card style={{marginBottom:12}}>
+        <div style={{display:"flex",gap:12,flexWrap:"wrap",alignItems:"flex-end"}}>
+          <div>
+            <label style={{fontSize:11,color:"var(--c-dim)",fontWeight:600,display:"block",marginBottom:5}}>סוג דוח</label>
+            <SegBtn options={[["day","יומי"],["week","שבועי"],["month","חודשי"],["range","טווח"]]} value={ptype} onChange={setPtype}/>
+          </div>
+          {ptype==="range"?(
+            <>
+              <Field label="מתאריך" type="date" value={cFrom} onChange={setCFrom} style={{minWidth:150}}/>
+              <Field label="עד תאריך" type="date" value={cTo} onChange={setCTo} style={{minWidth:150}}/>
+            </>
+          ):(
+            <div style={{display:"flex",flexDirection:"column",gap:4,minWidth:170}}>
+              <label style={{fontSize:11,color:"var(--c-dim)",fontWeight:600}}>{ptype==="month"?"חודש":ptype==="week"?"שבוע (בחר יום בתוכו)":"תאריך"}</label>
+              <input type={ptype==="month"?"month":"date"} value={ptype==="month"?anchor.slice(0,7):anchor}
+                onChange={e=>setAnchor(ptype==="month"?`${e.target.value}-01`:e.target.value)} style={inp}/>
+            </div>
+          )}
+          <div style={{display:"flex",gap:6,alignItems:"center"}}>
+            <Btn small onClick={()=>shiftPeriod(-1)} color="var(--c-border2)">▶ הקודם</Btn>
+            <Btn small onClick={()=>{setAnchor(todays());setCFrom(addDaysISO(todays(),-6));setCTo(todays())}} color="var(--c-border2)">היום</Btn>
+            <Btn small onClick={()=>shiftPeriod(1)} color="var(--c-border2)">הבא ◀</Btn>
+          </div>
+          <div style={{marginRight:"auto",fontSize:12.5,color:"var(--c-muted)",fontWeight:600}}>
+            📅 {range.from===range.to?fmtDateHeb(range.from):`${fmtDateHeb(range.from)} — ${fmtDateHeb(range.to)}`}
+          </div>
+        </div>
+
+        <div style={{marginTop:14,borderTop:"1px solid var(--c-border)",paddingTop:12}}>
+          <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",gap:10,flexWrap:"wrap",marginBottom:8}}>
+            <label style={{fontSize:11,color:"var(--c-dim)",fontWeight:600}}>עובדים בדוח {sel.length?`(${sel.length} נבחרו)`:"(כל העובדים שלי)"}</label>
+            <div style={{display:"flex",gap:8,alignItems:"center"}}>
+              {sel.length>0&&<button onClick={()=>setSel([])} style={{background:"none",border:"none",color:"var(--c-accent)",fontSize:12,fontWeight:600,fontFamily:"inherit"}}>נקה בחירה</button>}
+              <label style={{fontSize:12,color:"var(--c-muted)",display:"flex",alignItems:"center",gap:6}}>
+                <input type="checkbox" checked={showEmpty} onChange={e=>setShowEmpty(e.target.checked)}/> הצג גם עובדים ללא פעילות
+              </label>
+            </div>
+          </div>
+          {team.length===0?(
+            <EmptyState icon="👥" title="לא שויכו אליך עובדים" subtitle="מנהל המערכת יכול לשייך אליך עובדים (מנהל ישיר / מחלקה)"/>
+          ):(
+            <div style={{display:"flex",gap:7,flexWrap:"wrap"}}>
+              {team.map(u=>{const on=sel.includes(u.id);const c=ROLES[u.role]?.color||"#3b82f6";return(
+                <button key={u.id} onClick={()=>toggleUser(u.id)} style={{background:on?c+"22":"var(--c-deep)",border:`1px solid ${on?c:"var(--c-border)"}`,color:on?c:"var(--c-muted)",borderRadius:18,padding:"5px 12px",fontSize:12,fontWeight:on?700:500,fontFamily:"inherit",display:"flex",alignItems:"center",gap:6}}>
+                  <span>{ROLES[u.role]?.icon||"👷"}</span>{u.name}
+                </button>
+              )})}
+            </div>
+          )}
+        </div>
+      </Card>
+
+      <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(128px,1fr))",gap:9,marginBottom:12}}>
+        <KpiBox i="👥" v={T.workers} label="עובדים בדוח" c="#3b82f6"/>
+        <KpiBox i="✅" v={T.actions} label="פעולות שנחתמו" c="#a78bfa" sub={T.signs?`${T.signs} חתימות ללא מדידה`:null}/>
+        <KpiBox i="📦" v={T.units} label="יחידות שטופלו" c="#06b6d4"/>
+        <KpiBox i="⏱️" v={fmtTime(T.totalMin)} label="זמן עבודה בפועל" c="#e2e8f0" sub={T.mAct?`מתוכו נמדד מול תקן ${fmtTime(T.mAct)}`:null}/>
+        <KpiBox i="💰" v={fmtTime(T.mSale)} label="זמן מכירה (תקן)" c="#10b981"/>
+        <KpiBox i="📐" v={T.gap==null?"—":<span style={{direction:"ltr",unicodeBidi:"isolate",display:"inline-block"}}>{fmtSigned(T.gap)}</span>} label="פער מול התקן" c={T.gap==null?"#8b95a8":T.gap>0?"#f59e0b":"#10b981"}/>
+        <KpiBox i="⚡" v={T.eff==null?"—":Math.round(T.eff)+"%"} label="יעילות ממוצעת" c={T.eff==null?"#8b95a8":effColor(T.eff)} sub={T.eff==null?null:effLabel(T.eff)}/>
+        <KpiBox i="📌" v={T.tasks} label="משימות שהושלמו" c="#ec4899"/>
+      </div>
+
+      <Card style={{padding:0,overflow:"hidden"}}>
+        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",gap:10,flexWrap:"wrap",padding:"12px 16px",borderBottom:"1px solid var(--c-border)"}}>
+          <div style={{fontWeight:700,fontSize:14}}>👁️ תצוגה מקדימה להדפסה</div>
+          <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
+            <Btn small color="#3b82f6" onClick={doPrint} disabled={!T.actions&&!T.tasks&&!model.workers.length}>🖨️ הדפס</Btn>
+            <Btn small color="#0ea5e9" onClick={printWindow}>🗔 פתח בחלון חדש</Btn>
+            <Btn small color="#10b981" onClick={()=>exportTeamReportXlsx(model)}>📊 ייצוא לאקסל</Btn>
+            <Btn small color="#8b5cf6" onClick={doDownload}>⬇️ שמור HTML</Btn>
+          </div>
+        </div>
+        {model.workers.length===0?(
+          <EmptyState icon="📭" title="אין פעילות בתקופה שנבחרה" subtitle="נסה תקופה אחרת, או סמן ״הצג גם עובדים ללא פעילות״"/>
+        ):(
+          <iframe ref={frameRef} srcDoc={html} title="תצוגה מקדימה של הדוח"
+            style={{width:"100%",height:"78vh",minHeight:520,border:"none",background:"#fff",display:"block"}}/>
+        )}
+      </Card>
+    </div>
+  );
+}
+
+// ══════════════════════════════════════════════════════════════════════════
+// ═══ EXCEL EXPORT / IMPORT ══════════════════════════════════════════════
+// ══════════════════════════════════════════════════════════════════════════
+// The export holds the whole picture in one workbook — orders, serials, defects,
+// shortages, the raw work log, tasks, daily plans, worker performance, measured
+// standard times and the configuration behind them (stages, blocks, people).
+// The import accepts that same workbook, and — more importantly — the empty
+// template the app hands out, so anyone can fill in a file and load it back.
+const XL_FONT="Segoe UI";
+const XL_BD={top:{style:"thin",color:{rgb:"D1D9E0"}},bottom:{style:"thin",color:{rgb:"D1D9E0"}},left:{style:"thin",color:{rgb:"D1D9E0"}},right:{style:"thin",color:{rgb:"D1D9E0"}}};
+const xlHead=(bg="1E3A5F")=>({font:{name:XL_FONT,sz:11.5,bold:true,color:{rgb:"FFFFFF"}},fill:{fgColor:{rgb:bg}},alignment:{horizontal:"center",vertical:"center",wrapText:true,readingOrder:2},border:XL_BD});
+const xlCell=even=>({font:{name:XL_FONT,sz:11,color:{rgb:"1E293B"}},fill:{fgColor:{rgb:even?"EBF3FB":"FFFFFF"}},alignment:{horizontal:"center",vertical:"center",readingOrder:2},border:XL_BD});
+const xlTag=(fg,bg)=>({font:{name:XL_FONT,sz:11,bold:true,color:{rgb:fg}},fill:{fgColor:{rgb:bg}},alignment:{horizontal:"center",vertical:"center",readingOrder:2},border:XL_BD});
+const XL_OK=xlTag("065F46","D1FAE5"),XL_BAD=xlTag("991B1B","FEE2E2"),XL_WARN=xlTag("92400E","FEF3C7"),XL_INFO=xlTag("1E40AF","DBEAFE");
+// A styled RTL sheet with a frozen, filterable header row. `spFn(rowIdx,colIdx,row)`
+// may return a style for one cell (status colouring); otherwise zebra striping.
+function xlSheet(headers,rows,cw,spFn,headBg){
+  const ws=XLSX.utils.aoa_to_sheet([headers,...rows]);
+  headers.forEach((_,c)=>{const a=XLSX.utils.encode_cell({r:0,c});if(ws[a])ws[a].s=xlHead(headBg)});
+  ws["!rows"]=[{hpx:30}];
+  rows.forEach((row,ri)=>{const even=ri%2===0;row.forEach((_,c)=>{const a=XLSX.utils.encode_cell({r:ri+1,c});if(!ws[a])return;ws[a].s=spFn?.(ri,c,row)||xlCell(even)});ws["!rows"].push({hpx:20})});
+  ws["!cols"]=(cw&&cw.length?cw:headers.map(()=>16)).map(w=>({wch:w}));
+  ws["!freeze"]={xSplit:"0",ySplit:"1",topLeftCell:"A2",activePane:"bottomLeft",state:"frozen"};
+  ws["!autofilter"]={ref:XLSX.utils.encode_range({s:{r:0,c:0},e:{r:Math.max(rows.length,1),c:Math.max(headers.length-1,0)}})};
+  if(!ws["!opts"])ws["!opts"]={};ws["!opts"].rightToLeft=true;
+  return ws;
+}
+const addSheet=(wb,name,headers,rows,cw,spFn,headBg)=>
+  XLSX.utils.book_append_sheet(wb,xlSheet(headers,rows&&rows.length?rows:[headers.map(()=>"")],cw,spFn,headBg),name);
+const XL_SEV={critical:"קריטית",high:"גבוהה",medium:"בינונית",low:"נמוכה"};
+const XL_TYP={quality:"איכות",process:"תהליך",material:"חומר גלם",equipment:"ציוד",human:"גורם אנושי",other:"אחר"};
+const xlRound=(n,d=1)=>{const p=Math.pow(10,d);return Math.round((Number(n)||0)*p)/p};
+
+function doExport(ctx){
+  const {orders=[],projects=[],stages=[],stageBlocks=[],workLogs=[],users=[],customTasks=[],dailyPlans=[],departments=[]}=ctx||{};
+  const wb=XLSX.utils.book_new();
+  const pMap=new Map(projects.map(p=>[p.id,p.name]));
+  const sMap=new Map(stages.map(s=>[s.id,s]));
+  const oMap=new Map(orders.map(o=>[o.id,o]));
+  const uMap=new Map(users.map(u=>[u.id,u]));
+  const dMap=new Map(departments.map(d=>[d.id,d.name]));
+  const bMap=new Map(stageBlocks.map(b=>[b.id,b.name]));
+  const done=workLogs.filter(w=>w.completed);
+  const unitsOf=w=>w.bulk&&Number(w.bulkCount)>1?Number(w.bulkCount):1;
+  const byOrder=new Map(),bySerial=new Map(),byUser=new Map();
+  done.forEach(w=>{
+    if(!byOrder.has(w.orderId))byOrder.set(w.orderId,[]);byOrder.get(w.orderId).push(w);
+    if(!bySerial.has(w.serialId))bySerial.set(w.serialId,[]);bySerial.get(w.serialId).push(w);
+    if(!byUser.has(w.userId))byUser.set(w.userId,[]);byUser.get(w.userId).push(w);
+  });
+  // Sold minutes a single log had to cover (stage time × the units it closed).
+  // A sign-off carries no measured time, so it contributes no sold time either —
+  // otherwise every efficiency figure would be inflated by work that wasn't timed.
+  const saleOf=(o,w)=>{const st=sMap.get(w.stageId);if(!o||!st||!(Number(w.durationMin||0)>0))return 0;return stageMinutesFor(o,st,stageBlocks)*unitsOf(w)};
+  const effOf=(act,sale)=>act>0&&sale>0?Math.round(sale/act*100):"";
+  const effStyle=v=>(v===""||v==null)?null:(v>=110?XL_OK:v>=95?XL_INFO:v>=80?XL_WARN:XL_BAD);
+
+  // ── 0: סיכום כללי ───────────────────────────────────────────────────────
+  const totMin=done.reduce((s,w)=>s+Number(w.durationMin||0),0);
+  const totSale=done.reduce((s,w)=>s+saleOf(oMap.get(w.orderId),w),0);
+  const openDef=orders.reduce((s,o)=>s+(o.defects||[]).filter(d=>d.status!=="closed").length,0);
+  const openSh=orders.reduce((s,o)=>s+(o.shortages||[]).filter(h=>!h.received).length,0);
+  const sumRows=[
+    ["תאריך הפקה",new Date().toLocaleString("he-IL")],
+    ["גרסת מערכת",APP_VERSION],
+    ['פקודות עבודה',orders.length],
+    ["סידוריים",orders.reduce((s,o)=>s+(o.serials||[]).length,0)],
+    ["סידוריים שנמסרו",orders.reduce((s,o)=>s+(o.deliveredSerials||[]).length,0)],
+    ["פעולות שנרשמו",done.length],
+    ["שעות עבודה בפועל",xlRound(totMin/60)],
+    ["שעות מכירה (תקן)",xlRound(totSale/60)],
+    ["פער מול התקן (שע')",xlRound((totMin-totSale)/60)],
+    ["יעילות כללית %",effOf(totMin,totSale)],
+    ["תקלות פתוחות",openDef],
+    ["תקלות סה\"כ",orders.reduce((s,o)=>s+(o.defects||[]).length,0)],
+    ["חוסרים פתוחים",openSh],
+    ["משימות שהושלמו",(customTasks||[]).filter(t=>t.completed).length],
+    ["תוכניות עבודה יומיות",(dailyPlans||[]).length],
+    ["עובדים פעילים",users.filter(u=>u.active!==false&&u.role!=="admin").length],
+    ["מחלקות",departments.length],
+    ["שלבי ייצור",stages.length],
+    ["פרויקטים",projects.length]
+  ];
+  addSheet(wb,"סיכום כללי",["מדד","ערך"],sumRows,[30,26],null,"0F2942");
+
+  // ── 1: פקודות עבודה ─────────────────────────────────────────────────────
+  const h1=['מספר פק"ע','P/N (מק"ט)','תיאור','פרויקט','סטטוס','כמות מוזמנת','סידוריים','נמסרו','% השלמה','מחיר ליחידה','שווי כולל','תאריך קבלה','יעד אספקה','ימים ליעד','שלבים','בלוק','זמן מכירה ליח\' (דק\')','זמן מכירה שנצבר (שע\')','זמן בפועל (שע\')','פער (שע\')','יעילות %','תקלות פתוחות','תקלות סה"כ','חוסרים פתוחים'];
+  const r1=orders.map(o=>{
+    const sers=o.serials||[],logs=byOrder.get(o.id)||[];
+    const act=logs.reduce((s,w)=>s+Number(w.durationMin||0),0);
+    const sale=logs.reduce((s,w)=>s+saleOf(o,w),0);
+    const pairs=new Set(logs.map(w=>`${w.serialId}|${w.stageId}`));
+    const totalPairs=(sers.length||Number(o.qty||0))*(o.stageIds||[]).length;
+    const stNames=(o.stageIds||[]).map(id=>sMap.get(id)?.name).filter(Boolean).join(", ");
+    return[o.woNumber,o.pn||"",o.description||"",pMap.get(o.projectId)||"",SL[o.status||"open"]||"פתוחה",
+      Number(o.qty||0),sers.length,(o.deliveredSerials||[]).length,
+      totalPairs>0?Math.round(pairs.size/totalPairs*100):0,
+      Number(o.unitPrice||0),Number(o.unitPrice||0)*Number(o.qty||0),
+      o.receivedDate||"",o.targetDate||"",o.targetDate?daysBetween(todays(),o.targetDate):"",
+      stNames,bMap.get(o.blockId)||"",xlRound(orderPerUnitMin(o,stages,stageBlocks)),
+      xlRound(sale/60),xlRound(act/60),xlRound((act-sale)/60),effOf(act,sale),
+      (o.defects||[]).filter(d=>d.status!=="closed").length,(o.defects||[]).length,
+      (o.shortages||[]).filter(h=>!h.received).length];
+  });
+  addSheet(wb,"פקודות עבודה",h1,r1,[15,14,28,14,11,12,10,9,10,12,13,12,12,10,30,14,15,16,14,12,10,11,11,11],
+    (ri,c,row)=>c===4?(row[4]==="הושלמה"?XL_OK:row[4]==="תקועה"?XL_BAD:row[4]==="חלקית"?XL_INFO:XL_WARN):(c===20?effStyle(row[20]):null));
+
+  // ── 2: סידוריים ─────────────────────────────────────────────────────────
+  const h2=['פק"ע','P/N (מק"ט)','S/N','פרויקט','שלבים שהושלמו','מתוך','סטטוס','נמסר','זמן בפועל (דק\')','זמן מכירה (דק\')','פער (דק\')','יעילות %','עובדים','פעולה ראשונה','פעולה אחרונה'];
+  const r2=orders.flatMap(o=>{
+    const oSt=(o.stageIds||[]).length;
+    return(o.serials||[]).map(s=>{
+      const logs=bySerial.get(s.id)||[];
+      const act=logs.reduce((a,w)=>a+Number(w.durationMin||0),0);
+      const sale=logs.reduce((a,w)=>a+saleOf(o,w),0);
+      const doneSt=new Set(logs.map(w=>w.stageId)).size;
+      const del=(o.deliveredSerials||[]).includes(s.id);
+      const times=logs.map(w=>w.endTime||w.startTime).filter(Boolean).sort();
+      return[o.woNumber,o.pn||"",s.sn,pMap.get(o.projectId)||"",doneSt,oSt,
+        del?"נמסר":doneSt>=oSt&&oSt>0?"הושלם":doneSt>0?"בתהליך":"ממתין",del?"כן":"לא",
+        xlRound(act),xlRound(sale),xlRound(act-sale),effOf(act,sale),
+        [...new Set(logs.map(w=>w.userName).filter(Boolean))].join(", "),
+        times[0]?times[0].slice(0,16).replace("T"," "):"",times.length?times[times.length-1].slice(0,16).replace("T"," "):""];
+    });
+  });
+  addSheet(wb,"סידוריים",h2,r2,[15,14,20,14,14,8,11,8,14,15,12,10,26,17,17],
+    (ri,c,row)=>c===6?(row[6]==="נמסר"||row[6]==="הושלם"?XL_OK:row[6]==="בתהליך"?XL_INFO:XL_WARN):(c===11?effStyle(row[11]):null));
+
+  // ── 3: תקלות ────────────────────────────────────────────────────────────
+  const h3=['פק"ע','P/N (מק"ט)','S/N','כותרת','סוג','חומרה','אחראי','תאריך גילוי','סטטוס','תאריך סגירה','ימים לסגירה','תיאור'];
+  const r3=orders.flatMap(o=>(o.defects||[]).map(d=>{
+    const sr=(o.serials||[]).find(s=>s.id===d.serialId);
+    return[o.woNumber,o.pn||"",sr?.sn||"כללי",d.title||"",XL_TYP[d.type]||"",XL_SEV[d.severity]||"",d.responsible||"",
+      d.discoveredDate||"",d.status==="closed"?"סגורה":"פתוחה",d.closedDate||"",
+      d.status==="closed"&&d.discoveredDate&&d.closedDate?daysBetween(d.discoveredDate,d.closedDate):"",d.description||""];
+  }));
+  addSheet(wb,"תקלות",h3,r3,[15,14,18,24,11,10,14,12,10,12,11,30],
+    (ri,c,row)=>c===8?(row[8]==="סגורה"?XL_OK:XL_BAD):(c===5?(row[5]==="קריטית"?XL_BAD:row[5]==="גבוהה"?XL_WARN:null):null),"7F1D1D");
+
+  // ── 4: חוסרים ───────────────────────────────────────────────────────────
+  const h4=['פק"ע','P/N (מק"ט)','פריט','מק"ט רכיב','כמות חסרה','סיבה','אחראי','תאריך הזמנה','סטטוס','תאריך קבלה','כמות שהתקבלה','הערה'];
+  const r4=orders.flatMap(o=>(o.shortages||[]).map(h=>[o.woNumber,o.pn||"",h.item||"",h.sku||"",Number(h.missing||0),h.reason||"",h.responsible||"",
+    h.orderedDate||"",h.received?"התקבל":"ממתין",h.receivedDate||"",Number(h.receivedQty||0),h.note||""]));
+  addSheet(wb,"חוסרים",h4,r4,[15,14,24,14,11,20,14,12,10,12,12,24],
+    (ri,c,row)=>c===8?(row[8]==="התקבל"?XL_OK:XL_WARN):null,"78350F");
+
+  // ── 5: לוג עבודה ────────────────────────────────────────────────────────
+  const h5=['תאריך','יום','עובד','תפקיד','מחלקה','פק"ע','P/N (מק"ט)','S/N','פעולה (שלב)','פרויקט','סוג רישום','התחלה','סיום','זמן נטו (דק\')','הפסקות (דק\')','יחידות','זמן ליחידה (דק\')','זמן מכירה (דק\')','פער (דק\')','יעילות %'];
+  const r5=done.slice().sort((a,b)=>String(b.endTime||"").localeCompare(String(a.endTime||""))).map(w=>{
+    const o=oMap.get(w.orderId),u=uMap.get(w.userId),st=sMap.get(w.stageId);
+    const day=w.endTime||w.startTime?isoOf(new Date(w.endTime||w.startTime)):"";
+    const act=Number(w.durationMin||0),n=unitsOf(w),sale=saleOf(o,w);
+    return[day,day?HEB_DAYS[new Date(day+"T00:00:00").getDay()]:"",w.userName||"",ROLES[u?.role]?.label||"",dMap.get(u?.departmentId)||"",
+      o?.woNumber||"",o?.pn||"",w.serialSn||"",st?.name||"",pMap.get(o?.projectId)||"",
+      w.bulk?"קבוצתי":act>0?"עבודה":"חתימה",
+      w.startTime?w.startTime.slice(0,16).replace("T"," "):"",w.endTime?w.endTime.slice(0,16).replace("T"," "):"",
+      xlRound(act),xlRound(w.totalPauseMin||0),n,xlRound(n>0?act/n:act),
+      sale>0?xlRound(sale):"",sale>0?xlRound(act-sale):"",effOf(act,sale)];
+  });
+  addSheet(wb,"לוג עבודה",h5,r5,[12,8,16,13,14,14,13,17,15,13,10,17,17,12,12,8,14,14,11,10],
+    (ri,c,row)=>c===19?effStyle(row[19]):null,"1E3A8A");
+
+  // ── 6: משימות ───────────────────────────────────────────────────────────
+  const h6=['תאריך','עובד','תפקיד','משימה','תיאור','מחיר','סטטוס','התחלה','סיום','זמן (דק\')','הפסקות (דק\')'];
+  const r6=(customTasks||[]).slice().sort((a,b)=>String(b.endTime||b.startTime||"").localeCompare(String(a.endTime||a.startTime||""))).map(t=>{
+    const u=uMap.get(t.userId),when=t.endTime||t.startTime;
+    return[when?isoOf(new Date(when)):"",t.userName||"",ROLES[u?.role]?.label||"",t.name||"",t.description||"",Number(t.price||0),
+      t.completed?"הושלמה":t.partial?"חלקית":t.active?"בביצוע":"פתוחה",
+      t.startTime?t.startTime.slice(0,16).replace("T"," "):"",t.endTime?t.endTime.slice(0,16).replace("T"," "):"",
+      xlRound(t.durationMin||0),xlRound(t.totalPauseMin||0)];
+  });
+  addSheet(wb,"משימות",h6,r6,[12,16,13,24,30,10,11,17,17,11,12],
+    (ri,c,row)=>c===6?(row[6]==="הושלמה"?XL_OK:row[6]==="חלקית"?XL_WARN:XL_INFO):null,"4C1D95");
+
+  // ── 7: תוכניות עבודה ────────────────────────────────────────────────────
+  const h7=['תאריך','עובד','פק"ע','P/N (מק"ט)','שלב','יעד כמות','סידוריים משובצים','בוצע','הערה','שובץ ע"י'];
+  const r7=(dailyPlans||[]).slice().sort((a,b)=>String(b.date||"").localeCompare(String(a.date||""))).map(p=>{
+    const o=oMap.get(p.orderId);
+    return[p.date||"",p.userName||uMap.get(p.userId)?.name||"",o?.woNumber||"",o?.pn||"",sMap.get(p.stageId)?.name||"",
+      Number(p.targetQty||0),(p.serialIds||[]).length,p.done?"כן":"לא",p.note||"",p.createdByName||""];
+  });
+  addSheet(wb,"תוכניות עבודה",h7,r7,[12,16,14,13,15,10,15,8,24,15],
+    (ri,c,row)=>c===7?(row[7]==="כן"?XL_OK:XL_WARN):null,"065F46");
+
+  // ── 8: ביצועי עובדים ────────────────────────────────────────────────────
+  const h8=['עובד','שם משתמש','תפקיד','מחלקה','מנהל ישיר','פעיל','תעריף שעתי','ימי עבודה','פעולות','חתימות','יחידות','שעות עבודה','שעות מכירה','פער (שע\')','יעילות %','יח/שעה','עלות','הכנסה','רווח','משימות שהושלמו'];
+  const r8=users.filter(u=>u.role!=="admin").map(u=>{
+    const logs=byUser.get(u.id)||[];
+    const act=logs.reduce((s,w)=>s+Number(w.durationMin||0),0);
+    const sale=logs.reduce((s,w)=>s+saleOf(oMap.get(w.orderId),w),0);
+    const uts=logs.reduce((s,w)=>s+unitsOf(w),0);
+    const days=new Set(logs.map(w=>{const t=w.endTime||w.startTime;return t?isoOf(new Date(t)):""}).filter(Boolean)).size;
+    const cost=act*(Number(u.hourlyRate||0)/60);
+    const rev=logs.reduce((s,w)=>s+Number(sMap.get(w.stageId)?.price||0)*unitsOf(w),0);
+    return[u.name||"",u.username||"",ROLES[u.role]?.label||u.role||"",dMap.get(u.departmentId)||"",uMap.get(u.managerId)?.name||"",
+      u.active!==false?"כן":"לא",Number(u.hourlyRate||0),days,logs.length,logs.filter(w=>!(Number(w.durationMin||0)>0)).length,uts,
+      xlRound(act/60),xlRound(sale/60),xlRound((act-sale)/60),effOf(act,sale),
+      act>0?xlRound(uts/(act/60)):0,Math.round(cost),Math.round(rev),Math.round(rev-cost),
+      (customTasks||[]).filter(t=>t.userId===u.id&&t.completed).length];
+  });
+  addSheet(wb,"ביצועי עובדים",h8,r8,[16,14,13,14,15,7,11,10,9,9,9,12,12,11,10,10,11,11,11,14],
+    (ri,c,row)=>c===14?effStyle(row[14]):null,"0F766E");
+
+  // ── 9: זמני תקן ─────────────────────────────────────────────────────────
+  // The measured time per מק"ט × שלב against the time the price list sells.
+  const h9=['P/N (מק"ט)','שלב','דגימות','ממוצע (דק\')','חציון (דק\')','סטיית תקן','פיזור CV %','מהיר ביותר','איטי ביותר','זמן מכירה (דק\')','פער (דק\')','יעילות %','רמת ביטחון','יציבות'];
+  const samples=timeSamples(done,orders,stages,stageBlocks);
+  const grp=new Map();
+  samples.forEach(s=>{const k=`${s.pn}|${s.stageId}`;if(!grp.has(k))grp.set(k,{pn:s.pn,stage:s.stageName,order:s.stageOrder,sale:0,vals:[]});
+    const g=grp.get(k);g.vals.push(s.min);if(s.sale>0)g.sale=s.sale});
+  const r9=[...grp.values()].map(g=>{
+    const st=statsOf(g.vals);
+    return[g.pn,g.stage,st.n,xlRound(st.mean),xlRound(st.median),xlRound(st.sd),Math.round(st.cv),xlRound(st.lo),xlRound(st.hi),
+      xlRound(g.sale),g.sale>0?xlRound(st.mean-g.sale):"",g.sale>0&&st.mean>0?Math.round(g.sale/st.mean*100):"",
+      confOf(st.n).label,cvInfo(st.cv).label];
+  }).sort((a,b)=>String(a[0]).localeCompare(String(b[0]),"he")||String(a[1]).localeCompare(String(b[1]),"he"));
+  addSheet(wb,"זמני תקן",h9,r9,[14,16,9,12,12,11,11,12,12,14,11,10,12,12],
+    (ri,c,row)=>c===11?effStyle(row[11]):null,"5B21B6");
+
+  // ── 10: שלבים ───────────────────────────────────────────────────────────
+  const h10=['שלב','סדר','זמן מכירה (דק\')','מחיר','תעריף שעתי','תפקיד נדרש','צבע','פעולות שנרשמו','זמן ממוצע בפועל (דק\')','פער (דק\')','יעילות %'];
+  const r10=stages.slice().sort((a,b)=>Number(a.order||0)-Number(b.order||0)).map(s=>{
+    const logs=done.filter(w=>w.stageId===s.id&&Number(w.durationMin||0)>0);
+    const per=logs.map(w=>Number(w.durationMin||0)/unitsOf(w));
+    const st=statsOf(per),sale=Number(s.minutes||0);
+    return[s.name,Number(s.order||0),sale,Number(s.price||0),Number(s.hourlyRate||0),ROLES[s.roleId]?.label||"",s.color||"",
+      st.n,xlRound(st.mean),sale>0&&st.n?xlRound(st.mean-sale):"",sale>0&&st.mean>0?Math.round(sale/st.mean*100):""];
+  });
+  addSheet(wb,"שלבים",h10,r10,[18,7,14,10,12,14,10,13,17,11,10],
+    (ri,c,row)=>c===10?effStyle(row[10]):null,"0E7490");
+
+  // ── 11: בלוקים ──────────────────────────────────────────────────────────
+  const h11=['בלוק','שלב','דקות'];
+  const r11=(stageBlocks||[]).flatMap(b=>(b.stages||[]).map(s=>[b.name,s.name||"",Number(s.minutes||0)]));
+  addSheet(wb,"בלוקים",h11,r11,[22,22,10],null,"0E7490");
+
+  // ── 12: עובדים ומחלקות ──────────────────────────────────────────────────
+  const h12=['שם','שם משתמש','תפקיד','מחלקה','מנהל ישיר','פעיל','תעריף שעתי','תעריף מכירה','הרשאת פרויקטים','הרשאת שלבים','כניסה אחרונה'];
+  const r12=users.map(u=>[u.name||"",u.username||"",ROLES[u.role]?.label||u.role||"",dMap.get(u.departmentId)||"",uMap.get(u.managerId)?.name||"",
+    u.active!==false?"כן":"לא",Number(u.hourlyRate||0),Number(u.saleRate||0),
+    u.projectAccess==="all"?"כל הפרויקטים":(Array.isArray(u.projectAccess)?u.projectAccess.map(id=>pMap.get(id)||id).join(", "):pMap.get(u.projectAccess)||""),
+    u.stageAccess==="all"?"כל השלבים":(Array.isArray(u.stageAccess)?u.stageAccess.map(id=>sMap.get(id)?.name||id).join(", "):""),
+    u.lastLogin?String(u.lastLogin).slice(0,16).replace("T"," "):""]);
+  addSheet(wb,"עובדים",h12,r12,[16,14,13,14,15,7,11,11,26,30,17],null,"334155");
+
+  const h13=['מחלקה','מנהל','עובדים','פעולות','שעות בפועל','שעות מכירה','יעילות %'];
+  const r13=departments.map(d=>{
+    const mem=users.filter(u=>u.departmentId===d.id&&u.active!==false);
+    const ids=new Set(mem.map(u=>u.id));
+    const logs=done.filter(w=>ids.has(w.userId));
+    const act=logs.reduce((s,w)=>s+Number(w.durationMin||0),0);
+    const sale=logs.reduce((s,w)=>s+saleOf(oMap.get(w.orderId),w),0);
+    return[d.name,uMap.get(d.managerId)?.name||"",mem.length,logs.length,xlRound(act/60),xlRound(sale/60),effOf(act,sale)];
+  });
+  addSheet(wb,"מחלקות",h13,r13,[20,18,10,10,13,13,10],(ri,c,row)=>c===6?effStyle(row[6]):null,"334155");
+
+  XLSX.writeFile(wb,"דוח_מלא_קו_ייצור_"+todays()+".xlsx");
+}
+
+// ── Import template ───────────────────────────────────────────────────────
+// An empty workbook with exactly the columns the importer reads, plus a guide,
+// a filled example and the lists of legal values taken from this company's own
+// projects and stages. Fill it in, drop it back — no mapping step needed.
+const TPL_ORDERS=['מספר פק"ע','P/N (מק"ט)','תיאור','פרויקט','כמות','מחיר ליחידה','תאריך קבלה','יעד אספקה','שלבים','סטטוס'];
+const TPL_SERIALS=['פק"ע','S/N','נמסר'];
+const TPL_DEFECTS=['פק"ע','S/N','כותרת','סוג','חומרה','אחראי','תאריך גילוי','סטטוס','תאריך סגירה','תיאור'];
+const TPL_SHORTS=['פק"ע','פריט','מק"ט רכיב','כמות חסרה','סיבה','אחראי','תאריך הזמנה','התקבל','תאריך קבלה','כמות שהתקבלה','הערה'];
+function doTemplate(ctx){
+  const {projects=[],stages=[],stageBlocks=[]}=ctx||{};
+  const wb=XLSX.utils.book_new();
+  const stNames=stages.slice().sort((a,b)=>Number(a.order||0)-Number(b.order||0)).map(s=>s.name);
+  const guide=[
+    ["איך ממלאים את הקובץ",""],
+    ["1. מלא רק את הגיליונות הצבעוניים","פקודות עבודה · סידוריים · תקלות · חוסרים"],
+    ["2. אל תשנה את שורת הכותרות","הכותרות הן מה שהמערכת מזהה בעת הייבוא"],
+    ["3. אל תמחק ואל תשנה שמות גיליונות","גיליון שנמחק פשוט לא ייובא"],
+    ["4. אפשר להוסיף כמה שורות שרוצים","שורות ריקות מדולגות אוטומטית"],
+    ["5. גרור את הקובץ למסך Excel באפליקציה","תוצג תצוגה מקדימה לפני האישור"],
+    ["",""],
+    ["שדה חובה יחיד",'מספר פק"ע — כל שורה בכל גיליון חייבת להתחבר לפק"ע קיימת בגיליון ״פקודות עבודה״'],
+    ["תאריכים","אפשר dd/mm/yyyy או yyyy-mm-dd או תא בפורמט תאריך של Excel"],
+    ["שלבים",'רשימת שלבים מופרדת בפסיקים. אם נשאיר ריק — הפק"ע תקבל את כל השלבים המוגדרים במערכת'],
+    ["פרויקט","חייב להיות שם של פרויקט קיים (ראה גיליון ״רשימות עזר״); שם לא מוכר יסומן כאזהרה"],
+    ["S/N בגיליון תקלות",'אפשר להשאיר ריק — התקלה תירשם ברמת הפק"ע ולא ברמת יחידה'],
+    ["כן / לא","עמודות ״נמסר״ ו״התקבל״ מקבלות: כן / לא (או TRUE / FALSE)"],
+    ["",""],
+    ["שים לב","ייבוא במצב ״החלף הכל״ מוחק את כל הפקודות הקיימות. במצב ״הוסף לקיימים״ הן נוספות לצידן"]
+  ];
+  addSheet(wb,"הוראות",["נושא","פירוט"],guide,[34,74],(ri,c)=>ri===0||ri===14?xlTag("1E40AF","DBEAFE"):null,"0F2942");
+
+  const blanks=(headers,n)=>Array.from({length:n},()=>headers.map(()=>""));
+  addSheet(wb,"פקודות עבודה",TPL_ORDERS,blanks(TPL_ORDERS,40),[16,15,30,16,9,12,13,13,34,11]);
+  addSheet(wb,"סידוריים",TPL_SERIALS,blanks(TPL_SERIALS,60),[16,22,9],null,"1E3A8A");
+  addSheet(wb,"תקלות",TPL_DEFECTS,blanks(TPL_DEFECTS,30),[16,20,26,12,11,15,13,11,13,32],null,"7F1D1D");
+  addSheet(wb,"חוסרים",TPL_SHORTS,blanks(TPL_SHORTS,30),[16,24,15,12,20,15,13,10,13,13,24],null,"78350F");
+
+  const ex1=[["WO-1001","ALF-PCB","לוח PCB ראשי",projects[0]?.name||"פרויקט אלפא",4,1200,todays(),addDaysISO(todays(),30),stNames.slice(0,3).join(", "),"פתוחה"],
+             ["WO-1002","BET-SNS","חיישן תעשייתי",projects[1]?.name||projects[0]?.name||"פרויקט בטא",2,850,todays(),addDaysISO(todays(),45),"","פתוחה"]];
+  const exSheet=[["גיליון","דוגמה למילוי — העתק את המבנה, לא את התוכן"],
+    ["פקודות עבודה",TPL_ORDERS.join(" | ")],
+    ["",ex1[0].join(" | ")],["",ex1[1].join(" | ")],
+    ["סידוריים",TPL_SERIALS.join(" | ")],
+    ["","WO-1001 | ALF-0001 | לא"],["","WO-1001 | ALF-0002 | לא"],
+    ["תקלות",TPL_DEFECTS.join(" | ")],
+    ["",`WO-1001 | ALF-0001 | הלחמה קרה | איכות | גבוהה | יוסי כהן | ${todays()} | פתוחה |  | נמצא בבדיקה חזותית`],
+    ["חוסרים",TPL_SHORTS.join(" | ")],
+    ["",`WO-1001 | נגד 10K | SKU-1001 | 5 | לא סופק מהספק | רכש | ${todays()} | לא |  | 0 | הוזמן מחדש`]];
+  addSheet(wb,"דוגמה למילוי",["גיליון","שורה לדוגמה"],exSheet,[18,110],(ri)=>ri===0?xlTag("1E40AF","DBEAFE"):null,"0F2942");
+
+  const maxL=Math.max(projects.length,stNames.length,6,(stageBlocks||[]).length,1);
+  const helper=Array.from({length:maxL},(_,i)=>[
+    projects[i]?.name||"",stNames[i]||"",
+    ["פתוחה","חלקית","הושלמה","תקועה"][i]||"",
+    ["איכות","תהליך","חומר גלם","ציוד","גורם אנושי","אחר"][i]||"",
+    ["קריטית","גבוהה","בינונית","נמוכה"][i]||"",
+    ["פתוחה","סגורה"][i]||"",["כן","לא"][i]||"",(stageBlocks||[])[i]?.name||""]);
+  addSheet(wb,"רשימות עזר",["פרויקטים","שלבים",'סטטוס פק"ע',"סוג תקלה","חומרת תקלה","סטטוס תקלה","כן/לא","בלוקים"],
+    helper,[20,22,14,14,14,14,10,20],null,"334155");
+
+  XLSX.writeFile(wb,"תבנית_ייבוא_נתונים_קו_ייצור.xlsx");
+}
+
+// ── Import ────────────────────────────────────────────────────────────────
+// Sheets are matched by name (so the guide/example sheets in the template are
+// skipped), with a fall back to "the first sheet that looks like orders" for
+// files produced before the template existed.
+const xlNorm=s=>String(s==null?"":s).replace(/['"׳״‘’“”]/g,"").replace(/\s+/g," ").trim().toLowerCase();
+const xlRow=r=>{const o={};Object.keys(r).forEach(k=>{o[xlNorm(k)]=r[k]});return o};
+const xlGet=(r,...keys)=>{for(const k of keys){const v=r[xlNorm(k)];if(v!==undefined&&v!==null&&String(v).trim()!=="")return v}return""};
+const xlNum=v=>{const n=Number(String(v==null?"":v).replace(/[^\d.\-]/g,""));return isFinite(n)?n:0};
+const xlBool=v=>/^(כן|נמסר|התקבל|בוצע|yes|y|true|1|v|✓)$/i.test(String(v==null?"":v).trim());
+function xlDate(v){
+  if(v==null||v==="")return"";
+  if(v instanceof Date&&!isNaN(v))return isoOf(v);
+  if(typeof v==="number"&&isFinite(v)&&v>0)return new Date(Date.UTC(1899,11,30)+Math.round(v)*864e5).toISOString().slice(0,10);
+  const s=String(v).trim();
+  let m=s.match(/^(\d{4})[-/.](\d{1,2})[-/.](\d{1,2})/);
+  if(m)return`${m[1]}-${String(m[2]).padStart(2,"0")}-${String(m[3]).padStart(2,"0")}`;
+  m=s.match(/^(\d{1,2})[-/.](\d{1,2})[-/.](\d{2,4})/);
+  if(m){let y=Number(m[3]);if(y<100)y+=2000;return`${y}-${String(m[2]).padStart(2,"0")}-${String(m[1]).padStart(2,"0")}`}
+  const d=new Date(s);return isNaN(d)?"":isoOf(d);
+}
+function xlPickSheet(wb,names){
+  const map=new Map(wb.SheetNames.map(n=>[xlNorm(n),n]));
+  for(const n of names){const hit=map.get(xlNorm(n));if(hit)return wb.Sheets[hit]}
+  return null;
+}
+const XL_STAT_IN={"פתוחה":"open","פתוח":"open","open":"open","חלקית":"partial","חלקי":"partial","partial":"partial",
+  "הושלמה":"complete","הושלם":"complete","סגורה":"complete","complete":"complete","תקועה":"blocked","חסומה":"blocked","blocked":"blocked"};
+function doImport(file,ctx,cb){
+  const {projects=[],stages=[]}=ctx||{};
   const fr=new FileReader();
   fr.onload=e=>{try{
-    const wb=XLSX.read(e.target.result,{type:"array"});const sn=wb.SheetNames;
-    const wsO=wb.Sheets[sn[0]];if(!wsO){cb(null,"גיליון ריק");return}
-    const rowsO=XLSX.utils.sheet_to_json(wsO,{defval:""});const oMap={};
-    rowsO.forEach(r=>{const wo=String(r['מספר פק"ע']||r["WO"]||"").trim();if(!wo)return;const pn2=String(r["פרויקט"]||"").trim();
-      oMap[wo]={id:uid(),woNumber:wo,pn:String(r["P/N"]||r["PN"]||"").trim(),description:String(r["תיאור"]||"").trim(),qty:Number(r["כמות"]||0),unitPrice:Number(r["מחיר ליחידה"]||r["מחיר"]||0),projectId:projects.find(p=>p.name===pn2)?.id||"",receivedDate:r["תאריך קבלה"]||"",targetDate:r["יעד אספקה"]||r["יעד"]||"",stageIds:stages.map(s=>s.id),serials:[],shortages:[],defects:[]}});
-    // Sheet 2: serials
-    const wsS=wb.Sheets[sn[1]];
-    if(wsS)XLSX.utils.sheet_to_json(wsS,{defval:""}).forEach(r=>{const wo=String(r['פק"ע']||r['מספר פק"ע']||"").trim();if(!wo||!oMap[wo])return;const snV=String(r["S/N"]||r["SN"]||"").trim();if(!snV)return;oMap[wo].serials.push({id:uid(),sn:snV,createdAt:nowISO()})});
-    // Sheet 3: defects
-    const wsD=wb.Sheets[sn[2]];const sMap={"קריטית":"critical","גבוהה":"high","בינונית":"medium","נמוכה":"low"};const tMap={"איכות":"quality","תהליך":"process","חומר גלם":"material","ציוד":"equipment","גורם אנושי":"human","אחר":"other"};
-    if(wsD)XLSX.utils.sheet_to_json(wsD,{defval:""}).forEach(r=>{const wo=String(r['פק"ע']||r['מספר פק"ע']||"").trim();if(!wo||!oMap[wo])return;const title=String(r["כותרת"]||r["תקלה"]||"").trim();if(!title)return;const snV2=String(r["S/N"]||"").trim();const ms=oMap[wo].serials.find(s=>s.sn===snV2);
-      oMap[wo].defects.push({id:uid(),title,serialId:ms?.id||"",type:tMap[String(r["סוג"]||"")]||"other",severity:sMap[String(r["חומרה"]||"")]||"medium",description:String(r["תיאור"]||"").trim(),responsible:String(r["אחראי"]||"").trim(),discoveredDate:r["תאריך גילוי"]||todays(),status:String(r["סטטוס"]||"").includes("סגור")?"closed":"open"})});
-    // Sheet 4: shortages
-    const wsH=wb.Sheets[sn[3]];
-    if(wsH)XLSX.utils.sheet_to_json(wsH,{defval:""}).forEach(r=>{const wo=String(r['פק"ע']||r['מספר פק"ע']||"").trim();if(!wo||!oMap[wo])return;const item=String(r["פריט"]||"").trim();if(!item)return;
-      if(!oMap[wo].shortages)oMap[wo].shortages=[];
-      oMap[wo].shortages.push({id:uid(),item,sku:String(r['מק"ט']||r["מקט"]||"").trim(),missing:Number(r["כמות"]||0),reason:String(r["סיבה"]||"").trim(),responsible:String(r["אחראי"]||"").trim(),orderedDate:r["תאריך הזמנה"]||todays(),note:String(r["הערה"]||"").trim(),received:false,receivedDate:null,receivedQty:0})});
-    cb(Object.values(oMap),null);
-  }catch(err){cb(null,"שגיאה: "+err.message)}};
+    const wb=XLSX.read(e.target.result,{type:"array",cellDates:true});
+    const issues=[];
+    const rowsOf=ws=>ws?XLSX.utils.sheet_to_json(ws,{defval:""}).map(xlRow):[];
+    let wsO=xlPickSheet(wb,["פקודות עבודה","פקעות",'פק"ע',"orders","work orders"]);
+    if(!wsO){
+      // Any sheet carrying a WO column will do — older exports, renamed tabs.
+      for(const n of wb.SheetNames){
+        const rs=XLSX.utils.sheet_to_json(wb.Sheets[n],{defval:""});
+        if(rs.length&&Object.keys(rs[0]).some(k=>/פק|wo/i.test(xlNorm(k)))){wsO=wb.Sheets[n];break}
+      }
+    }
+    if(!wsO){cb(null,'לא נמצא גיליון ״פקודות עבודה״ בקובץ');return}
+
+    const projByName=new Map(projects.map(p=>[xlNorm(p.name),p.id]));
+    const stgByName=new Map(stages.map(s=>[xlNorm(s.name),s.id]));
+    const allStageIds=stages.map(s=>s.id);
+    const oMap={};let skipped=0;
+    rowsOf(wsO).forEach((r,i)=>{
+      const wo=String(xlGet(r,'מספר פק"ע','פק"ע','פקע',"WO","wo number","מספר")||"").trim();
+      if(!wo){skipped++;return}
+      if(oMap[wo]){issues.push({level:"warn",msg:`שורה ${i+2}: פק"ע ${wo} מופיעה יותר מפעם אחת — נלקחה השורה הראשונה`});return}
+      const pName=String(xlGet(r,"פרויקט","project")||"").trim();
+      const pid=pName?projByName.get(xlNorm(pName))||"":"";
+      if(pName&&!pid)issues.push({level:"warn",msg:`פק"ע ${wo}: הפרויקט ״${pName}״ לא קיים במערכת — הפק"ע תיובא ללא פרויקט`});
+      const stRaw=String(xlGet(r,"שלבים","stages")||"").trim();
+      let stageIds=allStageIds;
+      if(stRaw){
+        const wanted=stRaw.split(/[,|;/]+/).map(x=>x.trim()).filter(Boolean);
+        const ids=wanted.map(nm=>{const id=stgByName.get(xlNorm(nm));
+          if(!id)issues.push({level:"warn",msg:`פק"ע ${wo}: השלב ״${nm}״ לא קיים במערכת — דולג`});return id}).filter(Boolean);
+        // Keep the configured production order, not the order they were typed in.
+        if(ids.length)stageIds=allStageIds.filter(id=>ids.includes(id));
+        else issues.push({level:"warn",msg:`פק"ע ${wo}: לא זוהה אף שלב — שויכו כל השלבים`});
+      }
+      const qty=xlNum(xlGet(r,"כמות","כמות מוזמנת","qty"));
+      if(!qty)issues.push({level:"warn",msg:`פק"ע ${wo}: לא צוינה כמות`});
+      oMap[wo]={id:uid(),woNumber:wo,pn:String(xlGet(r,'P/N (מק"ט)',"P/N","PN",'מק"ט',"מקט")||"").trim(),
+        description:String(xlGet(r,"תיאור","description")||"").trim(),qty,
+        unitPrice:xlNum(xlGet(r,"מחיר ליחידה","מחיר","unit price")),projectId:pid,
+        receivedDate:xlDate(xlGet(r,"תאריך קבלה","received")),targetDate:xlDate(xlGet(r,"יעד אספקה","יעד","target")),
+        status:XL_STAT_IN[xlNorm(xlGet(r,"סטטוס","status"))]||"open",
+        stageIds,serials:[],shortages:[],defects:[],deliveredSerials:[]};
+    });
+    const list=Object.values(oMap);
+    if(!list.length){cb(null,'לא נמצאו פקודות עבודה בקובץ — ודא שקיימת עמודת ״מספר פק"ע״ מלאה');return}
+    if(skipped)issues.push({level:"info",msg:skipped===1?"שורה ריקה אחת בגיליון פקודות עבודה — דולגה":`${skipped} שורות ריקות בגיליון פקודות עבודה — דולגו`});
+
+    const orphan=(sheet,wo,i)=>issues.push({level:"warn",msg:`${sheet} שורה ${i+2}: פק"ע ${wo||"(ריק)"} לא נמצאה בגיליון פקודות עבודה — השורה דולגה`});
+
+    // סידוריים
+    let nSer=0;
+    rowsOf(xlPickSheet(wb,["סידוריים","סריאלים","serials","S/N"])).forEach((r,i)=>{
+      const wo=String(xlGet(r,'פק"ע','מספר פק"ע',"פקע","WO")||"").trim();
+      const sn=String(xlGet(r,"S/N","SN",'מס"ד',"סידורי")||"").trim();
+      if(!wo&&!sn)return;
+      if(!oMap[wo]){orphan("סידוריים",wo,i);return}
+      if(!sn){issues.push({level:"warn",msg:`סידוריים שורה ${i+2}: חסר S/N — דולג`});return}
+      if(oMap[wo].serials.some(s=>s.sn===sn)){issues.push({level:"warn",msg:`סידוריים שורה ${i+2}: ${sn} כפול בפק"ע ${wo} — דולג`});return}
+      const s={id:uid(),sn,createdAt:nowISO()};
+      oMap[wo].serials.push(s);nSer++;
+      if(xlBool(xlGet(r,"נמסר","נמסר ללקוח","delivered")))oMap[wo].deliveredSerials.push(s.id);
+    });
+
+    // תקלות
+    let nDef=0;
+    const sevIn={"קריטית":"critical","גבוהה":"high","בינונית":"medium","נמוכה":"low"};
+    const typIn={"איכות":"quality","תהליך":"process","חומר גלם":"material","ציוד":"equipment","גורם אנושי":"human","אחר":"other"};
+    rowsOf(xlPickSheet(wb,["תקלות","defects","פגמים"])).forEach((r,i)=>{
+      const wo=String(xlGet(r,'פק"ע','מספר פק"ע',"פקע","WO")||"").trim();
+      const title=String(xlGet(r,"כותרת","תקלה","title")||"").trim();
+      if(!wo&&!title)return;
+      if(!oMap[wo]){orphan("תקלות",wo,i);return}
+      if(!title){issues.push({level:"warn",msg:`תקלות שורה ${i+2}: חסרה כותרת — דולג`});return}
+      const sn=String(xlGet(r,"S/N","SN")||"").trim();
+      const ms=sn?oMap[wo].serials.find(s=>s.sn===sn):null;
+      if(sn&&!ms)issues.push({level:"warn",msg:`תקלות שורה ${i+2}: S/N ${sn} לא נמצא בפק"ע ${wo} — התקלה נרשמה ברמת הפק"ע`});
+      const closed=/סגור/.test(String(xlGet(r,"סטטוס","status")||""));
+      oMap[wo].defects.push({id:uid(),title,serialId:ms?.id||"",
+        type:typIn[String(xlGet(r,"סוג","type")||"").trim()]||"other",
+        severity:sevIn[String(xlGet(r,"חומרה","severity")||"").trim()]||"medium",
+        description:String(xlGet(r,"תיאור","description")||"").trim(),
+        responsible:String(xlGet(r,"אחראי","responsible")||"").trim(),
+        discoveredDate:xlDate(xlGet(r,"תאריך גילוי","discovered"))||todays(),
+        status:closed?"closed":"open",closedDate:closed?(xlDate(xlGet(r,"תאריך סגירה","closed"))||todays()):null});
+      nDef++;
+    });
+
+    // חוסרים
+    let nSh=0;
+    rowsOf(xlPickSheet(wb,["חוסרים","shortages","חוסר"])).forEach((r,i)=>{
+      const wo=String(xlGet(r,'פק"ע','מספר פק"ע',"פקע","WO")||"").trim();
+      const item=String(xlGet(r,"פריט","item","רכיב")||"").trim();
+      if(!wo&&!item)return;
+      if(!oMap[wo]){orphan("חוסרים",wo,i);return}
+      if(!item){issues.push({level:"warn",msg:`חוסרים שורה ${i+2}: חסר שם פריט — דולג`});return}
+      const rec=xlBool(xlGet(r,"התקבל","סטטוס","received"));
+      oMap[wo].shortages.push({id:uid(),item,sku:String(xlGet(r,"מק\"ט רכיב",'מק"ט',"מקט","sku")||"").trim(),
+        missing:xlNum(xlGet(r,"כמות חסרה","כמות","missing")),
+        reason:String(xlGet(r,"סיבה","reason")||"").trim(),responsible:String(xlGet(r,"אחראי","responsible")||"").trim(),
+        orderedDate:xlDate(xlGet(r,"תאריך הזמנה","ordered"))||todays(),note:String(xlGet(r,"הערה","note")||"").trim(),
+        received:rec,receivedDate:rec?(xlDate(xlGet(r,"תאריך קבלה","received date"))||todays()):null,
+        receivedQty:xlNum(xlGet(r,"כמות שהתקבלה","received qty"))});
+      nSh++;
+    });
+
+    list.forEach(o=>{if(o.serials.length&&o.qty&&o.serials.length!==o.qty)
+      issues.push({level:"info",msg:`פק"ע ${o.woNumber}: ${o.serials.length} סידוריים מול כמות ${o.qty}`})});
+    cb({orders:list,issues,stats:{orders:list.length,serials:nSer,defects:nDef,shortages:nSh}},null);
+  }catch(err){cb(null,"שגיאה בקריאת הקובץ: "+err.message)}};
   fr.readAsArrayBuffer(file);
 }
 
-function ExcelTab({orders,projects,stages,workLogs,users,updO}){
+function ExcelTab({orders,projects,stages,stageBlocks,workLogs,users,customTasks,dailyPlans,departments,updO,canImport}){
   const {toast}=useToast();
-  const [preview,setPreview]=useState(null);const[mode,setMode]=useState("replace");const[drag,setDrag]=useState(false);
-  const handleFile=file=>{doImport(file,projects,stages,(data,err)=>{if(err)return toast(err,"error");setPreview(data)})};
+  const [res,setRes]=useState(null);const[mode,setMode]=useState("replace");const[drag,setDrag]=useState(false);
+  const [showIssues,setShowIssues]=useState(false);
+  const handleFile=file=>{if(!file)return;doImport(file,{projects,stages},(data,err)=>{
+    if(err){setRes(null);return toast(err,"error")}
+    setRes(data);setShowIssues(false);
+    toast(`נקראו ${data.stats.orders} פק"ע · ${data.stats.serials} סידוריים`,"success");
+  })};
+  const exportCtx={orders,projects,stages,stageBlocks,workLogs,users,customTasks,dailyPlans,departments};
+  const errCount=(res?.issues||[]).filter(x=>x.level!=="info").length;
   return(
     <div className="fade-in">
-      <h2 style={{margin:"0 0 14px"}}>📂 ייבוא / ייצוא Excel</h2>
+      <h2 style={{margin:"0 0 4px"}}>📂 ייבוא / ייצוא Excel</h2>
+      <div style={{fontSize:12.5,color:"var(--c-muted)",marginBottom:14}}>ייצוא כל נתוני המערכת לקובץ אחד, או מילוי תבנית מוכנה והזרמת נתונים חדשים פנימה</div>
+
       <Card style={{marginBottom:14}}>
-        <div style={{fontWeight:700,marginBottom:10}}>📤 ייצוא דוח מסוגנן</div>
-        <div style={{fontSize:13,color:"var(--c-muted)",marginBottom:12}}>5 גיליונות: פקודות עבודה, סידוריים, תקלות, לוג עבודה, ביצועי עובדים — צבעוני ומעוצב</div>
-        <Btn color="var(--c-accent)" onClick={()=>doExport(orders,projects,stages,workLogs,users)}>📥 הורד Excel</Btn>
+        <div style={{fontWeight:700,marginBottom:6}}>📤 ייצוא דוח מלא</div>
+        <div style={{fontSize:13,color:"var(--c-muted)",marginBottom:10}}>
+          14 גיליונות מעוצבים: סיכום כללי · פקודות עבודה · סידוריים · תקלות · חוסרים · לוג עבודה · משימות · תוכניות עבודה · ביצועי עובדים · זמני תקן · שלבים · בלוקים · עובדים · מחלקות
+        </div>
+        <div style={{display:"flex",gap:12,flexWrap:"wrap",marginBottom:12,fontSize:11.5,color:"var(--c-dim)"}}>
+          <span>📋 {orders.length} פק"ע</span><span>🏷️ {orders.reduce((s,o)=>s+(o.serials||[]).length,0)} סידוריים</span>
+          <span>⏱️ {workLogs.filter(w=>w.completed).length} פעולות</span><span>👥 {users.length} עובדים</span>
+        </div>
+        <Btn color="var(--c-accent)" onClick={()=>{doExport(exportCtx);toast("הדוח יורד...","success")}}>📥 הורד Excel מלא</Btn>
       </Card>
+
+      <Card style={{marginBottom:14,border:"1px solid #10b98144"}}>
+        <div style={{fontWeight:700,marginBottom:6}}>📄 תבנית ריקה למילוי</div>
+        <div style={{fontSize:13,color:"var(--c-muted)",marginBottom:10}}>
+          קובץ עם ראשי עמודות מוכנים ומותאמים בדיוק לשאיבת נתונים לתוך האפליקציה — כולל גיליון הוראות, דוגמה למילוי ורשימות הערכים החוקיים (הפרויקטים והשלבים שמוגדרים אצלכם).
+          פשוט מורידים, ממלאים ומעלים חזרה.
+        </div>
+        <div style={{display:"flex",gap:7,flexWrap:"wrap",marginBottom:12}}>
+          {["פקודות עבודה","סידוריים","תקלות","חוסרים"].map(n=>(
+            <span key={n} style={{fontSize:11.5,background:"var(--c-deep)",border:"1px solid var(--c-border)",borderRadius:14,padding:"3px 11px",color:"var(--c-muted)"}}>{n}</span>
+          ))}
+        </div>
+        <Btn color="#10b981" onClick={()=>{doTemplate({projects,stages,stageBlocks});toast("התבנית יורדת...","success")}}>📄 הורד תבנית למילוי</Btn>
+      </Card>
+
+      {canImport?(
       <Card>
         <div style={{fontWeight:700,marginBottom:10}}>📥 ייבוא נתונים מ-Excel</div>
-        <div style={{display:"flex",gap:10,marginBottom:12}}><SegBtn options={[["replace","החלף הכל"],["merge","הוסף לקיימים"]]} value={mode} onChange={setMode}/></div>
+        <div style={{display:"flex",gap:10,marginBottom:12,alignItems:"center",flexWrap:"wrap"}}>
+          <SegBtn options={[["replace","החלף הכל"],["merge","הוסף לקיימים"]]} value={mode} onChange={setMode}/>
+          <span style={{fontSize:11.5,color:mode==="replace"?"#f59e0b":"var(--c-dim)"}}>
+            {mode==="replace"?'⚠️ כל הפק"ע הקיימות יימחקו ויוחלפו בקובץ':'הפק"ע מהקובץ יתווספו לקיימות'}
+          </span>
+        </div>
         <div className={`dz${drag?" drag":""}`} onDragOver={e=>{e.preventDefault();setDrag(true)}} onDragLeave={()=>setDrag(false)} onDrop={e=>{e.preventDefault();setDrag(false);handleFile(e.dataTransfer.files[0])}} onClick={()=>{const inp=document.createElement("input");inp.type="file";inp.accept=".xlsx,.xls";inp.onchange=ev=>handleFile(ev.target.files[0]);inp.click()}}>
           <div style={{fontSize:36,marginBottom:8}}>📁</div>
           <div style={{fontWeight:600,marginBottom:4}}>גרור קובץ Excel לכאן או לחץ לבחירה</div>
-          <div style={{fontSize:12,color:"var(--c-dim)"}}>גיליונות: פקודות עבודה → סידוריים → תקלות</div>
+          <div style={{fontSize:12,color:"var(--c-dim)"}}>הגיליונות מזוהים לפי שמם: פקודות עבודה · סידוריים · תקלות · חוסרים</div>
         </div>
-        {preview&&(<div style={{marginTop:14}}>
-          <div style={{fontWeight:700,color:"#10b981",marginBottom:8}}>✅ {preview.length} פקעות | {preview.reduce((s,o)=>s+(o.serials||[]).length,0)} סידוריים | {preview.reduce((s,o)=>s+(o.defects||[]).length,0)} תקלות</div>
-          <div style={{overflowX:"auto",marginBottom:10}}><table><thead><tr><th>פק"ע</th><th>P/N</th><th>תיאור</th><th>סידוריים</th><th>תקלות</th></tr></thead><tbody>{preview.slice(0,10).map(o=>(<tr key={o.id}><td style={{fontWeight:600}}>{o.woNumber}</td><td>{o.pn||"—"}</td><td>{o.description||"—"}</td><td>{(o.serials||[]).length}</td><td>{(o.defects||[]).length}</td></tr>))}</tbody></table></div>
+        {res&&(<div style={{marginTop:14}}>
+          <div style={{fontWeight:700,color:"#10b981",marginBottom:8}}>
+            ✅ {res.stats.orders} פק"ע | {res.stats.serials} סידוריים | {res.stats.defects} תקלות | {res.stats.shortages} חוסרים
+          </div>
+          {res.issues.length>0&&(
+            <div style={{marginBottom:10,background:"var(--c-deep)",border:`1px solid ${errCount?"#f59e0b55":"var(--c-border)"}`,borderRadius:9,padding:"9px 12px"}}>
+              <button onClick={()=>setShowIssues(p=>!p)} style={{background:"none",border:"none",color:errCount?"#f59e0b":"var(--c-muted)",fontSize:12.5,fontWeight:700,fontFamily:"inherit",padding:0}}>
+                {errCount?"⚠️":"ℹ️"} {res.issues.length} הערות בקובץ {showIssues?"▲":"▼"}
+              </button>
+              {showIssues&&(<ul style={{margin:"8px 14px 0 0",padding:0,fontSize:12,color:"var(--c-muted)",lineHeight:1.7,maxHeight:190,overflowY:"auto"}}>
+                {res.issues.map((x,i)=><li key={i} style={{color:x.level==="warn"?"#f59e0b":"var(--c-dim)"}}>{x.msg}</li>)}
+              </ul>)}
+            </div>
+          )}
+          <div style={{overflowX:"auto",marginBottom:10}}><table><thead><tr><th>פק"ע</th><th>P/N</th><th>תיאור</th><th>פרויקט</th><th>כמות</th><th>שלבים</th><th>סידוריים</th><th>תקלות</th><th>חוסרים</th></tr></thead><tbody>
+            {res.orders.slice(0,12).map(o=>(<tr key={o.id}>
+              <td style={{fontWeight:600}}>{o.woNumber}</td><td>{o.pn||"—"}</td><td>{o.description||"—"}</td>
+              <td>{projects.find(p=>p.id===o.projectId)?.name||<span style={{color:"#f59e0b"}}>—</span>}</td>
+              <td>{o.qty||"—"}</td><td>{(o.stageIds||[]).length}</td><td>{(o.serials||[]).length}</td>
+              <td>{(o.defects||[]).length}</td><td>{(o.shortages||[]).length}</td></tr>))}
+          </tbody></table>
+          {res.orders.length>12&&<div style={{fontSize:11.5,color:"var(--c-dim)",padding:"6px 2px"}}>מוצגות 12 מתוך {res.orders.length} פקודות</div>}
+          </div>
           <div style={{display:"flex",gap:10}}><Btn color="#10b981" onClick={()=>{
-            // Save snapshot for undo
-            const snapshot=JSON.parse(JSON.stringify(orders));
-            LS.set("importSnapshot",snapshot);
-            const imported=mode==="replace"?preview:[...orders,...preview];
-            updO(prev=>mode==="replace"?preview:[...prev,...preview]);
-            addAuditEntry({userId:"admin",username:"admin",name:"מנהל",action:"ייבוא Excel",target:`${preview.length} פקעות`,details:`${mode==="replace"?"החלפה":"הוספה"} | ${preview.reduce((s2,o)=>s2+(o.serials||[]).length,0)} סידוריים | ${preview.reduce((s2,o)=>s2+(o.defects||[]).length,0)} תקלות | ${preview.reduce((s2,o)=>s2+(o.shortages||[]).length,0)} חוסרים`,canUndo:true});
-            setPreview(null)}}>✅ אשר ({preview.length})</Btn><Btn onClick={()=>setPreview(null)}>ביטול</Btn></div>
+            LS.set("importSnapshot",JSON.parse(JSON.stringify(orders)));
+            const list=res.orders;
+            updO(prev=>mode==="replace"?list:[...prev,...list]);
+            addAuditEntry({userId:"admin",username:"admin",name:"מנהל",action:"ייבוא Excel",target:`${list.length} פקעות`,details:`${mode==="replace"?"החלפה":"הוספה"} | ${res.stats.serials} סידוריים | ${res.stats.defects} תקלות | ${res.stats.shortages} חוסרים`,canUndo:true});
+            setRes(null);toast("הנתונים יובאו בהצלחה","success")}}>✅ אשר ייבוא ({res.orders.length})</Btn><Btn onClick={()=>setRes(null)}>ביטול</Btn></div>
         </div>)}
       </Card>
+      ):(
+        <Card><div style={{fontSize:13,color:"var(--c-muted)"}}>🔒 ייבוא נתונים לקובץ המערכת מתבצע על ידי מנהל המערכת. את התבנית שמילאת אפשר להעביר אליו לטעינה.</div></Card>
+      )}
     </div>
   );
 }
@@ -5622,6 +6540,10 @@ function App(){
   // view (so serial/stage progress done by others still renders correctly).
   const visibleOrderIds=new Set(filteredOrders.map(o=>o.id));
   const filteredWorkLogs=scopeIdSet?workLogs.filter(w=>scopeIdSet.has(w.userId)||visibleOrderIds.has(w.orderId)):workLogs;
+  // Tasks and daily plans belong to a person, so a scoped role only ever sees
+  // the ones of the people they oversee (used by reports and the Excel export).
+  const visibleTasks=scopeIdSet?customTasks.filter(t=>scopeIdSet.has(t.userId)):customTasks;
+  const visiblePlans=scopeIdSet?dailyPlans.filter(p=>scopeIdSet.has(p.userId)):dailyPlans;
 
   const updO=useCallback((fn)=>{setOrders(prev=>{const next=typeof fn==="function"?fn(prev):fn;persist(next,null,null,null);return next})},[]);
   const updP=useCallback((fn)=>{setProjects(prev=>{const next=typeof fn==="function"?fn(prev):fn;persist(null,next,null,null);return next})},[]);
@@ -5762,23 +6684,28 @@ function App(){
     {id:"mywork",label:"🔨 עבודה"},
     {id:"workers",label:"👥 עובדים"},
     {id:"stdtimes",label:"⏱️ זמני תקן"},
+    {id:"reports",label:"📄 דוחות"},
     {id:"yield",label:"📉 Yield"},
     {id:"stages",label:"🔧 שלבים"},
     {id:"projects",label:"🏗️ פרויקטים"},
     {id:"excel",label:"📂 Excel"},
   ]:isDeptMgr?[
     // Department managers get the full admin view-set, scoped to their own
-    // department's people and projects (no system config: stages/excel/admin panel).
+    // department's people and projects (no system config: stages/admin panel).
+    // Excel is offered read-only — export and blank template, no import.
     {id:"dashboard",label:"📊 דאשבורד"},
     {id:"orders",label:'📋 פק"ע'},
     {id:"shortages",label:"⚠️ חוסרים"},
     {id:"mywork",label:"🔨 עבודה"},
     {id:"workers",label:"👥 עובדים"},
     {id:"stdtimes",label:"⏱️ זמני תקן"},
+    {id:"reports",label:"📄 דוחות"},
     {id:"yield",label:"📉 Yield"},
     {id:"projects",label:"🏗️ פרויקטים"},
+    {id:"excel",label:"📂 Excel"},
   ]:isLead?[
     {id:"team",label:"👥 הצוות שלי"},
+    {id:"reports",label:"📄 דוחות"},
     {id:"mywork",label:"🔨 העבודה שלי"},
     {id:"stdtimes",label:"⏱️ זמני תקן"},
     {id:"orders",label:'📋 פק"ע'},
@@ -5928,7 +6855,7 @@ function App(){
   };
   useEffect(()=>{const isi=window.matchMedia("(display-mode:standalone)").matches||window.navigator.standalone;if(isi){setIsStandalone(true);return;}const h=e=>{e.preventDefault();setInstallPrompt(e);setShowInstall(true)};window.addEventListener("beforeinstallprompt",h);window.addEventListener("appinstalled",()=>{setShowInstall(false);setInstallPrompt(null);setIsStandalone(true)});return()=>window.removeEventListener("beforeinstallprompt",h)},[]);
   // Service Worker
-  useEffect(()=>{if(!("serviceWorker" in navigator))return;navigator.serviceWorker.register("./sw.js?v=23").then(reg=>{swRegRef.current=reg;if(reg.waiting)setShowUpdate(true);reg.addEventListener("updatefound",()=>{const nw=reg.installing;if(!nw)return;nw.addEventListener("statechange",()=>{if(nw.state==="installed"&&navigator.serviceWorker.controller)setShowUpdate(true)})});setInterval(()=>reg.update(),30*60*1000)}).catch(()=>{});navigator.serviceWorker.addEventListener("controllerchange",()=>window.location.reload())},[]);
+  useEffect(()=>{if(!("serviceWorker" in navigator))return;navigator.serviceWorker.register("./sw.js?v=25").then(reg=>{swRegRef.current=reg;if(reg.waiting)setShowUpdate(true);reg.addEventListener("updatefound",()=>{const nw=reg.installing;if(!nw)return;nw.addEventListener("statechange",()=>{if(nw.state==="installed"&&navigator.serviceWorker.controller)setShowUpdate(true)})});setInterval(()=>reg.update(),30*60*1000)}).catch(()=>{});navigator.serviceWorker.addEventListener("controllerchange",()=>window.location.reload())},[]);
   // Network status
   useEffect(()=>{const on=()=>{setIsOffline(false);toast("החיבור חזר — מסנכרן נתונים...","success");refreshFromDB(true)};const off=()=>{setIsOffline(true)};window.addEventListener("online",on);window.addEventListener("offline",off);return()=>{window.removeEventListener("online",on);window.removeEventListener("offline",off)}},[]);
   // PWA Install
@@ -5970,7 +6897,8 @@ function App(){
         {tab==="yield"&&<YieldDashboard orders={filteredOrders} projects={filteredProjects} stages={stages} workLogs={filteredWorkLogs}/>}
         {tab==="stages"&&isAdmin&&<StagesManagement stages={stages} setStages={setStages} stageBlocks={stageBlocks} setStageBlocks={setStageBlocks} persist={persist}/>}
         {tab==="projects"&&<Projects projects={filteredProjects} orders={filteredOrders} updP={updP} stages={stages} workLogs={filteredWorkLogs}/>}
-        {tab==="excel"&&isAdmin&&<ExcelTab orders={filteredOrders} projects={filteredProjects} stages={stages} workLogs={filteredWorkLogs} users={getUsers()} updO={updO}/>}
+        {tab==="reports"&&(isAdmin||isDeptMgr||isLead)&&<TeamReports users={visibleUsers} workLogs={filteredWorkLogs} orders={filteredOrders} stages={stages} stageBlocks={stageBlocks} projects={filteredProjects} customTasks={visibleTasks} dailyPlans={visiblePlans} departments={visibleDepartments}/>}
+        {tab==="excel"&&(isAdmin||isDeptMgr)&&<ExcelTab orders={filteredOrders} projects={filteredProjects} stages={stages} stageBlocks={stageBlocks} workLogs={filteredWorkLogs} users={visibleUsers} customTasks={visibleTasks} dailyPlans={visiblePlans} departments={visibleDepartments} updO={updO} canImport={isAdmin}/>}
       </main>
       {showInstall&&<InstallBanner onInstall={handleInstall} onDismiss={()=>setShowInstall(false)} lm={lm}/>}
       {showAdmin&&isAdmin&&<AdminPanel projects={projects} stages={stages} onClose={()=>setShowAdmin(false)} lightMode={lightMode} updO={updO} departments={departments} updD={updD}/>}
