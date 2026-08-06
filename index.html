@@ -2161,6 +2161,11 @@ function AdminTasksBoard({customTasks,onDeleteTask,onMarkPartialTask,onMarkDoneT
 // ══════════════════════════════════════════════════════════════════════════
 // ═══ MY WORK (Worker View) — Enhanced with Break, Bulk, Custom Tasks ════
 // ══════════════════════════════════════════════════════════════════════════
+// Marks a פק"ע / unit that belongs to the work plan the manager assigned to me,
+// so it stands out from the rest of the units waiting in the queue.
+const PlanTag=({small,label="תוכנית העבודה שלי"})=>(
+  <span style={{background:"#06b6d422",color:"#06b6d4",border:"1px solid #06b6d455",borderRadius:10,padding:small?"1px 7px":"2px 9px",fontSize:small?10:11,fontWeight:700,whiteSpace:"nowrap"}}>📅 {label}</span>
+);
 function MyWork({orders,stages,workLogs,onStartWork,onEndWork,onPauseWork,onResumeWork,customTasks,onAddTask,onStartTask,onEndTask,onPauseTask,onResumeTask,onDeleteTask,onMarkPartialTask,onMarkDoneTask,users,dailyPlans,onMarkPlanDone}){
   const {toast}=useToast();
   const {currentUser}=useAuth();
@@ -2169,6 +2174,7 @@ function MyWork({orders,stages,workLogs,onStartWork,onEndWork,onPauseWork,onResu
   const myActiveLog=myActiveLogs[0];
   const [bulkMode,setBulkMode]=useState(false);
   const [bulkSelected,setBulkSelected]=useState([]);
+  const [onlyPlan,setOnlyPlan]=useState(false); // show only the units assigned in my daily plan
   const [showTaskForm,setShowTaskForm]=useState(false);
   const [taskName,setTaskName]=useState("");
   const [taskDesc,setTaskDesc]=useState("");
@@ -2177,6 +2183,10 @@ function MyWork({orders,stages,workLogs,onStartWork,onEndWork,onPauseWork,onResu
   // Today's work plan assigned to me by my manager
   const myPlans=(dailyPlans||[]).filter(p=>p.userId===currentUser.id&&p.date===todays()).sort((a,b)=>{const sa=stages.find(s=>s.id===a.stageId),sb=stages.find(s=>s.id===b.stageId);return (sa?.order||0)-(sb?.order||0)});
   const planPending=(orderId,stageId,serialIds)=>{const o=orders.find(x=>x.id===orderId);if(!o)return [];let sers=o.serials||[];if(Array.isArray(serialIds)&&serialIds.length){sers=sers.filter(sr=>serialIds.includes(sr.id))}return sers.filter(sr=>!workLogs.some(w=>w.serialId===sr.id&&w.stageId===stageId&&w.completed)&&!workLogs.some(w=>w.serialId===sr.id&&w.stageId===stageId&&!w.completed))};
+  // A unit belongs to my plan when a plan line covers its order+stage — either by
+  // naming its serial explicitly, or by covering the whole פק"ע (no serials listed).
+  const isPlanned=(orderId,stageId,serialId)=>myPlans.some(p=>p.orderId===orderId&&p.stageId===stageId&&(!Array.isArray(p.serialIds)||p.serialIds.length===0||p.serialIds.includes(serialId)));
+  const planUnitsLeft=myPlans.reduce((s,p)=>s+planPending(p.orderId,p.stageId,p.serialIds).length,0);
   // Auto sign-off: when every unit of an assigned plan's stage is completed, mark the plan done.
   useEffect(()=>{
     if(!onMarkPlanDone)return;
@@ -2239,6 +2249,23 @@ function MyWork({orders,stages,workLogs,onStartWork,onEndWork,onPauseWork,onResu
   const activeTask=myTasks.find(t=>t.active&&!t.completed);
 
   const addTask=()=>{if(!taskName.trim())return;onAddTask({id:uid(),userId:currentUser.id,userName:currentUser.name,name:taskName.trim(),description:taskDesc.trim(),createdAt:nowISO(),active:false,completed:false,startTime:null,endTime:null,durationMin:0,paused:false,pauseStart:null,totalPauseMin:0,pauseLog:[]});setTaskName("");setTaskDesc("");setShowTaskForm(false)};
+
+  // ── Available work queue ────────────────────────────────────────────────
+  // Every pending unit I may start, tagged with whether it came from the work
+  // plan my manager assigned me today. Planned units sort first — inside each
+  // פק"ע and across פק"עים — so my own plan always sits at the top of the list.
+  const orderQueues=accessible.map(o=>{
+    const allStagesOrdered=(o.stageIds||[]).map(sid=>stages.find(s=>s.id===sid)).filter(Boolean).sort((a,b)=>a.order-b.order);
+    const units=(o.serials||[]).map(s=>{
+      // The unit's true next stage (stages must run in order)
+      const next=allStagesOrdered.find(st=>!workLogs.some(w=>w.serialId===s.id&&w.stageId===st.id&&w.completed));
+      if(!next||!myAccess.includes(next.id))return null;                                  // done, or not mine to do
+      if(workLogs.some(w=>w.serialId===s.id&&w.stageId===next.id&&!w.completed))return null; // already running
+      return{...s,next,planned:isPlanned(o.id,next.id,s.id)};
+    }).filter(Boolean).sort((a,b)=>(b.planned?1:0)-(a.planned?1:0));
+    return{order:o,units,planned:units.filter(u=>u.planned).length};
+  }).filter(q=>q.units.length>0).sort((a,b)=>b.planned-a.planned);
+  const visibleQueues=onlyPlan?orderQueues.map(q=>({...q,units:q.units.filter(u=>u.planned)})).filter(q=>q.units.length>0):orderQueues;
 
   return(
     <div className="fade-in">
@@ -2308,8 +2335,12 @@ function MyWork({orders,stages,workLogs,onStartWork,onEndWork,onPauseWork,onResu
 
       {/* My daily work plan (assigned by manager) */}
       {myPlans.length>0&&(
-        <Card style={{marginBottom:14,border:"1px solid #06b6d455",background:"linear-gradient(135deg,var(--c-card),#02161c)"}}>
-          <div style={{fontWeight:700,fontSize:15,color:"#06b6d4",marginBottom:10}}>📅 תוכנית העבודה שלי להיום</div>
+        <Card style={{marginBottom:14,border:"2px solid #06b6d4",background:"linear-gradient(135deg,var(--c-card),#02161c)"}}>
+          <div style={{display:"flex",alignItems:"center",gap:8,flexWrap:"wrap",marginBottom:4}}>
+            <div style={{fontWeight:700,fontSize:15,color:"#06b6d4"}}>📅 תוכנית העבודה שלי להיום</div>
+            <span style={{fontSize:11,background:"#06b6d422",color:"#06b6d4",border:"1px solid #06b6d455",padding:"2px 9px",borderRadius:10,fontWeight:700}}>{myPlans.length} שיבוצים · {planUnitsLeft} יחידות נותרו</span>
+          </div>
+          <div style={{fontSize:11,color:"var(--c-dim)",marginBottom:10}}>אלו היחידות שהוקצו לך אישית להיום. ברשימת העבודה שלמטה הן מסומנות ב-📅 תוכנית העבודה שלי — כדי להבדיל אותן משאר היחידות שממתינות.</div>
           <div style={{display:"flex",flexDirection:"column",gap:8}}>
             {myPlans.map(p=>{
               const o=orders.find(x=>x.id===p.orderId);const st=stages.find(s=>s.id===p.stageId);
@@ -2465,57 +2496,46 @@ function MyWork({orders,stages,workLogs,onStartWork,onEndWork,onPauseWork,onResu
         )}
       </Card>
 
-      {/* Bulk mode toggle */}
-      <div style={{display:"flex",gap:8,marginBottom:10}}>
+      {/* Bulk mode toggle + "my plan only" filter */}
+      <div style={{display:"flex",gap:8,marginBottom:10,flexWrap:"wrap",alignItems:"center"}}>
         <Btn color={bulkMode?"#ef4444":"#374151"} small onClick={()=>{setBulkMode(p=>!p);setBulkSelected([])}}>{bulkMode?"✕ בטל מצב קבוצתי":"📦 הפעלת טיימר קבוצתי"}</Btn>
+        {myPlans.length>0&&<SegBtn options={[["all","כל היחידות הממתינות"],["plan","📅 תוכנית העבודה שלי"]]} value={onlyPlan?"plan":"all"} onChange={v=>{setOnlyPlan(v==="plan");setBulkSelected([])}}/>}
+        {myPlans.length>0&&<span style={{fontSize:11,color:"var(--c-dim)"}}>יחידות המסומנות ב-📅 הוקצו לך בתוכנית העבודה</span>}
       </div>
 
-      {/* Available Work */}
-      {accessible.map(o=>{
-        // ALL stages in order (not just worker's access)
-        const allStagesOrdered=(o.stageIds||[]).map(sid=>stages.find(s=>s.id===sid)).filter(Boolean).sort((a,b)=>a.order-b.order);
-        // For each serial, find its true next stage (respecting order)
-        const pendingSerials=(o.serials||[]).filter(s=>{
-          // Find the first uncompleted stage for this serial
-          const nextSt=allStagesOrdered.find(st=>!workLogs.some(w=>w.serialId===s.id&&w.stageId===st.id&&w.completed));
-          if(!nextSt)return false; // all stages done
-          // Worker can only see if the next stage is one they have access to
-          return myAccess.includes(nextSt.id)&&!workLogs.some(w=>w.serialId===s.id&&w.stageId===nextSt.id&&!w.completed);
-        });
-        if(pendingSerials.length===0)return null;
-        return(
-          <Card key={o.id} style={{marginBottom:10}}>
-            <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:10,flexWrap:"wrap"}}>
-              <span style={{fontWeight:700,color:"#60a5fa"}}>{o.woNumber}</span>
-              {o.pn&&<span style={{fontSize:12,color:"#a78bfa"}}>P/N: {o.pn}</span>}
-              <span style={{fontSize:11,color:"var(--c-dim)"}}>({pendingSerials.length} ממתינות)</span>
-              {bulkMode&&bulkSelected.length>0&&<Btn color="var(--c-accent)" small onClick={()=>startBulk(o.id)}>▶️ התחל {bulkSelected.length} יחידות</Btn>}
-            </div>
-            <div style={{display:"flex",flexDirection:"column",gap:6}}>
-              {pendingSerials.slice(0,15).map(s=>{
-                const nextStage=allStagesOrdered.find(st=>!workLogs.some(w=>w.serialId===s.id&&w.stageId===st.id&&w.completed));
-                if(!nextStage||!myAccess.includes(nextStage.id))return null;
-                const isSel=bulkSelected.includes(s.id);
-                return(
-                  <div key={s.id} style={{display:"flex",justifyContent:"space-between",alignItems:"center",background:isSel?"#3b82f611":"var(--c-deep)",borderRadius:8,padding:"8px 12px",border:isSel?"1px solid #3b82f6":"1px solid transparent"}}>
-                    <div style={{display:"flex",alignItems:"center",gap:8}}>
-                      {bulkMode&&<input type="checkbox" checked={isSel} onChange={e=>{setBulkSelected(p=>e.target.checked?[...p,s.id]:p.filter(x=>x!==s.id))}}/>}
-                      <span style={{fontWeight:600,fontSize:13}}>{s.sn}</span>
-                      <span style={{fontSize:11,color:nextStage.color}}>← {nextStage.name}</span>
-                    </div>
-                    {!bulkMode&&<Btn color={nextStage.color} small onClick={()=>startWork(s.id,nextStage.id,o.id)} disabled={!!(myActiveLog&&!myActiveLog.paused)}>▶️ התחל</Btn>}
+      {/* Available Work — plan units first, each one tagged */}
+      {visibleQueues.map(({order:o,units,planned})=>(
+        <Card key={o.id} style={{marginBottom:10,border:planned>0?"1px solid #06b6d455":"1px solid var(--c-border)"}}>
+          <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:10,flexWrap:"wrap"}}>
+            <span style={{fontWeight:700,color:"#60a5fa"}}>{o.woNumber}</span>
+            {o.pn&&<span style={{fontSize:12,color:"#a78bfa"}}>P/N: {o.pn}</span>}
+            <span style={{fontSize:11,color:"var(--c-dim)"}}>({units.length} ממתינות)</span>
+            {planned>0&&<PlanTag label={`תוכנית העבודה שלי · ${planned} יח'`}/>}
+            {bulkMode&&bulkSelected.length>0&&<Btn color="var(--c-accent)" small onClick={()=>startBulk(o.id)}>▶️ התחל {bulkSelected.length} יחידות</Btn>}
+          </div>
+          <div style={{display:"flex",flexDirection:"column",gap:6}}>
+            {units.slice(0,15).map(s=>{
+              const nextStage=s.next;
+              const isSel=bulkSelected.includes(s.id);
+              return(
+                <div key={s.id} style={{display:"flex",justifyContent:"space-between",alignItems:"center",gap:8,flexWrap:"wrap",background:isSel?"#3b82f611":(s.planned?"#06b6d40f":"var(--c-deep)"),borderRadius:8,padding:"8px 12px",border:isSel?"1px solid #3b82f6":(s.planned?"1px solid #06b6d455":"1px solid transparent")}}>
+                  <div style={{display:"flex",alignItems:"center",gap:8,flexWrap:"wrap"}}>
+                    {bulkMode&&<input type="checkbox" checked={isSel} onChange={e=>{setBulkSelected(p=>e.target.checked?[...p,s.id]:p.filter(x=>x!==s.id))}}/>}
+                    <span style={{fontWeight:600,fontSize:13}}>{s.sn}</span>
+                    <span style={{fontSize:11,color:nextStage.color}}>← {nextStage.name}</span>
+                    {s.planned&&<PlanTag small/>}
                   </div>
-                );
-              })}
-              {pendingSerials.length>15&&<div style={{fontSize:12,color:"var(--c-dim)",textAlign:"center"}}>ועוד {pendingSerials.length-15}...</div>}
-            </div>
-          </Card>
-        );
-      })}
-      {!myActiveLog&&!activeTask&&accessible.every(o=>{
-        const oSt=(o.stageIds||[]).filter(sid=>myAccess.includes(sid));
-        return(o.serials||[]).every(s=>oSt.every(st=>workLogs.some(w=>w.serialId===s.id&&w.stageId===st.id&&w.completed)));
-      })&&<EmptyState icon="🎉" title="אין עבודה ממתינה!" subtitle="כל היחידות הושלמו"/>}
+                  {!bulkMode&&<Btn color={nextStage.color} small onClick={()=>startWork(s.id,nextStage.id,o.id)} disabled={!!(myActiveLog&&!myActiveLog.paused)}>▶️ התחל</Btn>}
+                </div>
+              );
+            })}
+            {units.length>15&&<div style={{fontSize:12,color:"var(--c-dim)",textAlign:"center"}}>ועוד {units.length-15}...</div>}
+          </div>
+        </Card>
+      ))}
+      {!myActiveLog&&!activeTask&&visibleQueues.length===0&&(onlyPlan
+        ?<EmptyState icon="📅" title="אין יחידות פתוחות בתוכנית שלך" subtitle="כל מה שהוקצה לך להיום בוצע — עבור ל'כל היחידות הממתינות' כדי לראות עבודה נוספת"/>
+        :<EmptyState icon="🎉" title="אין עבודה ממתינה!" subtitle="כל היחידות הושלמו"/>)}
     </div>
       )}
     </div>
@@ -4207,28 +4227,72 @@ function YieldDashboard({orders,projects,stages,workLogs}){
   const yC=p=>p>=95?"#10b981":p>=85?"#3b82f6":p>=70?"#f59e0b":"#ef4444";
   const yL=p=>p>=95?"מצוין":p>=85?"טוב":p>=70?"בינוני":"נמוך";
   const typL={quality:"איכות",process:"תהליך",material:"חומר גלם",equipment:"ציוד",human:"גורם אנושי",other:"אחר"};
-  const oY=orders.filter(o=>(o.serials||[]).length>0).map(o=>{
+  // ── Filters: פרויקט · מק"ט (P/N) · פק"ע ─────────────────────────────────
+  // Each filter narrows the options of the ones after it, so a chosen פרויקט
+  // only offers its own מק"טים, and a chosen מק"ט only offers its own פק"עים.
+  const [fProj,setFProj]=useState("all");
+  const [fPn,setFPn]=useState("all");
+  const [fWo,setFWo]=useState("all");
+  const allOrders=orders||[];
+  const byProj=allOrders.filter(o=>fProj==="all"||o.projectId===fProj);
+  const pnOpts=useMemo(()=>[...new Set(byProj.map(o=>o.pn).filter(Boolean))].sort((a,b)=>String(a).localeCompare(String(b),"he")),[allOrders,fProj]);
+  const woOpts=useMemo(()=>byProj.filter(o=>fPn==="all"||o.pn===fPn).sort((a,b)=>String(a.woNumber||"").localeCompare(String(b.woNumber||""),"he")),[allOrders,fProj,fPn]);
+  // Keep a narrower filter from sticking around once a wider one excluded it.
+  useEffect(()=>{if(fPn!=="all"&&!pnOpts.includes(fPn))setFPn("all")},[pnOpts]);
+  useEffect(()=>{if(fWo!=="all"&&!woOpts.some(o=>o.id===fWo))setFWo("all")},[woOpts]);
+  const fOrders=woOpts.filter(o=>fWo==="all"||o.id===fWo);
+  const nFilters=(fProj!=="all"?1:0)+(fPn!=="all"?1:0)+(fWo!=="all"?1:0);
+  const clearFilters=()=>{setFProj("all");setFPn("all");setFWo("all")};
+
+  const oY=fOrders.filter(o=>(o.serials||[]).length>0).map(o=>{
     const sn=(o.serials||[]).length,df=(o.defects||[]).filter(d=>d.status!=="closed").length;
     const yP=sn>0?Math.max(0,(1-df/sn)*100):100;
     return{...o,sn,df,yP,proj:projects.find(p=>p.id===o.projectId)};
   }).sort((a,b)=>a.yP-b.yP);
   const avg=oY.length?oY.reduce((s,o)=>s+o.yP,0)/oY.length:100;
   const worst=oY.filter(o=>o.yP<90).slice(0,5);
-  const typeDonut=Object.entries(typL).map(([k,l])=>({label:l,value:orders.flatMap(o=>(o.defects||[]).filter(d=>d.type===k&&d.status!=="closed")).length})).filter(d=>d.value>0);
+  const typeDonut=Object.entries(typL).map(([k,l])=>({label:l,value:fOrders.flatMap(o=>(o.defects||[]).filter(d=>d.type===k&&d.status!=="closed")).length})).filter(d=>d.value>0);
+  const selLabel=[fProj!=="all"?(projects.find(p=>p.id===fProj)?.name||"פרויקט"):null,fPn!=="all"?`מק"ט ${fPn}`:null,fWo!=="all"?(allOrders.find(o=>o.id===fWo)?.woNumber||'פק"ע'):null].filter(Boolean).join(" · ");
   return(
     <div className="fade-in">
       <h2 style={{margin:"0 0 14px",fontSize:18}}>📉 Yield — ניתוח תקלות</h2>
+      <Card style={{padding:"12px 14px",marginBottom:12,display:"flex",gap:10,flexWrap:"wrap",alignItems:"flex-end"}}>
+        <div style={{display:"flex",flexDirection:"column",gap:3,flex:"1 1 150px",minWidth:140}}>
+          <label style={{fontSize:11,color:"var(--c-dim)"}}>פרויקט</label>
+          <select value={fProj} onChange={e=>setFProj(e.target.value)} style={{padding:"7px 8px",fontSize:12}}>
+            <option value="all">כל הפרויקטים</option>
+            {(projects||[]).map(p=><option key={p.id} value={p.id}>{p.name}</option>)}
+          </select>
+        </div>
+        <div style={{display:"flex",flexDirection:"column",gap:3,flex:"1 1 150px",minWidth:140}}>
+          <label style={{fontSize:11,color:"var(--c-dim)"}}>מק"ט (P/N)</label>
+          <select value={fPn} onChange={e=>{setFPn(e.target.value);setFWo("all")}} style={{padding:"7px 8px",fontSize:12}}>
+            <option value="all">כל המק"טים</option>
+            {pnOpts.map(pn=><option key={pn} value={pn}>{pn}</option>)}
+          </select>
+        </div>
+        <div style={{display:"flex",flexDirection:"column",gap:3,flex:"1 1 150px",minWidth:140}}>
+          <label style={{fontSize:11,color:"var(--c-dim)"}}>פק"ע</label>
+          <select value={fWo} onChange={e=>setFWo(e.target.value)} style={{padding:"7px 8px",fontSize:12}}>
+            <option value="all">כל הפק"עים</option>
+            {woOpts.map(o=><option key={o.id} value={o.id}>{o.woNumber}{o.pn?` · ${o.pn}`:""}</option>)}
+          </select>
+        </div>
+        {nFilters>0&&<Btn small color="#374151" onClick={clearFilters}>✕ נקה סינון</Btn>}
+        <div style={{fontSize:12,color:"var(--c-dim)",paddingBottom:6}}>{fOrders.length} פק"ע בתצוגה</div>
+      </Card>
+      {nFilters>0&&<div style={{fontSize:11,color:"#06b6d4",marginBottom:10}}>🔍 מסונן: {selLabel}</div>}
       <div style={{display:"grid",gridTemplateColumns:"repeat(2,1fr)",gap:8,marginBottom:14}}>
         <Tile icon="📊" label="Yield ממוצע" value={avg.toFixed(1)+"%"} color={yC(avg)} warn={avg<70}/>
-        <Tile icon="🔧" label="תקלות פתוחות" value={orders.flatMap(o=>(o.defects||[]).filter(d=>d.status!=="closed")).length} color="#ef4444"/>
-        <Tile icon="✅" label="נסגרו" value={orders.flatMap(o=>(o.defects||[]).filter(d=>d.status==="closed")).length} color="#10b981"/>
-        <Tile icon="📋" label='פק"ע עם תקלות' value={orders.filter(o=>(o.defects||[]).some(d=>d.status!=="closed")).length} color="#f59e0b"/>
+        <Tile icon="🔧" label="תקלות פתוחות" value={fOrders.flatMap(o=>(o.defects||[]).filter(d=>d.status!=="closed")).length} color="#ef4444"/>
+        <Tile icon="✅" label="נסגרו" value={fOrders.flatMap(o=>(o.defects||[]).filter(d=>d.status==="closed")).length} color="#10b981"/>
+        <Tile icon="📋" label='פק"ע עם תקלות' value={fOrders.filter(o=>(o.defects||[]).some(d=>d.status!=="closed")).length} color="#f59e0b"/>
       </div>
 
       {/* Table - mobile friendly */}
       <Card style={{marginBottom:14}}>
         <div style={{fontWeight:700,marginBottom:12,fontSize:14}}>Yield לפי פק"ע</div>
-        {oY.length===0?<EmptyState icon="📊" title="אין נתונים" subtitle="נתוני תפוקה יופיעו אחרי שיירשמו הזמנות"/>:(
+        {oY.length===0?<EmptyState icon="📊" title={nFilters>0?"אין נתונים לסינון הזה":"אין נתונים"} subtitle={nFilters>0?"נסה לשנות את הפרויקט / המק\"ט / הפק\"ע, או לנקות את הסינון":"נתוני תפוקה יופיעו אחרי שיירשמו הזמנות"} action={nFilters>0?clearFilters:null} actionLabel="נקה סינון"/>:(
           <div style={{display:"flex",flexDirection:"column",gap:6}}>
             {oY.map(o=>(
               <div key={o.id} style={{background:"var(--c-deep)",borderRadius:8,padding:"10px 12px",border:`1px solid ${yC(o.yP)}22`}}>
@@ -5383,7 +5447,7 @@ function Navbar({tab,setTab,tabs,lightMode,toggleLight,sync,onAdmin,onLogout,ale
           </div>
         </div>
         <div className="desk-nav" style={{flex:1,overflowX:"auto",scrollbarWidth:"none",justifyContent:"flex-start"}}>
-          {tabs.map(t=>(<button key={t.id} onClick={()=>setTab(t.id)} style={{padding:"0 14px",height:52,background:"none",border:"none",color:tab===t.id?navActive:navMuted,borderBottom:tab===t.id?`3px solid ${navActive}`:"3px solid transparent",fontWeight:tab===t.id?700:400,fontSize:13,whiteSpace:"nowrap",fontFamily:"inherit"}}>{t.label}</button>))}
+          {tabs.map(t=>(<button key={t.id} onClick={()=>setTab(t.id)} title={t.badge>0?`${t.badge} שיבוצים פתוחים בתוכנית העבודה שלך`:undefined} style={{padding:"0 14px",height:52,background:"none",border:"none",color:tab===t.id?navActive:navMuted,borderBottom:tab===t.id?`3px solid ${navActive}`:"3px solid transparent",fontWeight:tab===t.id?700:400,fontSize:13,whiteSpace:"nowrap",fontFamily:"inherit"}}>{t.label}{t.badge>0&&<span style={{background:"#06b6d4",color:"#fff",fontSize:9,fontWeight:800,borderRadius:10,padding:"1px 6px",marginRight:5,verticalAlign:"middle"}}>📅 {t.badge}</span>}</button>))}
         </div>
         <div className="hide-mobile" style={{display:"flex",gap:4,alignItems:"center",flexShrink:0}}>
           <button onClick={onAlerts} aria-label={`התראות${alertCount>0?` (${alertCount})`:""}`} style={{background:alertCount>0?"#ef444422":"transparent",border:`1px solid ${alertCount>0?"#ef4444":navBorder}`,borderRadius:8,padding:"5px 10px",fontSize:14,color:alertCount>0?"#ef4444":navMuted,fontFamily:"inherit",position:"relative"}}>🔔{alertCount>0&&<span style={{position:"absolute",top:-4,right:-4,background:"#ef4444",color:"#fff",fontSize:9,fontWeight:700,borderRadius:10,padding:"1px 5px",minWidth:16,textAlign:"center"}}>{alertCount}</span>}</button>
@@ -5426,7 +5490,7 @@ function Navbar({tab,setTab,tabs,lightMode,toggleLight,sync,onAdmin,onLogout,ale
         </div>
       </div>
       <div className="mob-tabs" style={{borderTop:`1px solid ${navBorder}`}}>
-        {tabs.map(t=>(<button key={t.id} onClick={()=>{setTab(t.id);setMenuOpen(false)}} style={{flex:"0 0 auto",padding:"8px 12px",background:"none",border:"none",color:tab===t.id?navActive:navMuted,borderBottom:tab===t.id?`3px solid ${navActive}`:"3px solid transparent",fontWeight:tab===t.id?700:400,fontSize:12,fontFamily:"inherit",whiteSpace:"nowrap"}}>{t.label}</button>))}
+        {tabs.map(t=>(<button key={t.id} onClick={()=>{setTab(t.id);setMenuOpen(false)}} style={{flex:"0 0 auto",padding:"8px 12px",background:"none",border:"none",color:tab===t.id?navActive:navMuted,borderBottom:tab===t.id?`3px solid ${navActive}`:"3px solid transparent",fontWeight:tab===t.id?700:400,fontSize:12,fontFamily:"inherit",whiteSpace:"nowrap"}}>{t.label}{t.badge>0&&<span style={{background:"#06b6d4",color:"#fff",fontSize:9,fontWeight:800,borderRadius:10,padding:"1px 5px",marginRight:4,verticalAlign:"middle"}}>📅 {t.badge}</span>}</button>))}
       </div>
       {menuOpen&&(
         <div onClick={()=>setMenuOpen(false)} style={{position:"fixed",inset:0,background:"#000c",zIndex:300}}>
@@ -6676,6 +6740,9 @@ function App(){
   const isLead=isLeadRole(currentUser?.role);
   // Every employee who is not an admin or a lead sees only their own work.
   const isWorker=!isAdmin&&!isLead;
+  // Open assignments in the work plan my manager set for me today — badged on the
+  // "העבודה שלי" tab so an assigned plan is visible from anywhere in the app.
+  const myPlanCount=useMemo(()=>(dailyPlans||[]).filter(p=>p.userId===currentUser?.id&&p.date===todays()&&!p.done).length,[dailyPlans,currentUser]);
 
   const TABS=isAdmin?[
     {id:"dashboard",label:"📊 דאשבורד"},
@@ -6706,11 +6773,11 @@ function App(){
   ]:isLead?[
     {id:"team",label:"👥 הצוות שלי"},
     {id:"reports",label:"📄 דוחות"},
-    {id:"mywork",label:"🔨 העבודה שלי"},
+    {id:"mywork",label:"🔨 העבודה שלי",badge:myPlanCount},
     {id:"stdtimes",label:"⏱️ זמני תקן"},
     {id:"orders",label:'📋 פק"ע'},
   ]:[
-    {id:"mywork",label:"🔨 העבודה שלי"},
+    {id:"mywork",label:"🔨 העבודה שלי",badge:myPlanCount},
     {id:"orders",label:'📋 פק"ע'},
   ];
 
