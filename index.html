@@ -74,11 +74,24 @@ button{font-family:inherit;cursor:pointer}
 .dz{border:2px dashed var(--c-border2);border-radius:10px;padding:28px;text-align:center;cursor:pointer;transition:all .2s}
 .dz:hover,.dz.drag{border-color:#60a5fa;background:#1e3a5f22}
 .mob-tabs{display:none}
-.desk-nav{display:flex;flex:1}
+.desk-nav-wrap{display:flex;align-items:center;flex:1;min-width:0;position:relative}
+.desk-nav{display:flex;flex:1;min-width:0;overflow-x:auto;scroll-behavior:smooth;scrollbar-width:none;-webkit-overflow-scrolling:touch;scroll-padding-inline:32px}
+.desk-nav::-webkit-scrollbar{display:none}
+/* The desktop tab strip shares one 52px row with the logo and the action
+   buttons, so on narrower screens the last tabs (Excel) scroll out of sight.
+   Tighten the tabs first, and let the arrows below cover whatever still
+   overflows so nothing is ever hidden without a way to reach it. */
+.nav-tab{padding:0 10px;font-size:13px}
+@media(max-width:1400px){.nav-tab{padding:0 8px;font-size:12.5px}}
+@media(max-width:1340px){.nav-tab{padding:0 6px;font-size:12px}}
+.nav-scroll-btn{position:absolute;top:0;height:52px;width:34px;display:flex;align-items:center;justify-content:center;border:none;padding:0;font-size:13px;line-height:1;z-index:3;opacity:.75;transition:opacity .15s}
+.nav-scroll-btn:hover,.nav-scroll-btn:focus-visible{opacity:1}
+.nav-scroll-btn.at-start{inset-inline-start:0}
+.nav-scroll-btn.at-end{inset-inline-end:0}
 @media(max-width:700px){
   .mob-tabs{display:flex;overflow-x:auto;-webkit-overflow-scrolling:touch;scrollbar-width:none}
   .mob-tabs::-webkit-scrollbar{display:none}
-  .desk-nav{display:none}
+  .desk-nav-wrap{display:none}
   .hide-mobile{display:none!important}
   .chart-grid{grid-template-columns:1fr!important}
   .dash-filter-sticky{top:96px!important}
@@ -5436,6 +5449,43 @@ function Navbar({tab,setTab,tabs,lightMode,toggleLight,sync,onAdmin,onLogout,ale
   const navBorder=lm?"#dde1e8":"#1e2a42";
   const navMuted=lm?"#5a6478":"#8b95a8";
   const navActive=lm?"#2563eb":"#60a5fa";
+
+  // The tab strip scrolls when it cannot fit next to the logo and the action
+  // buttons. Track which side still has tabs off-screen so we can show an arrow
+  // there — otherwise the overflowing tabs (Excel is last) just vanish under the
+  // buttons with nothing to hint that they exist.
+  const stripRef=useRef(null);
+  const [ovf,setOvf]=useState({start:false,end:false});
+  const syncOvf=useCallback(()=>{
+    const el=stripRef.current;if(!el)return;
+    const max=el.scrollWidth-el.clientWidth;
+    if(max<=2){setOvf(p=>p.start||p.end?{start:false,end:false}:p);return}
+    // RTL scrollLeft counts down from 0 into negatives; abs() gives the distance
+    // travelled from the start of the strip either way.
+    const pos=Math.abs(el.scrollLeft);
+    const next={start:pos>2,end:pos<max-2};
+    setOvf(p=>p.start===next.start&&p.end===next.end?p:next);
+  },[]);
+  useEffect(()=>{
+    syncOvf();
+    const el=stripRef.current;
+    const ro=typeof ResizeObserver!=="undefined"?new ResizeObserver(syncOvf):null;
+    if(ro&&el){ro.observe(el);Array.from(el.children).forEach(c=>ro.observe(c))}
+    window.addEventListener("resize",syncOvf);
+    return()=>{window.removeEventListener("resize",syncOvf);if(ro)ro.disconnect()};
+  },[syncOvf,tabs]);
+  // Keep the selected tab in view — it can be picked from outside the navbar.
+  useEffect(()=>{
+    const el=stripRef.current;if(!el)return;
+    const btn=el.querySelector(`[data-tab="${tab}"]`);
+    if(btn&&btn.scrollIntoView)btn.scrollIntoView({block:"nearest",inline:"nearest"});
+  },[tab,tabs]);
+  const scrollStrip=dir=>{const el=stripRef.current;if(el)el.scrollBy({left:dir*220,behavior:"smooth"})};
+  const arrowStyle=side=>({
+    background:`linear-gradient(to ${side==="at-start"?"left":"right"},${navBg} 60%,${navBg}00)`,
+    color:navMuted,fontFamily:"inherit",
+  });
+
   return(
     <div className="nav-wrapper" style={{background:navBg,borderBottom:`1px solid ${navBorder}`,position:"sticky",top:0,zIndex:50,transition:"background .3s"}}>
       <div style={{maxWidth:1440,margin:"0 auto",padding:"0 16px",display:"flex",alignItems:"center",gap:0,height:52}}>
@@ -5446,8 +5496,12 @@ function Navbar({tab,setTab,tabs,lightMode,toggleLight,sync,onAdmin,onLogout,ale
             <span style={{fontSize:8.5,color:navMuted,fontWeight:600,letterSpacing:".14em"}}>PRODUCTION</span>
           </div>
         </div>
-        <div className="desk-nav" style={{flex:1,overflowX:"auto",scrollbarWidth:"none",justifyContent:"flex-start"}}>
-          {tabs.map(t=>(<button key={t.id} onClick={()=>setTab(t.id)} title={t.badge>0?`${t.badge} שיבוצים פתוחים בתוכנית העבודה שלך`:undefined} style={{padding:"0 14px",height:52,background:"none",border:"none",color:tab===t.id?navActive:navMuted,borderBottom:tab===t.id?`3px solid ${navActive}`:"3px solid transparent",fontWeight:tab===t.id?700:400,fontSize:13,whiteSpace:"nowrap",fontFamily:"inherit"}}>{t.label}{t.badge>0&&<span style={{background:"#06b6d4",color:"#fff",fontSize:9,fontWeight:800,borderRadius:10,padding:"1px 6px",marginRight:5,verticalAlign:"middle"}}>📅 {t.badge}</span>}</button>))}
+        <div className="desk-nav-wrap">
+          <div ref={stripRef} className="desk-nav" onScroll={syncOvf} style={{justifyContent:"flex-start"}}>
+            {tabs.map(t=>(<button key={t.id} data-tab={t.id} className="nav-tab" onClick={()=>setTab(t.id)} title={t.badge>0?`${t.badge} שיבוצים פתוחים בתוכנית העבודה שלך`:undefined} style={{height:52,flex:"0 0 auto",background:"none",border:"none",color:tab===t.id?navActive:navMuted,borderBottom:tab===t.id?`3px solid ${navActive}`:"3px solid transparent",fontWeight:tab===t.id?700:400,whiteSpace:"nowrap",fontFamily:"inherit"}}>{t.label}{t.badge>0&&<span style={{background:"#06b6d4",color:"#fff",fontSize:9,fontWeight:800,borderRadius:10,padding:"1px 6px",marginRight:5,verticalAlign:"middle"}}>📅 {t.badge}</span>}</button>))}
+          </div>
+          {ovf.start&&<button className="nav-scroll-btn at-start" aria-label="גלול ללשוניות הקודמות" onClick={()=>scrollStrip(1)} style={arrowStyle("at-start")}>▶</button>}
+          {ovf.end&&<button className="nav-scroll-btn at-end" aria-label="גלול ללשוניות הבאות" onClick={()=>scrollStrip(-1)} style={arrowStyle("at-end")}>◀</button>}
         </div>
         <div className="hide-mobile" style={{display:"flex",gap:4,alignItems:"center",flexShrink:0}}>
           <button onClick={onAlerts} aria-label={`התראות${alertCount>0?` (${alertCount})`:""}`} style={{background:alertCount>0?"#ef444422":"transparent",border:`1px solid ${alertCount>0?"#ef4444":navBorder}`,borderRadius:8,padding:"5px 10px",fontSize:14,color:alertCount>0?"#ef4444":navMuted,fontFamily:"inherit",position:"relative"}}>🔔{alertCount>0&&<span style={{position:"absolute",top:-4,right:-4,background:"#ef4444",color:"#fff",fontSize:9,fontWeight:700,borderRadius:10,padding:"1px 5px",minWidth:16,textAlign:"center"}}>{alertCount}</span>}</button>
