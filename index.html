@@ -196,7 +196,7 @@ button{font-family:inherit;cursor:pointer}
 const {useState,useEffect,useCallback,useRef,useMemo}=React;
 
 // ── Config ─────────────────────────────────────────────────────────────────
-const APP_VERSION="4.3.0";const APP_DATE="2026-08-05";
+const APP_VERSION="4.4.0";const APP_DATE="2026-08-11";
 const SB_URL="https://lwiurzkiojctwzllpnmr.supabase.co";
 const SB_KEY="eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imx3aXVyemtpb2pjdHd6bGxwbm1yIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzQ2MjU4NTAsImV4cCI6MjA5MDIwMTg1MH0.jWOnAtsjbefoY18ofSd46WMdgY47Vv4k7LgcHdOrj6Q";
 const SB_H={"Content-Type":"application/json","apikey":SB_KEY,"Authorization":"Bearer "+SB_KEY};
@@ -365,12 +365,19 @@ const deptToDb=d=>({id:d.id,name:d.name,color:d.color||"#3b82f6",manager_id:d.ma
 // Daily work plans — a manager assigns a worker an order+stage to work on for a given day.
 const dbToPlan=r=>({id:r.id,userId:r.user_id,userName:r.user_name,date:r.plan_date,orderId:r.order_id||"",stageId:r.stage_id||"",targetQty:Number(r.target_qty||0),serialIds:Array.isArray(r.serial_ids)?r.serial_ids:[],note:r.note||"",done:r.done||false,createdBy:r.created_by||"",createdByName:r.created_by_name||"",createdAt:r.created_at});
 const planToDb=p=>({id:p.id,user_id:p.userId,user_name:p.userName||null,plan_date:p.date,order_id:p.orderId||null,stage_id:p.stageId||null,target_qty:Number(p.targetQty||0),serial_ids:Array.isArray(p.serialIds)?p.serialIds:[],note:p.note||null,done:p.done||false,created_by:p.createdBy||null,created_by_name:p.createdByName||null,company_id:p.companyId||DEFAULT_COMPANY_ID,updated_at:new Date().toISOString()});
+// זמן תקן — the target minutes defined up-front for a מק"ט, stage by stage.
+// Independent of what the floor actually measures (זמן בפועל, from the work logs)
+// and of what the price list sells (זמן מכירה).
+const dbToPnStd=r=>({id:r.id,pn:r.pn||"",stageMin:(r.stage_minutes&&typeof r.stage_minutes==="object")?r.stage_minutes:{},
+  total:Number(r.total_min||0),note:r.note||"",updatedBy:r.updated_by||"",updatedAt:r.updated_at||""});
+const pnStdToDb=p=>({id:p.id,pn:p.pn||"",stage_minutes:p.stageMin||{},total_min:Number(p.total||0),
+  note:p.note||null,updated_by:p.updatedBy||null,company_id:p.companyId||DEFAULT_COMPANY_ID,updated_at:new Date().toISOString()});
 
 // ── DB load all ────────────────────────────────────────────────────────────
 async function dbLoadAll(){
   const cid=_companyId||DEFAULT_COMPANY_ID;
   const cf=`company_id=eq.${cid}&`;
-  const [orders,projects,stages,blocks,logs,tasks,depts,plans]=await Promise.all([
+  const [orders,projects,stages,blocks,logs,tasks,depts,plans,pnStds]=await Promise.all([
     SB.get("orders",cf+"order=created_at.asc"),
     SB.get("projects",cf+"order=name.asc"),
     SB.get("stages",cf+"order=stage_order.asc"),
@@ -379,12 +386,16 @@ async function dbLoadAll(){
     SB.get("custom_tasks",cf+"order=created_at.asc"),
     SB.get("departments",cf+"order=name.asc").catch(()=>[]),
     SB.get("daily_plans",cf+"order=created_at.asc").catch(()=>[]),
+    // null (not []) when the table is missing — the caller then keeps whatever
+    // standards are cached locally instead of wiping them.
+    SB.get("pn_standards",cf+"order=pn.asc").catch(()=>null),
   ]);
   return{
     orders:orders.map(dbToOrder),projects:projects.map(dbToProject),
     stages:stages.map(dbToStage),stageBlocks:blocks.map(dbToBlock),
     workLogs:logs.map(dbToLog),customTasks:tasks.map(dbToTask),
-    departments:depts.map(dbToDept),dailyPlans:plans.map(dbToPlan)
+    departments:depts.map(dbToDept),dailyPlans:plans.map(dbToPlan),
+    pnStandards:pnStds?pnStds.map(dbToPnStd):null
   };
 }
 async function dbLoadUsers(){
@@ -498,16 +509,47 @@ function fmtWorkEstimate(mins,workdayHours){
 }
 const WORKDAY_LS_KEY="workdayHours";
 
-// ── Standard-time analytics (זמן תקן מול זמן מכירה) ───────────────────────
+// ── The three time categories ─────────────────────────────────────────────
+// זמן תקן   = the target minutes defined up-front for a מק"ט, per stage (editable
+//             in the app, stored per מק"ט — it does not move when the floor moves).
+// זמן בפועל = the time actually measured on the floor, from the workers' logs.
 // זמן מכירה = the minutes allocated to a stage by the price list (block/stage).
-// זמן תקן   = the time actually measured on the floor, from the workers' logs.
-//
+const TIME_CAT={
+  std :{key:"std", label:"זמן תקן",  short:"תקן",  color:"#10b981",text:"#34d399"},
+  act :{key:"act", label:"זמן בפועל",short:"בפועל",color:"#3b82f6",text:"#60a5fa"},
+  sale:{key:"sale",label:"זמן מכירה",short:"מכירה",color:"#a78bfa",text:"#a78bfa"}
+};
+// The standard time of a מק"ט, looked up by its (trimmed) part number.
+const pnKey=pn=>String(pn||"").trim();
+// Two devices can each create a record for the same מק"ט before they sync, so the
+// newest edit wins rather than whichever row happened to load last.
+function pnStdIndex(pnStandards){
+  const m=new Map();
+  (pnStandards||[]).forEach(r=>{
+    const k=pnKey(r.pn);if(!k)return;
+    const cur=m.get(k);
+    if(!cur||String(r.updatedAt||"")>=String(cur.updatedAt||""))m.set(k,r);
+  });
+  return m;
+}
+const stdStageMin=(rec,stageId)=>Number(rec?.stageMin?.[stageId]||0)||0;
+// Total standard for a route: the sum over its stages, or the explicit total
+// when only a whole-מק"ט standard was entered.
+function stdTotalMin(rec,stageIds){
+  if(!rec)return 0;
+  const ids=(stageIds&&stageIds.length)?stageIds:Object.keys(rec.stageMin||{});
+  const per=ids.reduce((s,id)=>s+stdStageMin(rec,id),0);
+  return per>0?per:Number(rec.total||0);
+}
+const stdTotalFor=(pnStdIdx,pn,stageIds)=>stdTotalMin(pnStdIdx?.get(pnKey(pn)),stageIds);
+
+// ── Standard-time analytics (זמן תקן · זמן בפועל · זמן מכירה) ─────────────
 // A "sample" is one completed work log normalised to a single unit. Bulk logs
 // record the full elapsed time on *every* serial of the group, so the per-unit
 // time there is the duration divided by the group size.
 const fmtMinP=m=>(m==null||isNaN(m))?"—":(Math.abs(m)>=100?Math.round(m):Math.round(m*10)/10)+" דק'";
 const fmtSigned=m=>(m==null||isNaN(m))?"—":(m>0?"+":m<0?"−":"")+fmtMinP(Math.abs(m));
-function timeSamples(workLogs,orders,stages,stageBlocks){
+function timeSamples(workLogs,orders,stages,stageBlocks,pnStdIdx){
   const oMap=new Map((orders||[]).map(o=>[o.id,o]));
   const sMap=new Map((stages||[]).map(s=>[s.id,s]));
   const out=[];
@@ -518,11 +560,13 @@ function timeSamples(workLogs,orders,stages,stageBlocks){
     const o=oMap.get(w.orderId),st=sMap.get(w.stageId);
     if(!o||!st)return;
     const units=w.bulk&&Number(w.bulkCount)>1?Number(w.bulkCount):1;
+    const pn=(o.pn||"").trim()||o.woNumber||"—";
     out.push({
-      pn:(o.pn||"").trim()||o.woNumber||"—",orderId:o.id,projectId:o.projectId||"",
+      pn,orderId:o.id,projectId:o.projectId||"",
       stageId:st.id,stageName:st.name,stageColor:st.color,stageOrder:Number(st.order||0),
       userId:w.userId||"",userName:w.userName||"—",
       min:min/units,sale:stageMinutesFor(o,st,stageBlocks),
+      std:stdStageMin(pnStdIdx?.get(pnKey(pn)),st.id),
       date:(w.endTime||w.startTime||"").slice(0,10)
     });
   });
@@ -538,21 +582,23 @@ function statsOf(vals){
   const sd=n>1?Math.sqrt(vals.reduce((s,v)=>s+(v-mean)*(v-mean),0)/(n-1)):0;
   return{n,mean,median,sd,cv:mean>0?sd/mean*100:0,lo:srt[0],hi:srt[n-1]};
 }
-// How much to trust a standard time — driven purely by how many times it was sampled.
+// How much to trust a measured time — driven purely by how many times it was sampled.
 const CONF_LEVELS=[
-  {min:30,label:"גבוהה",color:"#10b981",note:"30+ דגימות — זמן התקן יציב"},
+  {min:30,label:"גבוהה",color:"#10b981",note:"30+ דגימות — הזמן בפועל יציב"},
   {min:10,label:"בינונית",color:"#3b82f6",note:"10–29 דגימות — אפשר להסתמך בזהירות"},
   {min:4,label:"נמוכה",color:"#f59e0b",note:"4–9 דגימות — נדרשות עוד מדידות"},
   {min:0,label:"ראשונית",color:"#ef4444",note:"פחות מ-4 דגימות — אינדיקציה בלבד"}
 ];
 const confOf=n=>CONF_LEVELS.find(c=>n>=c.min)||CONF_LEVELS[CONF_LEVELS.length-1];
-// Spread of a standard time (CV = sd/mean). High spread ⇒ workers differ a lot on this job.
+// Spread of the measured time (CV = sd/mean). High spread ⇒ workers differ a lot on this job.
 const cvInfo=cv=>cv<15?{label:"יציב",color:"#10b981"}:cv<30?{label:"סביר",color:"#3b82f6"}:cv<50?{label:"מפוזר",color:"#f59e0b"}:{label:"שונות גבוהה",color:"#ef4444"};
-// Efficiency = allocated time ÷ actual time. 100% = exactly on plan, above = faster.
+// Efficiency = reference time ÷ actual time. 100% = exactly on the reference,
+// above = faster. Used both against the price list (ניצול) and against the
+// pre-defined standard (עמידה בתקן).
 const effColor=e=>e>=110?"#10b981":e>=95?"#3b82f6":e>=80?"#f59e0b":"#ef4444";
 const effLabel=e=>e>=110?"מצטיין":e>=95?"בתקן":e>=80?"מתחת לתקן":"זקוק לחיזוק";
-// A gap is the measured time minus the sold time — positive means the floor is
-// slower than what was priced, i.e. the order is eating its own margin.
+// A gap is the measured time minus the reference time — positive means the floor
+// is slower than planned (over the standard, or eating the order's margin).
 const gapColor=g=>g<=-0.5?"#10b981":g<0.5?"#3b82f6":"#f59e0b";
 
 // ── LocalStorage cache (גיבוי מקומי לעבודה offline) ──────────────────────
@@ -1724,7 +1770,7 @@ function ShortagesInOrder({order,onUpdate}){
   );
 }
 
-function OrderDetail({order,projects,stages,stageBlocks,onClose,onUpdate,workLogs,onWorkLog,workdayHours=8}){
+function OrderDetail({order,projects,stages,stageBlocks,onClose,onUpdate,workLogs,onWorkLog,workdayHours=8,pnStandards}){
   const {canEdit,currentUser}=useAuth();
   const isAdmin=currentUser?.role==="admin";
   const proj=projects.find(p=>p.id===order.projectId);
@@ -1734,6 +1780,20 @@ function OrderDetail({order,projects,stages,stageBlocks,onClose,onUpdate,workLog
   const pct=serials.length?Math.round(totalCompleted/serials.length*100):0;
   const perUnitMin=orderPerUnitMin(order,stages,stageBlocks);
   const remainMin=orderRemainingMin(order,stages,stageBlocks,workLogs);
+  // The standard defined for this מק"ט (זמן תקן) — the planning figure, next to
+  // the price-list time and the time this order's units actually took.
+  const stdPerUnit=stdTotalFor(pnStdIndex(pnStandards),order.pn,order.stageIds||[]);
+  const actPerUnit=useMemo(()=>{
+    const byStage=new Map();
+    (workLogs||[]).forEach(w=>{
+      if(w.orderId!==order.id||!w.completed)return;
+      const m=Number(w.durationMin||0);if(!(m>0))return;
+      const units=w.bulk&&Number(w.bulkCount)>1?Number(w.bulkCount):1;
+      const a=byStage.get(w.stageId)||{sum:0,n:0};a.sum+=m/units;a.n++;byStage.set(w.stageId,a);
+    });
+    let t=0;byStage.forEach(a=>{t+=a.sum/a.n});
+    return t;
+  },[workLogs,order.id]);
   const [editDates,setEditDates]=useState(false);
   const [dates,setDates]=useState({receivedDate:order.receivedDate||"",targetDate:order.targetDate||"",deliveryDate:order.deliveryDate||"",deliveryStatus:order.deliveryStatus||"pending",deliveryNotes:order.deliveryNotes||""});
   const saveDates=()=>{onUpdate({...order,...dates});setEditDates(false)};
@@ -1763,11 +1823,14 @@ function OrderDetail({order,projects,stages,stageBlocks,onClose,onUpdate,workLog
           <div style={{display:"flex",justifyContent:"space-between",fontSize:13,color:"var(--c-muted)",marginBottom:3}}><span>התקדמות</span><span>{pct}%</span></div>
           <PBar pct={pct} h={10}/>
         </div>
-        {perUnitMin>0&&(
+        {(perUnitMin>0||stdPerUnit>0||actPerUnit>0)&&(
           <div style={{display:"flex",gap:14,flexWrap:"wrap",marginTop:12,fontSize:12,color:"var(--c-muted)"}}>
-            <span>⏱️ זמן ליחידה: <b style={{color:"var(--c-text)"}}>{fmtTime(perUnitMin)}</b></span>
-            <span>📦 צפי לכלל הפק"ע: <b style={{color:"#a78bfa"}}>{fmtWorkEstimate(perUnitMin*serials.length,workdayHours)}</b></span>
-            {pct<100&&<span>⏳ צפי לסיום הנותר: <b style={{color:"#06b6d4"}}>{fmtWorkEstimate(remainMin,workdayHours)}</b></span>}
+            {stdPerUnit>0&&<span>🎯 זמן תקן ליחידה: <b style={{color:TIME_CAT.std.text}}>{fmtTime(stdPerUnit)}</b></span>}
+            {actPerUnit>0&&<span>⏱️ זמן בפועל ליחידה: <b style={{color:TIME_CAT.act.text}}>{fmtTime(actPerUnit)}</b>{stdPerUnit>0&&<span style={{color:gapColor(actPerUnit-stdPerUnit),fontWeight:700,marginRight:5}}>({fmtSigned(actPerUnit-stdPerUnit)} מול התקן)</span>}</span>}
+            {perUnitMin>0&&<span>🏷️ זמן מכירה ליחידה: <b style={{color:TIME_CAT.sale.text}}>{fmtTime(perUnitMin)}</b></span>}
+            {perUnitMin>0&&<span>📦 צפי לכלל הפק"ע: <b style={{color:"#a78bfa"}}>{fmtWorkEstimate(perUnitMin*serials.length,workdayHours)}</b></span>}
+            {stdPerUnit>0&&<span>🎯 צפי לפי תקן: <b style={{color:TIME_CAT.std.text}}>{fmtWorkEstimate(stdPerUnit*serials.length,workdayHours)}</b></span>}
+            {perUnitMin>0&&pct<100&&<span>⏳ צפי לסיום הנותר: <b style={{color:"#06b6d4"}}>{fmtWorkEstimate(remainMin,workdayHours)}</b></span>}
             <span style={{color:"var(--c-dim)"}}>(לפי יום עבודה של {workdayHours} שע')</span>
           </div>
         )}
@@ -1824,7 +1887,7 @@ function OrderDetail({order,projects,stages,stageBlocks,onClose,onUpdate,workLog
   );
 }
 
-function Orders({orders,projects,stages,stageBlocks,updO,workLogs,onWorkLog,workdayHours=8,setWorkdayHours}){
+function Orders({orders,projects,stages,stageBlocks,updO,workLogs,onWorkLog,workdayHours=8,setWorkdayHours,pnStandards}){
   const {canEdit}=useAuth();
   const [showForm,setShowForm]=useState(false);
   const [editing,setEditing]=useState(null);
@@ -1846,7 +1909,7 @@ function Orders({orders,projects,stages,stageBlocks,updO,workLogs,onWorkLog,work
   // Always get fresh order from state
   const detailOrder=detail?orders.find(o=>o.id===detail.id)||detail:null;
 
-  if(detailOrder)return<OrderDetail order={detailOrder} projects={projects} stages={stages} stageBlocks={stageBlocks} onClose={()=>setDetail(null)} onUpdate={handleUpd} workLogs={workLogs} onWorkLog={onWorkLog} workdayHours={workdayHours}/>;
+  if(detailOrder)return<OrderDetail order={detailOrder} projects={projects} stages={stages} stageBlocks={stageBlocks} onClose={()=>setDetail(null)} onUpdate={handleUpd} workLogs={workLogs} onWorkLog={onWorkLog} workdayHours={workdayHours} pnStandards={pnStandards}/>;
 
   return(
     <div className="fade-in">
@@ -3690,56 +3753,60 @@ function AdminPanel({projects,stages,onClose,lightMode,updO,departments,updD}){
 }
 
 // ══════════════════════════════════════════════════════════════════════════
-// ═══ STANDARD TIMES (זמני תקן) ══════════════════════════════════════════
+// ═══ STANDARD TIMES (זמן תקן · זמן בפועל · זמן מכירה) ══════════════════
 // ══════════════════════════════════════════════════════════════════════════
-// Two bars per row — the measured standard time against the sold time — so the
-// gap between what was priced and what the floor actually does is visible at a glance.
-function StdVsSaleChart({rows,onRowClick}){
-  if(!rows||!rows.length)return<EmptyState icon="📊" title="אין דגימות" subtitle="זמני תקן מחושבים מרישומי עבודה שהסתיימו"/>;
-  const max=Math.max(...rows.flatMap(r=>[r.std||0,r.sale||0]),1);
+// Three bars per row — the standard defined up-front for the מק"ט, the time the
+// floor actually takes, and the time the price list sells — so both the gap
+// against the standard and the gap against the price are visible at a glance.
+function TimeBars({rows,onRowClick}){
+  if(!rows||!rows.length)return<EmptyState icon="📊" title="אין דגימות" subtitle="הזמן בפועל מחושב מרישומי עבודה שהסתיימו"/>;
+  const max=Math.max(...rows.flatMap(r=>[r.std||0,r.act||0,r.sale||0]),1);
+  const bar=(cat,val,k)=>(
+    <div key={k} style={{display:"flex",alignItems:"center",gap:7,marginBottom:3}}>
+      <span style={{fontSize:10,color:"var(--c-dim)",width:38,flexShrink:0}}>{cat.short}</span>
+      <div style={{flex:1,height:9,background:"var(--c-border)",borderRadius:5,overflow:"hidden"}}>
+        {val>0&&<div style={{width:`${Math.max(1.5,(val/max)*100)}%`,height:"100%",borderRadius:5,background:`linear-gradient(270deg,${cat.color},${cat.color}88)`,transition:"width .5s ease"}}/>}
+      </div>
+      <span style={{fontSize:11,fontWeight:700,color:val>0?cat.text:"var(--c-dim)",width:62,textAlign:"left",flexShrink:0}}>{val>0?fmtMinP(val):"לא הוגדר"}</span>
+    </div>
+  );
   return(
     <div style={{display:"flex",flexDirection:"column",gap:13}}>
       {rows.map((r,i)=>{
-        const gap=r.gap!==undefined?r.gap:(r.sale>0?r.std-r.sale:null);
+        const sGap=r.stdGap!==undefined?r.stdGap:(r.std>0?r.act-r.std:null);
+        const pGap=r.saleGap!==undefined?r.saleGap:(r.sale>0?r.act-r.sale:null);
         return(
           <div key={i} onClick={()=>onRowClick&&onRowClick(r)} style={{cursor:onRowClick?"pointer":"default"}}>
-            <div style={{display:"flex",justifyContent:"space-between",alignItems:"baseline",gap:8,marginBottom:5}}>
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"baseline",gap:8,marginBottom:5,flexWrap:"wrap"}}>
               <span style={{fontWeight:600,fontSize:12.5,display:"flex",alignItems:"center",gap:7,minWidth:0}}>
                 <span style={{width:8,height:8,borderRadius:2,background:r.color||"var(--c-accent)",flexShrink:0}}/>
                 <span style={{overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{r.label}</span>
                 <span style={{fontSize:10.5,color:"var(--c-dim)",fontWeight:400,whiteSpace:"nowrap"}}>({r.n} דג')</span>
                 {r.partial&&<span title="המחירון לא מכסה את כל השלבים שנמדדו — הפער חושב רק על השלבים המשותפים" style={{fontSize:9.5,color:"#f59e0b",fontWeight:700,whiteSpace:"nowrap"}}>חלקי</span>}
               </span>
-              {gap!=null&&<span style={{fontSize:11,fontWeight:700,color:gapColor(gap),whiteSpace:"nowrap"}}>{fmtSigned(gap)}</span>}
+              <span style={{display:"flex",gap:9,alignItems:"baseline",flexWrap:"wrap"}}>
+                {sGap!=null&&<span title="פער הזמן בפועל מול זמן התקן שהוגדר" style={{fontSize:11,fontWeight:700,color:gapColor(sGap),whiteSpace:"nowrap"}}>מול תקן {fmtSigned(sGap)}</span>}
+                {pGap!=null&&<span title="פער הזמן בפועל מול זמן המכירה שבמחירון" style={{fontSize:10.5,fontWeight:700,color:"var(--c-dim)",whiteSpace:"nowrap"}}>מול מכירה {fmtSigned(pGap)}</span>}
+              </span>
             </div>
-            <div style={{display:"flex",alignItems:"center",gap:7,marginBottom:3}}>
-              <span style={{fontSize:10,color:"var(--c-dim)",width:38,flexShrink:0}}>תקן</span>
-              <div style={{flex:1,height:9,background:"var(--c-border)",borderRadius:5,overflow:"hidden"}}>
-                <div style={{width:`${Math.max(1.5,(r.std/max)*100)}%`,height:"100%",borderRadius:5,background:"linear-gradient(270deg,#3b82f6,#3b82f688)",transition:"width .5s ease"}}/>
-              </div>
-              <span style={{fontSize:11,fontWeight:700,color:"#60a5fa",width:62,textAlign:"left",flexShrink:0}}>{fmtMinP(r.std)}</span>
-            </div>
-            <div style={{display:"flex",alignItems:"center",gap:7}}>
-              <span style={{fontSize:10,color:"var(--c-dim)",width:38,flexShrink:0}}>מכירה</span>
-              <div style={{flex:1,height:9,background:"var(--c-border)",borderRadius:5,overflow:"hidden"}}>
-                {r.sale>0&&<div style={{width:`${Math.max(1.5,(r.sale/max)*100)}%`,height:"100%",borderRadius:5,background:"linear-gradient(270deg,#a78bfa,#a78bfa88)",transition:"width .5s ease"}}/>}
-              </div>
-              <span style={{fontSize:11,fontWeight:700,color:r.sale>0?"#a78bfa":"var(--c-dim)",width:62,textAlign:"left",flexShrink:0}}>{r.sale>0?fmtMinP(r.sale):"לא הוגדר"}</span>
-            </div>
+            {bar(TIME_CAT.std,r.std,"s")}
+            {bar(TIME_CAT.act,r.act,"a")}
+            {bar(TIME_CAT.sale,r.sale,"p")}
           </div>
         );
       })}
-      <div style={{display:"flex",gap:14,justifyContent:"flex-end",fontSize:10.5,color:"var(--c-dim)",paddingTop:4,borderTop:"1px solid var(--c-table-border)"}}>
-        <span style={{display:"flex",alignItems:"center",gap:5}}><span style={{width:14,height:4,borderRadius:2,background:"#3b82f6"}}/>זמן תקן (נמדד)</span>
-        <span style={{display:"flex",alignItems:"center",gap:5}}><span style={{width:14,height:4,borderRadius:2,background:"#a78bfa"}}/>זמן מכירה (מחירון)</span>
+      <div style={{display:"flex",gap:14,justifyContent:"flex-end",flexWrap:"wrap",fontSize:10.5,color:"var(--c-dim)",paddingTop:4,borderTop:"1px solid var(--c-table-border)"}}>
+        <span style={{display:"flex",alignItems:"center",gap:5}}><span style={{width:14,height:4,borderRadius:2,background:TIME_CAT.std.color}}/>זמן תקן (מוגדר מראש)</span>
+        <span style={{display:"flex",alignItems:"center",gap:5}}><span style={{width:14,height:4,borderRadius:2,background:TIME_CAT.act.color}}/>זמן בפועל (נמדד)</span>
+        <span style={{display:"flex",alignItems:"center",gap:5}}><span style={{width:14,height:4,borderRadius:2,background:TIME_CAT.sale.color}}/>זמן מכירה (מחירון)</span>
       </div>
     </div>
   );
 }
 // Spread of the individual samples: the full min–max range, the ±1σ band inside
 // it, and the mean. A wide band means the same job takes very different times
-// depending on who runs it.
-function SpreadBar({lo,hi,mean,sd,scaleMin,scaleMax,sale}){
+// depending on who runs it. The green tick is the standard, the purple the price.
+function SpreadBar({lo,hi,mean,sd,scaleMin,scaleMax,sale,std}){
   const span=Math.max(scaleMax-scaleMin,0.001);
   const pos=v=>Math.min(100,Math.max(0,((v-scaleMin)/span)*100));
   const s1=Math.max(scaleMin,mean-sd),s2=Math.min(scaleMax,mean+sd);
@@ -3747,8 +3814,9 @@ function SpreadBar({lo,hi,mean,sd,scaleMin,scaleMax,sale}){
     <div style={{position:"relative",height:16,margin:"3px 0"}}>
       <div style={{position:"absolute",top:7,right:`${pos(lo)}%`,width:`${Math.max(0.6,pos(hi)-pos(lo))}%`,height:2,background:"var(--c-border2)",borderRadius:1}}/>
       {sd>0&&<div style={{position:"absolute",top:3,right:`${pos(s1)}%`,width:`${Math.max(0.6,pos(s2)-pos(s1))}%`,height:10,background:"#3b82f633",border:"1px solid #3b82f666",borderRadius:3}}/>}
-      <div style={{position:"absolute",top:1,right:`calc(${pos(mean)}% - 1.5px)`,width:3,height:14,background:"#60a5fa",borderRadius:2}}/>
-      {sale>0&&<div style={{position:"absolute",top:0,right:`calc(${pos(sale)}% - 1px)`,width:2,height:16,background:"#a78bfa",borderRadius:1}}/>}
+      <div style={{position:"absolute",top:1,right:`calc(${pos(mean)}% - 1.5px)`,width:3,height:14,background:TIME_CAT.act.text,borderRadius:2}}/>
+      {std>0&&<div title="זמן תקן" style={{position:"absolute",top:0,right:`calc(${pos(std)}% - 1px)`,width:2,height:16,background:TIME_CAT.std.color,borderRadius:1}}/>}
+      {sale>0&&<div title="זמן מכירה" style={{position:"absolute",top:0,right:`calc(${pos(sale)}% - 1px)`,width:2,height:16,background:TIME_CAT.sale.color,borderRadius:1}}/>}
     </div>
   );
 }
@@ -3756,7 +3824,6 @@ function SpreadBar({lo,hi,mean,sd,scaleMin,scaleMax,sale}){
 function PnRow({row,open,onToggle}){
   const conf=confOf(row.minN);              // the route is only as reliable as its least-sampled stage
   const cvi=cvInfo(row.cv);
-  const gap=row.gap;
   return(
     <div style={{background:"var(--c-deep)",borderRadius:10,border:`1px solid ${open?"var(--c-accent)55":"var(--c-border)"}`,overflow:"hidden"}}>
       <div onClick={onToggle} style={{padding:"11px 12px",cursor:"pointer"}}>
@@ -3766,46 +3833,58 @@ function PnRow({row,open,onToggle}){
             <span style={{fontWeight:800,fontSize:14,color:"#a78bfa"}}>{row.pn}</span>
             <span style={{fontSize:10.5,background:"var(--c-card)",color:"var(--c-muted)",padding:"2px 7px",borderRadius:10,fontWeight:700,whiteSpace:"nowrap"}}>{row.n} דגימות</span>
             <span title={conf.note+" — נקבע לפי השלב עם הכי מעט דגימות ("+row.minN+")"} style={{fontSize:10.5,background:conf.color+"22",color:conf.color,padding:"2px 7px",borderRadius:10,fontWeight:700,whiteSpace:"nowrap"}}>אמינות {conf.label}</span>
+            {row.stdRoute>0
+              ?<span title="למק״ט זה הוגדר זמן תקן" style={{fontSize:10.5,background:TIME_CAT.std.color+"22",color:TIME_CAT.std.color,padding:"2px 7px",borderRadius:10,fontWeight:700,whiteSpace:"nowrap"}}>תקן מוגדר</span>
+              :<span title="לא הוגדר זמן תקן למק״ט זה — ניתן להגדיר בלשונית ״הגדרת זמני תקן״" style={{fontSize:10.5,background:"var(--c-card)",color:"var(--c-dim)",padding:"2px 7px",borderRadius:10,fontWeight:700,whiteSpace:"nowrap"}}>ללא תקן</span>}
           </div>
           <span style={{fontSize:10.5,background:cvi.color+"22",color:cvi.color,padding:"2px 7px",borderRadius:10,fontWeight:700}}>שונות {row.cv.toFixed(0)}% · {cvi.label}</span>
         </div>
         <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(84px,1fr))",gap:6}}>
-          <div style={{background:"var(--c-card)",borderRadius:8,padding:"6px 9px"}}><div style={{fontSize:10,color:"var(--c-dim)"}}>זמן תקן</div><div style={{fontWeight:800,fontSize:13.5,color:"#60a5fa"}}>{fmtMinP(row.std)}</div></div>
-          <div style={{background:"var(--c-card)",borderRadius:8,padding:"6px 9px"}}><div style={{fontSize:10,color:"var(--c-dim)"}}>זמן מכירה</div><div style={{fontWeight:800,fontSize:13.5,color:row.sale>0?"#a78bfa":"var(--c-dim)"}}>{row.sale>0?fmtMinP(row.sale):"—"}</div></div>
-          <div style={{background:"var(--c-card)",borderRadius:8,padding:"6px 9px"}}><div style={{fontSize:10,color:"var(--c-dim)"}}>פער</div><div style={{fontWeight:800,fontSize:13.5,color:gap==null?"var(--c-dim)":gapColor(gap)}}>{gap==null?"—":fmtSigned(gap)}</div></div>
-          <div style={{background:"var(--c-card)",borderRadius:8,padding:"6px 9px"}}><div style={{fontSize:10,color:"var(--c-dim)"}}>ניצול</div><div style={{fontWeight:800,fontSize:13.5,color:row.eff==null?"var(--c-dim)":effColor(row.eff)}}>{row.eff==null?"—":row.eff.toFixed(0)+"%"}</div></div>
+          <div style={{background:"var(--c-card)",borderRadius:8,padding:"6px 9px"}}><div style={{fontSize:10,color:"var(--c-dim)"}}>זמן תקן</div><div style={{fontWeight:800,fontSize:13.5,color:row.stdRoute>0?TIME_CAT.std.text:"var(--c-dim)"}}>{row.stdRoute>0?fmtMinP(row.stdRoute):"—"}</div></div>
+          <div style={{background:"var(--c-card)",borderRadius:8,padding:"6px 9px"}}><div style={{fontSize:10,color:"var(--c-dim)"}}>זמן בפועל</div><div style={{fontWeight:800,fontSize:13.5,color:TIME_CAT.act.text}}>{fmtMinP(row.act)}</div></div>
+          <div style={{background:"var(--c-card)",borderRadius:8,padding:"6px 9px"}}><div style={{fontSize:10,color:"var(--c-dim)"}}>פער מול תקן</div><div style={{fontWeight:800,fontSize:13.5,color:row.stdGap==null?"var(--c-dim)":gapColor(row.stdGap)}}>{row.stdGap==null?"—":fmtSigned(row.stdGap)}</div></div>
+          <div style={{background:"var(--c-card)",borderRadius:8,padding:"6px 9px"}}><div style={{fontSize:10,color:"var(--c-dim)"}}>עמידה בתקן</div><div style={{fontWeight:800,fontSize:13.5,color:row.adh==null?"var(--c-dim)":effColor(row.adh)}}>{row.adh==null?"—":row.adh.toFixed(0)+"%"}</div></div>
+          <div style={{background:"var(--c-card)",borderRadius:8,padding:"6px 9px"}}><div style={{fontSize:10,color:"var(--c-dim)"}}>זמן מכירה</div><div style={{fontWeight:800,fontSize:13.5,color:row.sale>0?TIME_CAT.sale.text:"var(--c-dim)"}}>{row.sale>0?fmtMinP(row.sale):"—"}</div></div>
+          <div style={{background:"var(--c-card)",borderRadius:8,padding:"6px 9px"}}><div style={{fontSize:10,color:"var(--c-dim)"}}>ניצול מכירה</div><div style={{fontWeight:800,fontSize:13.5,color:row.eff==null?"var(--c-dim)":effColor(row.eff)}}>{row.eff==null?"—":row.eff.toFixed(0)+"%"}</div></div>
           <div style={{background:"var(--c-card)",borderRadius:8,padding:"6px 9px"}}><div style={{fontSize:10,color:"var(--c-dim)"}}>שלבים נמדדו</div><div style={{fontWeight:800,fontSize:13.5}}>{row.stages.length}{row.routeCount>row.stages.length?<span style={{fontSize:11,color:"var(--c-dim)",fontWeight:600}}>/{row.routeCount}</span>:null}</div></div>
         </div>
-        {(row.partial||row.gap==null||row.routeCount>row.stages.length)&&(
-          <div style={{fontSize:10,color:"#f59e0b",marginTop:6}}>
-            {row.gap==null?"⚠ לא הוגדר זמן מכירה לאף שלב שנמדד — לא ניתן לחשב פער"
-              :row.partial?`⚠ הפער חושב על ${row.pricedCount} מתוך ${row.stages.length} השלבים שנמדדו (לשאר לא הוגדר מחירון)`
-              :`⚠ ${row.routeCount-row.stages.length} שלבים במסלול טרם נמדדו — זמן התקן הכולל עדיין חלקי`}
+        {(row.partial||row.gap==null||row.stdPartial||row.routeCount>row.stages.length)&&(
+          <div style={{fontSize:10,color:"#f59e0b",marginTop:6,display:"flex",flexDirection:"column",gap:2}}>
+            {row.stdGap==null&&<span>⚠ לא הוגדר זמן תקן לאף שלב שנמדד — אין מול מה להשוות את הזמן בפועל</span>}
+            {row.stdPartial&&<span>⚠ הפער מול התקן חושב על {row.stdCount} מתוך {row.stages.length} השלבים שנמדדו (לשאר לא הוגדר תקן)</span>}
+            {row.gap==null?<span>⚠ לא הוגדר זמן מכירה לאף שלב שנמדד — לא ניתן לחשב פער מול המחירון</span>
+              :row.partial?<span>⚠ הפער מול המכירה חושב על {row.pricedCount} מתוך {row.stages.length} השלבים שנמדדו (לשאר לא הוגדר מחירון)</span>:null}
+            {row.routeCount>row.stages.length&&<span>⚠ {row.routeCount-row.stages.length} שלבים במסלול טרם נמדדו — הזמן בפועל הכולל עדיין חלקי</span>}
           </div>
         )}
       </div>
       {open&&(
         <div style={{borderTop:"1px solid var(--c-border)",padding:"10px 12px",background:"var(--c-card)"}}>
-          <div style={{fontSize:11.5,color:"var(--c-dim)",marginBottom:8}}>פירוט לפי שלב — הקו מציג את טווח הדגימות, המלבן ±סטיית תקן, הפס הכחול את זמן התקן והסגול את זמן המכירה</div>
+          <div style={{fontSize:11.5,color:"var(--c-dim)",marginBottom:8}}>פירוט לפי שלב — הקו מציג את טווח הדגימות, המלבן ±סטיית תקן, הפס הכחול את הזמן בפועל, הירוק את זמן התקן והסגול את זמן המכירה</div>
           <div style={{overflowX:"auto"}}>
-            <table style={{width:"100%",minWidth:560}}>
+            <table style={{width:"100%",minWidth:720}}>
               <thead><tr>
-                <th style={{textAlign:"right"}}>שלב</th><th>דגימות</th><th>זמן תקן</th><th>חציון</th><th>זמן מכירה</th><th>פער</th><th>שונות</th><th style={{minWidth:110}}>פיזור</th>
+                <th style={{textAlign:"right"}}>שלב</th><th>דגימות</th><th>זמן תקן</th><th>זמן בפועל</th><th>חציון</th><th>פער מול תקן</th><th>עמידה</th><th>זמן מכירה</th><th>פער מכירה</th><th>שונות</th><th style={{minWidth:110}}>פיזור</th>
               </tr></thead>
               <tbody>
                 {row.stages.map(st=>{
+                  const sg=st.std>0?st.mean-st.std:null;
+                  const adh=st.std>0&&st.mean>0?st.std/st.mean*100:null;
                   const g=st.sale>0?st.mean-st.sale:null;
                   const ci=cvInfo(st.cv),cf=confOf(st.n);
                   return(
                     <tr key={st.stageId}>
                       <td style={{textAlign:"right"}}><span style={{display:"inline-flex",alignItems:"center",gap:6}}><span style={{width:7,height:7,borderRadius:2,background:st.color}}/><span style={{fontWeight:600,fontSize:12}}>{st.name}</span></span></td>
                       <td><span style={{color:cf.color,fontWeight:700,fontSize:12}}>{st.n}</span></td>
-                      <td style={{color:"#60a5fa",fontWeight:700,fontSize:12}}>{fmtMinP(st.mean)}</td>
+                      <td style={{color:st.std>0?TIME_CAT.std.text:"var(--c-dim)",fontWeight:700,fontSize:12}}>{st.std>0?fmtMinP(st.std):"—"}</td>
+                      <td style={{color:TIME_CAT.act.text,fontWeight:700,fontSize:12}}>{fmtMinP(st.mean)}</td>
                       <td style={{color:"var(--c-muted)",fontSize:12}}>{fmtMinP(st.median)}</td>
-                      <td style={{color:st.sale>0?"#a78bfa":"var(--c-dim)",fontSize:12}}>{st.sale>0?fmtMinP(st.sale):"—"}</td>
+                      <td style={{color:sg==null?"var(--c-dim)":gapColor(sg),fontWeight:700,fontSize:12}}>{sg==null?"—":fmtSigned(sg)}</td>
+                      <td style={{color:adh==null?"var(--c-dim)":effColor(adh),fontWeight:700,fontSize:12}}>{adh==null?"—":adh.toFixed(0)+"%"}</td>
+                      <td style={{color:st.sale>0?TIME_CAT.sale.text:"var(--c-dim)",fontSize:12}}>{st.sale>0?fmtMinP(st.sale):"—"}</td>
                       <td style={{color:g==null?"var(--c-dim)":gapColor(g),fontWeight:700,fontSize:12}}>{g==null?"—":fmtSigned(g)}</td>
                       <td><span style={{fontSize:11,color:ci.color,fontWeight:700}}>±{fmtMinP(st.sd)} ({st.cv.toFixed(0)}%)</span></td>
-                      <td><SpreadBar lo={st.lo} hi={st.hi} mean={st.mean} sd={st.sd} sale={st.sale} scaleMin={row.scaleMin} scaleMax={row.scaleMax}/><div style={{fontSize:9.5,color:"var(--c-dim)",textAlign:"center"}}>{fmtMinP(st.lo)} – {fmtMinP(st.hi)}</div></td>
+                      <td><SpreadBar lo={st.lo} hi={st.hi} mean={st.mean} sd={st.sd} sale={st.sale} std={st.std} scaleMin={row.scaleMin} scaleMax={row.scaleMax}/><div style={{fontSize:9.5,color:"var(--c-dim)",textAlign:"center"}}>{fmtMinP(st.lo)} – {fmtMinP(st.hi)}</div></td>
                     </tr>
                   );
                 })}
@@ -3820,6 +3899,7 @@ function PnRow({row,open,onToggle}){
                   <div key={w.userId} style={{background:"var(--c-deep)",border:`1px solid ${effColor(w.index)}44`,borderRadius:8,padding:"5px 9px",fontSize:11.5}}>
                     <span style={{fontWeight:700}}>{w.userName}</span>
                     <span style={{color:effColor(w.index),fontWeight:800,marginRight:7}}>{w.index.toFixed(0)}%</span>
+                    {w.adh!=null&&<span title="עמידה בזמן התקן" style={{color:effColor(w.adh),fontWeight:700,marginRight:5}}>תקן {w.adh.toFixed(0)}%</span>}
                     <span style={{color:"var(--c-dim)",marginRight:5}}>{w.n} דג'</span>
                   </div>
                 ))}
@@ -3832,7 +3912,116 @@ function PnRow({row,open,onToggle}){
   );
 }
 
-function StandardTimes({orders,stages,stageBlocks,workLogs,users,projects}){
+// ── Standard-time definitions (הגדרת זמן תקן לכל מק"ט) ────────────────────
+// The standard is entered by stage, so it can be compared against the measured
+// time stage by stage. The measured average and the price-list minutes are shown
+// next to every field, and can be copied into it with one click.
+function StdDefRow({row,canEdit,onSave,onDelete}){
+  const [edit,setEdit]=useState(false);
+  const [vals,setVals]=useState({});
+  const [note,setNote]=useState("");
+  const ids=row.stageIds;
+  const open=()=>{
+    const v={};ids.forEach(id=>{v[id]=row.std[id]>0?String(row.std[id]):""});
+    if(!ids.length)v.__total=row.total>0?String(row.total):"";
+    setVals(v);setNote(row.note||"");setEdit(true);
+  };
+  const editTotal=ids.length?ids.reduce((s,id)=>s+(Number(vals[id])||0),0):(Number(vals.__total)||0);
+  const fill=src=>{
+    const v={};
+    ids.forEach(id=>{const m=src==="act"?(row.actual.get(id)?.mean||0):(row.sale.get(id)||0);v[id]=m>0?String(Math.round(m*10)/10):""});
+    setVals(v);
+  };
+  // The gap is only fair over the stages that actually carry a standard
+  const gap=row.stdIds.length&&row.actOnStd>0?row.actOnStd-row.stdOnStd:null;
+  const inp={width:74,padding:"4px 7px",fontSize:12,textAlign:"center"};
+  return(
+    <div style={{background:"var(--c-deep)",borderRadius:10,border:`1px solid ${edit?TIME_CAT.std.color+"66":"var(--c-border)"}`,padding:"11px 12px"}}>
+      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",gap:8,flexWrap:"wrap",marginBottom:8}}>
+        <div style={{display:"flex",alignItems:"center",gap:8,minWidth:0,flexWrap:"wrap"}}>
+          <span style={{fontWeight:800,fontSize:14,color:"#a78bfa"}}>{row.pn}</span>
+          {row.desc&&<span style={{fontSize:11.5,color:"var(--c-dim)",overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",maxWidth:230}}>{row.desc}</span>}
+          <span style={{fontSize:10.5,background:(row.total>0?TIME_CAT.std.color:"#8b95a8")+"22",color:row.total>0?TIME_CAT.std.color:"var(--c-dim)",padding:"2px 7px",borderRadius:10,fontWeight:700}}>{row.total>0?"תקן מוגדר":"ללא תקן"}</span>
+          {row.sampleN>0&&<span style={{fontSize:10.5,color:"var(--c-dim)"}}>{row.sampleN} דגימות</span>}
+        </div>
+        {canEdit&&(edit?(
+          <div style={{display:"flex",gap:6,flexWrap:"wrap"}}>
+            <Btn small color={TIME_CAT.std.color} onClick={()=>{onSave(row.pn,ids.length?vals:{},{note,total:ids.length?0:(Number(vals.__total)||0)});setEdit(false)}}>💾 שמור</Btn>
+            <Btn small onClick={()=>setEdit(false)}>ביטול</Btn>
+          </div>
+        ):(
+          <div style={{display:"flex",gap:6,flexWrap:"wrap"}}>
+            <Btn small color="#3b82f6" onClick={open}>{row.total>0?"✏️ ערוך תקן":"➕ הגדר תקן"}</Btn>
+            {row.total>0&&<IBtn title="מחיקת זמן התקן של המק״ט" onClick={()=>{if(confirm(`למחוק את זמן התקן של ${row.pn}?`))onDelete(row.pn)}}>🗑️</IBtn>}
+          </div>
+        ))}
+      </div>
+
+      <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(92px,1fr))",gap:6,marginBottom:edit?10:0}}>
+        <div style={{background:"var(--c-card)",borderRadius:8,padding:"6px 9px"}}><div style={{fontSize:10,color:"var(--c-dim)"}}>זמן תקן ליחידה</div><div style={{fontWeight:800,fontSize:13.5,color:(edit?editTotal:row.total)>0?TIME_CAT.std.text:"var(--c-dim)"}}>{(edit?editTotal:row.total)>0?fmtMinP(edit?editTotal:row.total):"—"}</div></div>
+        <div style={{background:"var(--c-card)",borderRadius:8,padding:"6px 9px"}}><div style={{fontSize:10,color:"var(--c-dim)"}}>זמן בפועל ממוצע</div><div style={{fontWeight:800,fontSize:13.5,color:row.actTotal>0?TIME_CAT.act.text:"var(--c-dim)"}}>{row.actTotal>0?fmtMinP(row.actTotal):"—"}</div></div>
+        <div style={{background:"var(--c-card)",borderRadius:8,padding:"6px 9px"}}><div style={{fontSize:10,color:"var(--c-dim)"}}>פער מול תקן</div><div style={{fontWeight:800,fontSize:13.5,color:gap==null?"var(--c-dim)":gapColor(gap)}}>{gap==null?"—":fmtSigned(gap)}</div></div>
+        <div style={{background:"var(--c-card)",borderRadius:8,padding:"6px 9px"}}><div style={{fontSize:10,color:"var(--c-dim)"}}>זמן מכירה</div><div style={{fontWeight:800,fontSize:13.5,color:row.saleTotal>0?TIME_CAT.sale.text:"var(--c-dim)"}}>{row.saleTotal>0?fmtMinP(row.saleTotal):"—"}</div></div>
+      </div>
+
+      {edit&&(<>
+        {ids.length>0?(<>
+          <div style={{display:"flex",gap:6,flexWrap:"wrap",marginBottom:8}}>
+            <Btn small color="#334155" onClick={()=>fill("act")}>⏱️ מלא לפי הזמן בפועל</Btn>
+            <Btn small color="#334155" onClick={()=>fill("sale")}>🏷️ מלא לפי המחירון</Btn>
+            <Btn small color="#334155" onClick={()=>setVals({})}>🧹 נקה</Btn>
+          </div>
+          <div style={{overflowX:"auto"}}>
+            <table style={{width:"100%",minWidth:520}}>
+              <thead><tr><th style={{textAlign:"right"}}>שלב</th><th>זמן תקן (דק')</th><th>זמן בפועל</th><th>דגימות</th><th>זמן מכירה</th></tr></thead>
+              <tbody>
+                {ids.map(id=>{
+                  const st=row.stageMap.get(id);
+                  const a=row.actual.get(id),sale=row.sale.get(id)||0;
+                  return(
+                    <tr key={id}>
+                      <td style={{textAlign:"right"}}><span style={{display:"inline-flex",alignItems:"center",gap:6}}><span style={{width:7,height:7,borderRadius:2,background:st?.color||"#64748b"}}/><span style={{fontWeight:600,fontSize:12}}>{st?.name||id}</span></span></td>
+                      <td><input type="number" min="0" step="0.5" value={vals[id]??""} placeholder="—" onChange={e=>setVals(p=>({...p,[id]:e.target.value}))} style={inp}/></td>
+                      <td style={{fontSize:12,color:a?TIME_CAT.act.text:"var(--c-dim)",cursor:a?"pointer":"default"}} title={a?"לחץ כדי להעתיק לזמן התקן":""}
+                          onClick={()=>a&&setVals(p=>({...p,[id]:String(Math.round(a.mean*10)/10)}))}>{a?fmtMinP(a.mean):"—"}</td>
+                      <td style={{fontSize:11.5,color:"var(--c-dim)"}}>{a?a.n:0}</td>
+                      <td style={{fontSize:12,color:sale>0?TIME_CAT.sale.text:"var(--c-dim)",cursor:sale>0?"pointer":"default"}} title={sale>0?"לחץ כדי להעתיק לזמן התקן":""}
+                          onClick={()=>sale>0&&setVals(p=>({...p,[id]:String(Math.round(sale*10)/10)}))}>{sale>0?fmtMinP(sale):"—"}</td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        </>):(
+          <div style={{display:"flex",alignItems:"flex-end",gap:8,flexWrap:"wrap"}}>
+            <div style={{fontSize:11.5,color:"var(--c-dim)",flex:1,minWidth:180}}>למק״ט זה אין שלבים מוגדרים — ניתן להזין זמן תקן כולל ליחידה</div>
+            <div style={{display:"flex",alignItems:"center",gap:5}}>
+              <input type="number" min="0" step="0.5" value={vals.__total??""} placeholder="דק'" onChange={e=>setVals(p=>({...p,__total:e.target.value}))} style={inp}/>
+              <span style={{fontSize:11,color:"var(--c-dim)"}}>דק' ליחידה</span>
+            </div>
+          </div>
+        )}
+        <div style={{marginTop:9}}>
+          <Field label="הערה (למשל: מקור התקן, תאריך מדידה)" value={note} onChange={setNote} placeholder="אופציונלי"/>
+        </div>
+      </>)}
+      {!edit&&row.stdPartial&&(
+        <div style={{fontSize:10,color:"#f59e0b",marginTop:6}}>⚠ הוגדר תקן ל-{row.stdIds.length} מתוך {row.stageIds.length} שלבי המק״ט — הפער חושב רק עליהם</div>
+      )}
+      {!edit&&row.total>0&&(row.note||row.updatedBy||row.updatedAt)&&(
+        <div style={{fontSize:10.5,color:"var(--c-dim)",marginTop:7,display:"flex",gap:10,flexWrap:"wrap"}}>
+          {row.note&&<span>📝 {row.note}</span>}
+          {row.updatedBy&&<span>עודכן ע"י {row.updatedBy}</span>}
+          {row.updatedAt&&<span>{String(row.updatedAt).slice(0,10)}</span>}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function StandardTimes({orders,stages,stageBlocks,workLogs,users,projects,pnStandards,onSavePnStd,onDeletePnStd}){
+  const {canEdit}=useAuth();
   const [view,setView]=useState("pn");
   const [pnF,setPnF]=useState("");
   const [stF,setStF]=useState("");
@@ -3840,8 +4029,11 @@ function StandardTimes({orders,stages,stageBlocks,workLogs,users,projects}){
   const [period,setPeriod]=useState("all");
   const [openPn,setOpenPn]=useState(null);
   const [minN,setMinN]=useState(1);
+  const [defSearch,setDefSearch]=useState("");
+  const [defFilter,setDefFilter]=useState("all");
 
-  const all=useMemo(()=>timeSamples(workLogs,orders,stages,stageBlocks),[workLogs,orders,stages,stageBlocks]);
+  const stdIdx=useMemo(()=>pnStdIndex(pnStandards),[pnStandards]);
+  const all=useMemo(()=>timeSamples(workLogs,orders,stages,stageBlocks,stdIdx),[workLogs,orders,stages,stageBlocks,stdIdx]);
   const pnOptions=useMemo(()=>[...new Set(all.map(s=>s.pn))].sort((a,b)=>a.localeCompare(b,"he")),[all]);
   const samples=useMemo(()=>{
     const from=period==="all"?null:new Date(Date.now()-Number(period)*864e5).toISOString().slice(0,10);
@@ -3873,72 +4065,94 @@ function StandardTimes({orders,stages,stageBlocks,workLogs,users,projects}){
       let g=byPn.get(s.pn);
       if(!g){g={pn:s.pn,stages:new Map(),workers:new Map()};byPn.set(s.pn,g)}
       let sg=g.stages.get(s.stageId);
-      if(!sg){sg={stageId:s.stageId,name:s.stageName,color:s.stageColor,order:s.stageOrder,vals:[],sale:0};g.stages.set(s.stageId,sg)}
+      if(!sg){sg={stageId:s.stageId,name:s.stageName,color:s.stageColor,order:s.stageOrder,vals:[],sale:0,std:0};g.stages.set(s.stageId,sg)}
       sg.vals.push(s.min);
       if(s.sale>0)sg.sale=s.sale;
+      if(s.std>0)sg.std=s.std;
       let wk=g.workers.get(s.userId);
       if(!wk){wk={userId:s.userId,userName:s.userName,items:[]};g.workers.set(s.userId,wk)}
       wk.items.push(s);
     });
     return[...byPn.values()].map(g=>{
       const sts=[...g.stages.values()].map(sg=>({...sg,...statsOf(sg.vals)})).sort((a,b)=>a.order-b.order);
-      const std=sts.reduce((s,x)=>s+x.mean,0);           // total measured time for one unit
+      const act=sts.reduce((s,x)=>s+x.mean,0);           // total measured time for one unit
       const n=sts.reduce((s,x)=>s+x.n,0);
       // Stage variances are combined (independent stages) into a route-level σ.
       const sd=Math.sqrt(sts.reduce((s,x)=>s+x.sd*x.sd,0));
-      // The gap is only fair on stages that were both measured *and* priced —
-      // otherwise a stage with no price would look like free work.
+      // A gap is only fair on stages that were both measured *and* have a reference —
+      // otherwise a stage with no price (or no standard) would look like free work.
       const priced=sts.filter(x=>x.sale>0);
-      const cmpStd=priced.reduce((s,x)=>s+x.mean,0),cmpSale=priced.reduce((s,x)=>s+x.sale,0);
+      const cmpAct=priced.reduce((s,x)=>s+x.mean,0),cmpSale=priced.reduce((s,x)=>s+x.sale,0);
+      const withStd=sts.filter(x=>x.std>0);
+      const sAct=withStd.reduce((s,x)=>s+x.mean,0),sStd=withStd.reduce((s,x)=>s+x.std,0);
       const route=routeInfo.get(g.pn)||{count:sts.length,sale:0};
+      const routeIds=route.stageIds?[...route.stageIds]:sts.map(x=>x.stageId);
+      const stdRoute=stdTotalFor(stdIdx,g.pn,routeIds);
       const meanByStage=new Map(sts.map(x=>[x.stageId,x.mean]));
       const workers=[...g.workers.values()].map(w=>{
-        // Index vs. the מק"ט's own standard: 100% = exactly the group average.
+        // Index vs. the מק"ט's own measured average: 100% = exactly the group average.
         const exp=w.items.reduce((s,it)=>s+(meanByStage.get(it.stageId)||0),0);
-        const act=w.items.reduce((s,it)=>s+it.min,0);
-        return{userId:w.userId,userName:w.userName,n:w.items.length,index:act>0?exp/act*100:0};
+        const actw=w.items.reduce((s,it)=>s+it.min,0);
+        const std=w.items.filter(it=>it.std>0);
+        const wStd=std.reduce((s,it)=>s+it.std,0),wAct=std.reduce((s,it)=>s+it.min,0);
+        return{userId:w.userId,userName:w.userName,n:w.items.length,index:actw>0?exp/actw*100:0,
+          adh:wAct>0?wStd/wAct*100:null};
       }).sort((a,b)=>b.index-a.index);
-      const allVals=sts.flatMap(x=>x.vals).concat(priced.map(x=>x.sale));
+      const allVals=sts.flatMap(x=>x.vals).concat(priced.map(x=>x.sale)).concat(withStd.map(x=>x.std));
       return{
-        pn:g.pn,stages:sts,workers,std,n,sd,
+        pn:g.pn,stages:sts,workers,act,n,sd,
         sale:route.sale||cmpSale,                        // price-list time for the whole route
-        cmpStd,cmpSale,
-        gap:priced.length?cmpStd-cmpSale:null,
-        eff:priced.length&&cmpStd>0?cmpSale/cmpStd*100:null,
+        stdRoute,                                        // pre-defined standard for the whole route
+        cmpAct,cmpSale,
+        gap:priced.length?cmpAct-cmpSale:null,
+        eff:priced.length&&cmpAct>0?cmpSale/cmpAct*100:null,
+        stdGap:withStd.length?sAct-sStd:null,
+        adh:withStd.length&&sAct>0?sStd/sAct*100:null,
+        stdCount:withStd.length,
+        stdPartial:withStd.length>0&&withStd.length<sts.length,
         partial:priced.length>0&&priced.length<sts.length,
         pricedCount:priced.length,
-        cv:std>0?sd/std*100:0,
+        cv:act>0?sd/act*100:0,
         minN:sts.length?Math.min(...sts.map(x=>x.n)):0,
         routeCount:Math.max(route.count||0,sts.length),
         scaleMin:0,scaleMax:Math.max(...allVals,1)
       };
     }).filter(r=>r.n>=minN).sort((a,b)=>{
-      return (b.gap==null?-Infinity:b.gap)-(a.gap==null?-Infinity:a.gap); // biggest overrun first — that's where margin leaks
+      // Biggest overrun first — against the standard when there is one, otherwise the price
+      const av=a.stdGap!=null?a.stdGap:(a.gap!=null?a.gap:-Infinity);
+      const bv=b.stdGap!=null?b.stdGap:(b.gap!=null?b.gap:-Infinity);
+      return bv-av;
     });
-  },[samples,routeInfo,minN]);
+  },[samples,routeInfo,minN,stdIdx]);
 
   // Same statistics rolled up per stage across every מק"ט in the filter.
   const stageRows=useMemo(()=>{
     const by=new Map();
     samples.forEach(s=>{
       let g=by.get(s.stageId);
-      if(!g){g={stageId:s.stageId,name:s.stageName,color:s.stageColor,order:s.stageOrder,vals:[],sales:[],pns:new Set()};by.set(s.stageId,g)}
+      if(!g){g={stageId:s.stageId,name:s.stageName,color:s.stageColor,order:s.stageOrder,vals:[],sales:[],stds:[],pns:new Set()};by.set(s.stageId,g)}
       g.vals.push(s.min);g.pns.add(s.pn);
       if(s.sale>0)g.sales.push(s.sale);
+      if(s.std>0)g.stds.push(s.std);
     });
     return[...by.values()].map(g=>{
       const k=statsOf(g.vals);
-      const sale=g.sales.length?g.sales.reduce((s,v)=>s+v,0)/g.sales.length:0;
-      return{...g,...k,sale,gap:sale>0?k.mean-sale:null,eff:sale>0&&k.mean>0?sale/k.mean*100:null,pnCount:g.pns.size};
+      const avg=a=>a.length?a.reduce((s,v)=>s+v,0)/a.length:0;
+      const sale=avg(g.sales),std=avg(g.stds);
+      return{...g,...k,sale,std,
+        gap:sale>0?k.mean-sale:null,eff:sale>0&&k.mean>0?sale/k.mean*100:null,
+        stdGap:std>0?k.mean-std:null,adh:std>0&&k.mean>0?std/k.mean*100:null,
+        stdN:g.stds.length,pnCount:g.pns.size};
     }).sort((a,b)=>a.order-b.order);
   },[samples]);
 
-  // Worker performance. Two independent yardsticks so a worker is never judged
-  // by the price list alone:
-  //   ניצול — allocated time ÷ actual time (needs a price list)
-  //   מדד   — the same worker against the measured standard of the exact
-  //           מק"ט+שלב combinations they worked on (always available, and fair,
-  //           because it compares each worker only to the identical jobs)
+  // Worker performance. Three independent yardsticks so a worker is never judged
+  // by one number alone:
+  //   עמידה בתקן — the pre-defined standard ÷ actual time (needs a standard)
+  //   ניצול      — allocated (sale) time ÷ actual time (needs a price list)
+  //   מדד        — the same worker against the *measured* average of the exact
+  //                מק"ט+שלב combinations they worked on (always available, and fair,
+  //                because it compares each worker only to the identical jobs)
   const workerRows=useMemo(()=>{
     const key=s=>s.pn+"|"+s.stageId;
     const groupMean=new Map();
@@ -3948,9 +4162,10 @@ function StandardTimes({orders,stages,stageBlocks,workLogs,users,projects}){
     const by=new Map();
     samples.forEach(s=>{
       let g=by.get(s.userId);
-      if(!g){g={userId:s.userId,userName:s.userName,vals:[],act:0,sale:0,saleN:0,exp:0,expAct:0,stages:new Set(),pns:new Set(),ratios:[]};by.set(s.userId,g)}
+      if(!g){g={userId:s.userId,userName:s.userName,vals:[],act:0,sale:0,saleN:0,std:0,stdN:0,stdCount:0,exp:0,expAct:0,stages:new Set(),pns:new Set(),ratios:[]};by.set(s.userId,g)}
       g.vals.push(s.min);g.act+=s.min;g.stages.add(s.stageId);g.pns.add(s.pn);
       if(s.sale>0){g.sale+=s.sale;g.saleN+=s.min}
+      if(s.std>0){g.std+=s.std;g.stdN+=s.min;g.stdCount++}
       const gm=groupMean.get(key(s));
       if(gm>0){g.exp+=gm;g.expAct+=s.min;g.ratios.push(gm/s.min*100)}
     });
@@ -3961,6 +4176,9 @@ function StandardTimes({orders,stages,stageBlocks,workLogs,users,projects}){
         userId:g.userId,userName:g.userName,n:g.vals.length,
         avgMin:g.act/g.vals.length,totalMin:g.act,
         eff:g.saleN>0?g.sale/g.saleN*100:null,
+        adh:g.stdN>0?g.std/g.stdN*100:null,
+        stdGap:g.stdCount>0?g.stdN-g.std:null,
+        stdSamples:g.stdCount,
         index:g.expAct>0?g.exp/g.expAct*100:0,
         consistency:st.cv,                    // spread of the worker's own results
         stageCount:g.stages.size,pnCount:g.pns.size,
@@ -3969,109 +4187,179 @@ function StandardTimes({orders,stages,stageBlocks,workLogs,users,projects}){
     }).sort((a,b)=>b.index-a.index);
   },[samples,users]);
 
-  // Headline numbers: plain averages over the מק"טים in view. The gap and the
-  // utilisation are averaged only over the מק"טים that actually carry a price.
+  // Headline numbers: plain averages over the מק"טים in view. Each comparison is
+  // averaged only over the מק"טים that actually carry the matching reference.
   const tot=useMemo(()=>{
     const withPrice=pnRows.filter(r=>r.gap!=null);
-    const cmpStd=withPrice.reduce((s,r)=>s+r.cmpStd,0),cmpSale=withPrice.reduce((s,r)=>s+r.cmpSale,0);
+    const cmpAct=withPrice.reduce((s,r)=>s+r.cmpAct,0),cmpSale=withPrice.reduce((s,r)=>s+r.cmpSale,0);
     const priced=pnRows.filter(r=>r.sale>0);
+    const withStd=pnRows.filter(r=>r.stdGap!=null);
+    const sGapSum=withStd.reduce((s,r)=>s+r.stdGap,0);
+    const stdDefined=pnRows.filter(r=>r.stdRoute>0);
+    const sAct=withStd.reduce((s,r)=>s+r.cmpAct,0);
     return{
       n:samples.length,pnCount:pnRows.length,
-      std:pnRows.length?pnRows.reduce((s,r)=>s+r.std,0)/pnRows.length:0,
+      act:pnRows.length?pnRows.reduce((s,r)=>s+r.act,0)/pnRows.length:0,
+      std:stdDefined.length?stdDefined.reduce((s,r)=>s+r.stdRoute,0)/stdDefined.length:0,
       sale:priced.length?priced.reduce((s,r)=>s+r.sale,0)/priced.length:0,
-      gap:withPrice.length?(cmpStd-cmpSale)/withPrice.length:null,
-      eff:cmpStd>0?cmpSale/cmpStd*100:null,
+      gap:withPrice.length?(cmpAct-cmpSale)/withPrice.length:null,
+      eff:cmpAct>0?cmpSale/cmpAct*100:null,
+      stdGap:withStd.length?sGapSum/withStd.length:null,
+      adh:withStd.length?(()=>{const a=withStd.reduce((s,r)=>s+(r.adh!=null?r.adh:0),0);return a/withStd.length})():null,
+      stdCount:stdDefined.length,noStd:pnRows.length-stdDefined.length,
       noSale:pnRows.length-priced.length
     };
   },[pnRows,samples]);
 
-  const sel={padding:"6px 9px",fontSize:12,width:"auto",minWidth:96};
-  const totGap=tot.gap;
+  // Every מק"ט the company knows about — from the orders, from the measurements
+  // and from the standards themselves — with its route, its measured averages and
+  // its price-list minutes, ready for the editor.
+  const defRows=useMemo(()=>{
+    const sMap=new Map((stages||[]).map(s=>[s.id,s]));
+    const ordOf=id=>Number(sMap.get(id)?.order||99);
+    const byPn=new Map();
+    const touch=pn=>{let e=byPn.get(pn);if(!e){e={pn,desc:"",ids:new Set(),actual:new Map(),sale:new Map(),sampleN:0};byPn.set(pn,e)}return e};
+    (orders||[]).forEach(o=>{
+      const pn=(o.pn||"").trim()||o.woNumber||"—";
+      const e=touch(pn);
+      if(!e.desc&&o.description)e.desc=o.description;
+      (o.stageIds||[]).forEach(sid=>{
+        e.ids.add(sid);
+        const m=stageMinutesFor(o,sMap.get(sid),stageBlocks);
+        if(m>0&&!(e.sale.get(sid)>0))e.sale.set(sid,m);
+      });
+    });
+    const acc=new Map();
+    all.forEach(s=>{
+      const e=touch(s.pn);e.ids.add(s.stageId);e.sampleN++;
+      let am=acc.get(s.pn);if(!am){am=new Map();acc.set(s.pn,am)}
+      const a=am.get(s.stageId)||{sum:0,n:0};a.sum+=s.min;a.n++;am.set(s.stageId,a);
+      if(s.sale>0&&!(e.sale.get(s.stageId)>0))e.sale.set(s.stageId,s.sale);
+    });
+    acc.forEach((am,pn)=>{const e=byPn.get(pn);if(e)am.forEach((a,sid)=>e.actual.set(sid,{mean:a.sum/a.n,n:a.n}))});
+    (pnStandards||[]).forEach(r=>{
+      const k=pnKey(r.pn);if(!k)return;
+      const e=touch(k);
+      Object.entries(r.stageMin||{}).forEach(([sid,v])=>{if(Number(v)>0)e.ids.add(sid)});
+    });
+    return[...byPn.values()].map(e=>{
+      const rec=stdIdx.get(e.pn);
+      const ids=[...e.ids].sort((a,b)=>ordOf(a)-ordOf(b));
+      const stdIds=ids.filter(id=>stdStageMin(rec,id)>0);
+      return{
+        pn:e.pn,desc:e.desc,stageIds:ids,stageMap:sMap,actual:e.actual,sale:e.sale,sampleN:e.sampleN,
+        std:rec?.stageMin||{},note:rec?.note||"",updatedBy:rec?.updatedBy||"",updatedAt:rec?.updatedAt||"",
+        total:stdTotalMin(rec,ids),
+        stdIds,stdPartial:stdIds.length>0&&stdIds.length<ids.length,
+        stdOnStd:stdIds.reduce((s,id)=>s+stdStageMin(rec,id),0),
+        actOnStd:stdIds.reduce((s,id)=>s+(e.actual.get(id)?.mean||0),0),
+        actTotal:ids.reduce((s,id)=>s+(e.actual.get(id)?.mean||0),0),
+        saleTotal:ids.reduce((s,id)=>s+(e.sale.get(id)||0),0)
+      };
+    }).sort((a,b)=>a.pn.localeCompare(b.pn,"he"));
+  },[orders,stages,stageBlocks,all,pnStandards,stdIdx]);
 
-  if(!all.length)return(
+  const defShown=useMemo(()=>{
+    const q=defSearch.trim().toLowerCase();
+    return defRows.filter(r=>
+      (!q||r.pn.toLowerCase().includes(q)||(r.desc||"").toLowerCase().includes(q))&&
+      (defFilter==="all"||(defFilter==="with"?r.total>0:r.total<=0))
+    );
+  },[defRows,defSearch,defFilter]);
+  const defStats=useMemo(()=>({total:defRows.length,with:defRows.filter(r=>r.total>0).length}),[defRows]);
+
+  const sel={padding:"6px 9px",fontSize:12,width:"auto",minWidth:96};
+
+  if(!all.length&&!defRows.length)return(
     <div className="fade-in">
-      <h2 style={{margin:"0 0 14px",fontSize:18}}>⏱️ זמני תקן וניתוח ביצועים</h2>
-      <Card><EmptyState icon="⏱️" title="אין עדיין דגימות זמן" subtitle='זמן התקן נבנה מרישומי עבודה שהסתיימו. ברגע שעובדים ידווחו סיום עבודה על שלבים, הנתונים יופיעו כאן.'/></Card>
+      <h2 style={{margin:"0 0 14px",fontSize:18}}>⏱️ זמן תקן מול זמן בפועל</h2>
+      <Card><EmptyState icon="⏱️" title="אין עדיין נתוני זמן" subtitle='הזמן בפועל נבנה מרישומי עבודה שהסתיימו, וזמן התקן מוגדר לכל מק״ט. ברגע שייווצרו פק"עות ויתחילו דיווחים, הנתונים יופיעו כאן.'/></Card>
     </div>
   );
 
   return(
     <div className="fade-in">
       <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:6,flexWrap:"wrap"}}>
-        <h2 style={{margin:0,fontSize:18}}>⏱️ זמני תקן וניתוח ביצועים</h2>
-        <ChartInfo title="זמני תקן וניתוח ביצועים"
-          shows="השוואה בין זמן התקן — הזמן שנמדד בפועל מדיווחי העובדים — לבין זמן המכירה שהוקצה לכל שלב במחירון, לכל מק״ט, לכל שלב ולכל עובד."
-          data={["זמן תקן — ממוצע הזמן ליחידה אחת, מחושב מכל רישומי העבודה שהסתיימו.","מספר הדגימות שעליהן מבוסס כל זמן תקן — ככל שיש יותר דגימות, הזמן אמין יותר.","זמן מכירה — הדקות שהוקצו לשלב בבלוק/מחירון.","הפער, סטיית התקן והשונות בין העובדים."]}
-          how={["כל רישום עבודה שהסתיים הופך לדגימה אחת ליחידה. ברישום קבוצתי (Bulk) הזמן מחולק במספר היחידות בקבוצה.","הדגימות מקובצות לפי מק״ט ושלב; מחושבים ממוצע, חציון, סטיית תקן ומקדם שונות.","זמן התקן הכולל למק״ט הוא סכום זמני התקן של השלבים שנמדדו."]}
-          tip="פער חיובי גדול = השלב לוקח יותר זמן ממה שנמכר — שם נשחק הרווח. שונות גבוהה = אותה עבודה מתבצעת בזמנים שונים מאוד, סימן לפער בין עובדים חזקים לחלשים."/>
+        <h2 style={{margin:0,fontSize:18}}>⏱️ זמן תקן מול זמן בפועל</h2>
+        <ChartInfo title="זמן תקן, זמן בפועל וזמן מכירה"
+          shows="השוואה בין שלושה זמנים לכל מק״ט, לכל שלב ולכל עובד: זמן התקן שהוגדר מראש, הזמן בפועל שנמדד מדיווחי העובדים, וזמן המכירה שהוקצה במחירון."
+          data={["זמן תקן — הזמן שהוגדר מראש למק״ט, שלב אחר שלב. ניתן לעריכה בלשונית ״הגדרת זמני תקן״.","זמן בפועל — ממוצע הזמן ליחידה אחת, מחושב מכל רישומי העבודה שהסתיימו.","מספר הדגימות שעליהן מבוסס כל זמן בפועל — ככל שיש יותר דגימות, הוא אמין יותר.","זמן מכירה — הדקות שהוקצו לשלב בבלוק/מחירון.","הפערים בין שלושת הזמנים, סטיית התקן והשונות בין העובדים."]}
+          how={["כל רישום עבודה שהסתיים הופך לדגימה אחת ליחידה. ברישום קבוצתי (Bulk) הזמן מחולק במספר היחידות בקבוצה.","הדגימות מקובצות לפי מק״ט ושלב; מחושבים ממוצע, חציון, סטיית תקן ומקדם שונות — אלה הזמן בפועל.","זמן התקן נלקח כמות שהוא מההגדרה של המק״ט, לפי שלב.","פער מול תקן = זמן בפועל פחות זמן תקן, ומחושב רק על שלבים שיש להם תקן מוגדר.","עמידה בתקן = זמן תקן חלקי זמן בפועל: 100% = בדיוק בתקן."]}
+          tip="פער חיובי מול התקן = השלב לוקח יותר ממה שתוכנן. פער חיובי מול המכירה = שם נשחק הרווח. אם הזמן בפועל יציב אך רחוק מהתקן — כנראה שהתקן עצמו צריך עדכון."/>
       </div>
-      <div style={{fontSize:12,color:"var(--c-dim)",marginBottom:12}}>זמן התקן נבנה מדיווחי העובדים בפועל — ככל שנצברות יותר דגימות, כך הוא מדויק יותר</div>
+      <div style={{fontSize:12,color:"var(--c-dim)",marginBottom:12}}>זמן התקן מוגדר מראש לכל מק״ט · הזמן בפועל נבנה מדיווחי העובדים · זמן המכירה מגיע מהמחירון</div>
 
       {/* Filters */}
-      <Card style={{marginBottom:12,padding:"10px 12px"}}>
-        <div style={{display:"flex",gap:8,flexWrap:"wrap",alignItems:"center"}}>
-          <span style={{fontSize:11.5,color:"var(--c-dim)",fontWeight:600}}>סינון:</span>
-          <select value={pnF} onChange={e=>{setPnF(e.target.value);setOpenPn(null)}} style={sel}>
-            <option value="">כל המק״טים</option>
-            {pnOptions.map(p=><option key={p} value={p}>{p}</option>)}
-          </select>
-          <select value={stF} onChange={e=>setStF(e.target.value)} style={sel}>
-            <option value="">כל השלבים</option>
-            {[...stages].sort((a,b)=>a.order-b.order).map(s=><option key={s.id} value={s.id}>{s.name}</option>)}
-          </select>
-          {(projects||[]).length>0&&(
-            <select value={projF} onChange={e=>setProjF(e.target.value)} style={sel}>
-              <option value="">כל הפרויקטים</option>
-              {projects.map(p=><option key={p.id} value={p.id}>{p.name}</option>)}
+      {view!=="def"&&(
+        <Card style={{marginBottom:12,padding:"10px 12px"}}>
+          <div style={{display:"flex",gap:8,flexWrap:"wrap",alignItems:"center"}}>
+            <span style={{fontSize:11.5,color:"var(--c-dim)",fontWeight:600}}>סינון:</span>
+            <select value={pnF} onChange={e=>{setPnF(e.target.value);setOpenPn(null)}} style={sel}>
+              <option value="">כל המק״טים</option>
+              {pnOptions.map(p=><option key={p} value={p}>{p}</option>)}
             </select>
-          )}
-          <select value={period} onChange={e=>setPeriod(e.target.value)} style={sel}>
-            <option value="all">כל הזמן</option>
-            <option value="30">30 יום אחרונים</option>
-            <option value="90">90 יום אחרונים</option>
-            <option value="180">180 יום אחרונים</option>
-            <option value="365">שנה אחרונה</option>
-          </select>
-          <select value={minN} onChange={e=>setMinN(Number(e.target.value))} style={sel}>
-            <option value={1}>כל הדגימות</option>
-            <option value={4}>4+ דגימות</option>
-            <option value={10}>10+ דגימות</option>
-            <option value={30}>30+ דגימות</option>
-          </select>
-          {(pnF||stF||projF||period!=="all"||minN>1)&&<Btn small onClick={()=>{setPnF("");setStF("");setProjF("");setPeriod("all");setMinN(1);setOpenPn(null)}}>נקה</Btn>}
-        </div>
-      </Card>
+            <select value={stF} onChange={e=>setStF(e.target.value)} style={sel}>
+              <option value="">כל השלבים</option>
+              {[...stages].sort((a,b)=>a.order-b.order).map(s=><option key={s.id} value={s.id}>{s.name}</option>)}
+            </select>
+            {(projects||[]).length>0&&(
+              <select value={projF} onChange={e=>setProjF(e.target.value)} style={sel}>
+                <option value="">כל הפרויקטים</option>
+                {projects.map(p=><option key={p.id} value={p.id}>{p.name}</option>)}
+              </select>
+            )}
+            <select value={period} onChange={e=>setPeriod(e.target.value)} style={sel}>
+              <option value="all">כל הזמן</option>
+              <option value="30">30 יום אחרונים</option>
+              <option value="90">90 יום אחרונים</option>
+              <option value="180">180 יום אחרונים</option>
+              <option value="365">שנה אחרונה</option>
+            </select>
+            <select value={minN} onChange={e=>setMinN(Number(e.target.value))} style={sel}>
+              <option value={1}>כל הדגימות</option>
+              <option value={4}>4+ דגימות</option>
+              <option value={10}>10+ דגימות</option>
+              <option value={30}>30+ דגימות</option>
+            </select>
+            {(pnF||stF||projF||period!=="all"||minN>1)&&<Btn small onClick={()=>{setPnF("");setStF("");setProjF("");setPeriod("all");setMinN(1);setOpenPn(null)}}>נקה</Btn>}
+          </div>
+        </Card>
+      )}
 
       {/* KPIs */}
-      <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(150px,1fr))",gap:9,marginBottom:14}}>
-        <KpiBox i="⏱️" c="#3b82f6" label="זמן תקן ממוצע ליחידה" v={fmtMinP(tot.std)} sub={`ממוצע על פני ${tot.pnCount} מק״טים`}/>
-        <KpiBox i="🏷️" c="#a78bfa" label="זמן מכירה ממוצע ליחידה" v={tot.sale>0?fmtMinP(tot.sale):"לא הוגדר"} sub={tot.noSale>0?`${tot.noSale} מק״טים ללא מחירון`:"מוגדר לכל המק״טים"}/>
-        <KpiBox i="⚖️" c={totGap==null?"#8b95a8":gapColor(totGap)} label="פער תקן מול מכירה" v={totGap==null?"—":fmtSigned(totGap)} sub={totGap==null?"נדרש מחירון":totGap>0?"העבודה ארוכה מהנמכר":"העבודה קצרה מהנמכר"}/>
-        <KpiBox i="🎯" c={tot.eff==null?"#8b95a8":effColor(tot.eff)} label="ניצול זמן מכירה" v={tot.eff==null?"—":tot.eff.toFixed(0)+"%"} sub="100% = בדיוק לפי המחירון"/>
-        <KpiBox i="📐" c="#06b6d4" label="דגימות שנמדדו" v={tot.n.toLocaleString()} sub={`${workerRows.length} עובדים · ${stageRows.length} שלבים`}/>
-      </div>
+      {view!=="def"&&(
+        <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(150px,1fr))",gap:9,marginBottom:14}}>
+          <KpiBox i="🎯" c={TIME_CAT.std.color} label="זמן תקן ממוצע ליחידה" v={tot.std>0?fmtMinP(tot.std):"לא הוגדר"} sub={tot.noStd>0?`${tot.noStd} מק״טים ללא תקן`:`מוגדר לכל ${tot.stdCount} המק״טים`}/>
+          <KpiBox i="⏱️" c={TIME_CAT.act.color} label="זמן בפועל ממוצע ליחידה" v={fmtMinP(tot.act)} sub={`ממוצע על פני ${tot.pnCount} מק״טים`}/>
+          <KpiBox i="⚖️" c={tot.stdGap==null?"#8b95a8":gapColor(tot.stdGap)} label="פער בפועל מול תקן" v={tot.stdGap==null?"—":fmtSigned(tot.stdGap)} sub={tot.stdGap==null?"נדרש זמן תקן":tot.stdGap>0?"העבודה ארוכה מהתקן":"העבודה קצרה מהתקן"}/>
+          <KpiBox i="✅" c={tot.adh==null?"#8b95a8":effColor(tot.adh)} label="עמידה בזמן התקן" v={tot.adh==null?"—":tot.adh.toFixed(0)+"%"} sub="100% = בדיוק לפי התקן"/>
+          <KpiBox i="🏷️" c={TIME_CAT.sale.color} label="זמן מכירה ממוצע ליחידה" v={tot.sale>0?fmtMinP(tot.sale):"לא הוגדר"} sub={tot.noSale>0?`${tot.noSale} מק״טים ללא מחירון`:"מוגדר לכל המק״טים"}/>
+          <KpiBox i="💰" c={tot.eff==null?"#8b95a8":effColor(tot.eff)} label="ניצול זמן מכירה" v={tot.eff==null?"—":tot.eff.toFixed(0)+"%"} sub="100% = בדיוק לפי המחירון"/>
+          <KpiBox i="📐" c="#06b6d4" label="דגימות שנמדדו" v={tot.n.toLocaleString()} sub={`${workerRows.length} עובדים · ${stageRows.length} שלבים`}/>
+        </div>
+      )}
 
       <div style={{marginBottom:14}}>
-        <SegBtn value={view} onChange={setView} options={[["pn",'לפי מק״ט'],["stage","לפי שלב"],["worker","עובדים"]]}/>
+        <SegBtn value={view} onChange={setView} options={[["pn",'לפי מק״ט'],["stage","לפי שלב"],["worker","עובדים"],["def","⚙️ הגדרת זמני תקן"]]}/>
       </div>
 
       {view==="pn"&&(<>
         <Card style={{marginBottom:14}}>
           <div style={{display:"flex",alignItems:"center",gap:7,marginBottom:4}}>
-            <div style={{fontWeight:700,fontSize:14}}>📦 זמן תקן מול זמן מכירה — לכל מק״ט</div>
-            <ChartInfo title="זמן תקן מול זמן מכירה לכל מק״ט"
-              shows="שני פסים לכל מק״ט: הפס הכחול הוא זמן התקן הכולל שנמדד בפועל, הסגול הוא זמן המכירה שהוקצה במחירון. ההפרש ביניהם מוצג כמספר בצד."
+            <div style={{fontWeight:700,fontSize:14}}>📦 זמן תקן · בפועל · מכירה — לכל מק״ט</div>
+            <ChartInfo title="זמן תקן מול זמן בפועל וזמן מכירה לכל מק״ט"
+              shows="שלושה פסים לכל מק״ט: הירוק הוא זמן התקן שהוגדר מראש, הכחול הוא הזמן בפועל שנמדד, והסגול הוא זמן המכירה שבמחירון. ההפרשים מוצגים כמספרים בצד."
               data="הזמן הכולל ליחידה אחת, כסכום כל השלבים שנמדדו למק״ט, לצד מספר הדגימות שעליהן הוא מבוסס."
-              how="כל רישום עבודה שהסתיים הופך לדגימה. הדגימות מקובצות לפי מק״ט ושלב, מחושב ממוצע לכל שלב, והממוצעים מסוכמים לזמן כולל למק״ט."
-              tip="מק״ט שהפס הכחול שלו ארוך מהסגול נמכר בזול מדי או מיוצר לא ביעילות — מועמד ראשון לתמחור מחדש או לשיפור תהליך."/>
+              how="כל רישום עבודה שהסתיים הופך לדגימה. הדגימות מקובצות לפי מק״ט ושלב, מחושב ממוצע לכל שלב, והממוצעים מסוכמים לזמן בפועל כולל. זמן התקן הוא סכום התקנים שהוגדרו לשלבי המק״ט."
+              tip="פס כחול ארוך מהירוק = הייצור חורג מהתקן. פס ירוק ארוך מהסגול = התקן עצמו ארוך מהזמן שנמכר — סימן לתמחור חסר."/>
           </div>
-          <div style={{fontSize:11.5,color:"var(--c-dim)",marginBottom:12}}>ממוין לפי גודל הפער — המק״טים שחורגים הכי הרבה בראש</div>
-          <StdVsSaleChart rows={pnRows.slice(0,12).map(r=>({label:r.pn,color:"#a78bfa",std:r.std,sale:r.sale,gap:r.gap,partial:r.partial,n:r.n}))} onRowClick={r=>setOpenPn(p=>p===r.label?null:r.label)}/>
+          <div style={{fontSize:11.5,color:"var(--c-dim)",marginBottom:12}}>ממוין לפי גודל החריגה מהתקן — המק״טים שחורגים הכי הרבה בראש</div>
+          <TimeBars rows={pnRows.slice(0,12).map(r=>({label:r.pn,color:"#a78bfa",std:r.stdRoute,act:r.act,sale:r.sale,stdGap:r.stdGap,saleGap:r.gap,partial:r.partial,n:r.n}))} onRowClick={r=>setOpenPn(p=>p===r.label?null:r.label)}/>
         </Card>
 
         <Card>
           <div style={{fontWeight:700,fontSize:14,marginBottom:4}}>📋 טבלת מק״טים — לחיצה פותחת פירוט לפי שלב</div>
-          <div style={{fontSize:11.5,color:"var(--c-dim)",marginBottom:12}}>כל שורה מציגה את זמן התקן הכולל, זמן המכירה, הפער, רמת הביטחון לפי מספר הדגימות והשונות בין העובדים</div>
+          <div style={{fontSize:11.5,color:"var(--c-dim)",marginBottom:12}}>כל שורה מציגה את זמן התקן, הזמן בפועל, זמן המכירה, הפערים ביניהם, רמת הביטחון לפי מספר הדגימות והשונות בין העובדים</div>
           {pnRows.length===0?<EmptyState icon="🔍" title="אין תוצאות" subtitle="נסה לשנות את הסינון או להוריד את סף הדגימות"/>:(
             <div style={{display:"flex",flexDirection:"column",gap:8}}>
               {pnRows.map(r=><PnRow key={r.pn} row={r} open={openPn===r.pn} onToggle={()=>setOpenPn(p=>p===r.pn?null:r.pn)}/>)}
@@ -4083,21 +4371,21 @@ function StandardTimes({orders,stages,stageBlocks,workLogs,users,projects}){
       {view==="stage"&&(<>
         <Card style={{marginBottom:14}}>
           <div style={{display:"flex",alignItems:"center",gap:7,marginBottom:4}}>
-            <div style={{fontWeight:700,fontSize:14}}>🔧 זמן תקן מול זמן מכירה — לכל שלב</div>
-            <ChartInfo title="זמן תקן מול זמן מכירה לכל שלב"
-              shows="שני פסים לכל שלב ייצור: זמן התקן שנמדד בפועל מול זמן המכירה שהוקצה לשלב במחירון."
+            <div style={{fontWeight:700,fontSize:14}}>🔧 זמן תקן · בפועל · מכירה — לכל שלב</div>
+            <ChartInfo title="זמן תקן מול זמן בפועל וזמן מכירה לכל שלב"
+              shows="שלושה פסים לכל שלב ייצור: זמן התקן שהוגדר, הזמן בפועל שנמדד וזמן המכירה שבמחירון."
               data="הזמן הממוצע לביצוע השלב על יחידה אחת, על פני כל המק״טים שבסינון הנוכחי."
-              how="כל הדגימות של אותו שלב מכל המק״טים מקובצות יחד; זמן המכירה הוא ממוצע ההקצאות של אותו שלב."
-              tip="שלב עם פער חיובי עקבי הוא צוואר בקבוק תמחירי — או שהתקן שלו נמוך מדי, או שהתהליך בו טעון שיפור."/>
+              how="כל הדגימות של אותו שלב מכל המק״טים מקובצות יחד; זמן התקן וזמן המכירה הם ממוצע ההגדרות של אותו שלב בכל המק״טים שנמדדו."
+              tip="שלב עם פער חיובי עקבי מול התקן הוא צוואר בקבוק — או שהתקן שלו אופטימי מדי, או שהתהליך בו טעון שיפור."/>
           </div>
           <div style={{fontSize:11.5,color:"var(--c-dim)",marginBottom:12}}>מסודר לפי סדר הייצור</div>
-          <StdVsSaleChart rows={stageRows.map(s=>({label:s.name,color:s.color,std:s.mean,sale:s.sale,n:s.n}))}/>
+          <TimeBars rows={stageRows.map(s=>({label:s.name,color:s.color,std:s.std,act:s.mean,sale:s.sale,n:s.n}))}/>
         </Card>
 
         <Card style={{marginBottom:14}}>
           <div style={{display:"flex",alignItems:"center",gap:7,marginBottom:4}}>
-            <div style={{fontWeight:700,fontSize:14}}>📊 שונות זמן התקן לפי שלב</div>
-            <ChartInfo title="שונות זמן התקן לפי שלב"
+            <div style={{fontWeight:700,fontSize:14}}>📊 שונות הזמן בפועל לפי שלב</div>
+            <ChartInfo title="שונות הזמן בפועל לפי שלב"
               shows="עמודות אופקיות המדרגות את השלבים לפי מקדם השונות (CV) — כמה הזמנים בפועל מתפזרים סביב הממוצע."
               data="מקדם השונות באחוזים: סטיית התקן חלקי הזמן הממוצע. לצדו מוצגת סטיית התקן בדקות."
               how="לכל שלב מחושבת סטיית התקן של כל הדגימות ומחולקת בממוצע שלהן."
@@ -4110,9 +4398,9 @@ function StandardTimes({orders,stages,stageBlocks,workLogs,users,projects}){
         <Card>
           <div style={{fontWeight:700,fontSize:14,marginBottom:12}}>טבלת שלבים</div>
           <div style={{overflowX:"auto"}}>
-            <table style={{width:"100%",minWidth:620}}>
+            <table style={{width:"100%",minWidth:760}}>
               <thead><tr>
-                <th style={{textAlign:"right"}}>שלב</th><th>מק״טים</th><th>דגימות</th><th>ביטחון</th><th>זמן תקן</th><th>חציון</th><th>טווח</th><th>זמן מכירה</th><th>פער</th><th>ניצול</th><th>שונות</th>
+                <th style={{textAlign:"right"}}>שלב</th><th>מק״טים</th><th>דגימות</th><th>ביטחון</th><th>זמן תקן</th><th>זמן בפועל</th><th>חציון</th><th>פער מול תקן</th><th>עמידה בתקן</th><th>טווח</th><th>זמן מכירה</th><th>פער מכירה</th><th>ניצול</th><th>שונות</th>
               </tr></thead>
               <tbody>
                 {stageRows.map(s=>{
@@ -4123,10 +4411,13 @@ function StandardTimes({orders,stages,stageBlocks,workLogs,users,projects}){
                       <td style={{fontSize:12,color:"var(--c-muted)"}}>{s.pnCount}</td>
                       <td style={{fontSize:12,fontWeight:700}}>{s.n}</td>
                       <td><span style={{fontSize:10.5,background:cf.color+"22",color:cf.color,padding:"2px 7px",borderRadius:10,fontWeight:700}}>{cf.label}</span></td>
-                      <td style={{color:"#60a5fa",fontWeight:700,fontSize:12}}>{fmtMinP(s.mean)}</td>
+                      <td style={{color:s.std>0?TIME_CAT.std.text:"var(--c-dim)",fontWeight:700,fontSize:12}}>{s.std>0?fmtMinP(s.std):"—"}</td>
+                      <td style={{color:TIME_CAT.act.text,fontWeight:700,fontSize:12}}>{fmtMinP(s.mean)}</td>
                       <td style={{color:"var(--c-muted)",fontSize:12}}>{fmtMinP(s.median)}</td>
+                      <td style={{color:s.stdGap==null?"var(--c-dim)":gapColor(s.stdGap),fontWeight:700,fontSize:12}}>{s.stdGap==null?"—":fmtSigned(s.stdGap)}</td>
+                      <td style={{color:s.adh==null?"var(--c-dim)":effColor(s.adh),fontWeight:700,fontSize:12}}>{s.adh==null?"—":s.adh.toFixed(0)+"%"}</td>
                       <td style={{color:"var(--c-dim)",fontSize:11}}>{fmtMinP(s.lo)} – {fmtMinP(s.hi)}</td>
-                      <td style={{color:s.sale>0?"#a78bfa":"var(--c-dim)",fontSize:12}}>{s.sale>0?fmtMinP(s.sale):"—"}</td>
+                      <td style={{color:s.sale>0?TIME_CAT.sale.text:"var(--c-dim)",fontSize:12}}>{s.sale>0?fmtMinP(s.sale):"—"}</td>
                       <td style={{color:s.gap==null?"var(--c-dim)":gapColor(s.gap),fontWeight:700,fontSize:12}}>{s.gap==null?"—":fmtSigned(s.gap)}</td>
                       <td style={{color:s.eff==null?"var(--c-dim)":effColor(s.eff),fontWeight:700,fontSize:12}}>{s.eff==null?"—":s.eff.toFixed(0)+"%"}</td>
                       <td><span style={{fontSize:11,color:ci.color,fontWeight:700}}>{s.cv.toFixed(0)}%</span><div style={{fontSize:9.5,color:"var(--c-dim)"}}>{ci.label}</div></td>
@@ -4145,19 +4436,20 @@ function StandardTimes({orders,stages,stageBlocks,workLogs,users,projects}){
         const rated=workerRows.filter(w=>w.n>=3);
         const top=rated.filter(w=>w.index>=100).slice(0,3);
         const bottom=rated.filter(w=>w.index<100).reverse().slice(0,3);
+        const adhRated=rated.filter(w=>w.adh!=null).sort((a,b)=>b.adh-a.adh);
         return(<>
           {(top.length>0||bottom.length>0)&&(
             <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(260px,1fr))",gap:12,marginBottom:14}}>
               {top.length>0&&(<Card style={{border:"1px solid #10b98133"}}>
                 <div style={{fontWeight:700,fontSize:14,color:"#10b981",marginBottom:4}}>🏆 עובדים מצטיינים</div>
-                <div style={{fontSize:11.5,color:"var(--c-dim)",marginBottom:10}}>המהירים ביותר ביחס לזמן התקן של אותה עבודה בדיוק</div>
+                <div style={{fontSize:11.5,color:"var(--c-dim)",marginBottom:10}}>המהירים ביותר ביחס לזמן הממוצע בפועל של אותה עבודה בדיוק</div>
                 <div style={{display:"flex",flexDirection:"column",gap:6}}>
                   {top.map((w,i)=>(
                     <div key={w.userId} style={{display:"flex",alignItems:"center",gap:9,background:"var(--c-deep)",borderRadius:8,padding:"8px 10px"}}>
                       <span style={{fontSize:15}}>{["🥇","🥈","🥉"][i]}</span>
                       <div style={{flex:1,minWidth:0}}>
                         <div style={{fontWeight:700,fontSize:13}}>{w.userName}</div>
-                        <div style={{fontSize:10.5,color:"var(--c-dim)"}}>{w.n} דגימות · {w.pnCount} מק״טים</div>
+                        <div style={{fontSize:10.5,color:"var(--c-dim)"}}>{w.n} דגימות · {w.pnCount} מק״טים{w.adh!=null?` · עמידה בתקן ${w.adh.toFixed(0)}%`:""}</div>
                       </div>
                       <span style={{fontWeight:800,fontSize:16,color:effColor(w.index)}}>{w.index.toFixed(0)}%</span>
                     </div>
@@ -4167,13 +4459,13 @@ function StandardTimes({orders,stages,stageBlocks,workLogs,users,projects}){
               {bottom.length>0&&(
                 <Card style={{border:"1px solid #f59e0b33"}}>
                   <div style={{fontWeight:700,fontSize:14,color:"#f59e0b",marginBottom:4}}>🎯 זקוקים לחיזוק</div>
-                  <div style={{fontSize:11.5,color:"var(--c-dim)",marginBottom:10}}>איטיים מהתקן — מועמדים להדרכה או לליווי צמוד</div>
+                  <div style={{fontSize:11.5,color:"var(--c-dim)",marginBottom:10}}>איטיים מהממוצע — מועמדים להדרכה או לליווי צמוד</div>
                   <div style={{display:"flex",flexDirection:"column",gap:6}}>
                     {bottom.map(w=>(
                       <div key={w.userId} style={{display:"flex",alignItems:"center",gap:9,background:"var(--c-deep)",borderRadius:8,padding:"8px 10px"}}>
                         <div style={{flex:1,minWidth:0}}>
                           <div style={{fontWeight:700,fontSize:13}}>{w.userName}</div>
-                          <div style={{fontSize:10.5,color:"var(--c-dim)"}}>{w.n} דגימות · ממוצע {fmtMinP(w.avgMin)} לפעולה</div>
+                          <div style={{fontSize:10.5,color:"var(--c-dim)"}}>{w.n} דגימות · ממוצע {fmtMinP(w.avgMin)} לפעולה{w.adh!=null?` · עמידה בתקן ${w.adh.toFixed(0)}%`:""}</div>
                         </div>
                         <span style={{fontWeight:800,fontSize:16,color:effColor(w.index)}}>{w.index.toFixed(0)}%</span>
                       </div>
@@ -4184,26 +4476,41 @@ function StandardTimes({orders,stages,stageBlocks,workLogs,users,projects}){
             </div>
           )}
 
+          {adhRated.length>0&&(
+            <Card style={{marginBottom:14}}>
+              <div style={{display:"flex",alignItems:"center",gap:7,marginBottom:4}}>
+                <div style={{fontWeight:700,fontSize:14}}>✅ עמידה בזמן התקן — לכל עובד</div>
+                <ChartInfo title="עמידה בזמן התקן לכל עובד"
+                  shows="עמודות אופקיות המדרגות את העובדים לפי היחס בין זמן התקן שהוגדר לבין הזמן שהם באמת השקיעו."
+                  data="אחוז העמידה: 100% = העובד עומד בדיוק בזמן התקן. 120% = מהיר ב-20% מהתקן. 80% = איטי ב-20%."
+                  how={["נלקחות רק דגימות של מק״ט+שלב שיש להם זמן תקן מוגדר.","סכום זמני התקן של אותן דגימות מחולק בסכום הזמן שנמדד בפועל."]}
+                  tip="מדד זה משווה מול היעד שהוגדר, בעוד ״מדד מול ממוצע״ משווה בין העובדים לבין עצמם. אם כל העובדים מתחת ל-100% — סביר שהתקן עצמו אופטימי מדי."/>
+              </div>
+              <div style={{fontSize:11.5,color:"var(--c-dim)",marginBottom:12}}>מבוסס רק על עבודות שיש להן זמן תקן מוגדר</div>
+              <HBarChart data={adhRated.map(w=>({label:w.userName,value:Math.round(w.adh),color:effColor(w.adh),sub:`· ${w.stdSamples} דג'`}))} formatVal={v=>v+"%"}/>
+            </Card>
+          )}
+
           <Card style={{marginBottom:14}}>
             <div style={{display:"flex",alignItems:"center",gap:7,marginBottom:4}}>
-              <div style={{fontWeight:700,fontSize:14}}>👥 מדד יעילות לעובד</div>
+              <div style={{fontWeight:700,fontSize:14}}>👥 מדד יעילות לעובד — מול ממוצע העמיתים</div>
               <ChartInfo title="מדד יעילות לעובד"
-                shows="עמודות אופקיות המדרגות את העובדים לפי מדד היעילות שלהם ביחס לזמן התקן."
-                data="המדד באחוזים: 100% = העובד עומד בדיוק בזמן התקן. 130% = מהיר ב-30% מהתקן. 70% = איטי ב-30%."
-                how={["לכל דגימה של העובד לוקחים את זמן התקן של אותו צירוף מק״ט+שלב בדיוק.","מחלקים את סכום זמני התקן הצפויים בסכום הזמן שהעובד באמת השקיע.","כך כל עובד נמדד רק מול עבודות זהות לשלו — מי שעושה עבודות ארוכות לא נענש על כך."]}
-                tip="עובדים מעל 110% הם מצטיינים שכדאי ללמוד מהם; מתחת ל-80% — כדאי לבדוק אם חסרה הדרכה, ציוד או שהמשימות שלהם מורכבות במיוחד."/>
+                shows="עמודות אופקיות המדרגות את העובדים לפי היחס בינם לבין הזמן הממוצע בפועל של אותה עבודה בדיוק."
+                data="המדד באחוזים: 100% = העובד עובד בדיוק בזמן הממוצע. 130% = מהיר ב-30% מהממוצע. 70% = איטי ב-30%."
+                how={["לכל דגימה של העובד לוקחים את הזמן הממוצע בפועל של אותו צירוף מק״ט+שלב בדיוק.","מחלקים את סכום הזמנים הצפויים בסכום הזמן שהעובד באמת השקיע.","כך כל עובד נמדד רק מול עבודות זהות לשלו — מי שעושה עבודות ארוכות לא נענש על כך."]}
+                tip="המדד הזה זמין תמיד, גם בלי זמן תקן מוגדר, כי הוא משווה עובדים לעמיתיהם. עובדים מעל 110% הם מצטיינים שכדאי ללמוד מהם; מתחת ל-80% — כדאי לבדוק אם חסרה הדרכה או ציוד."/>
             </div>
-            <div style={{fontSize:11.5,color:"var(--c-dim)",marginBottom:12}}>100% = בדיוק זמן התקן · מעל = מהיר מהתקן · מתחת = איטי מהתקן (מוצגים עובדים עם 3+ דגימות)</div>
+            <div style={{fontSize:11.5,color:"var(--c-dim)",marginBottom:12}}>100% = בדיוק הממוצע בפועל · מעל = מהיר מהממוצע · מתחת = איטי מהממוצע (מוצגים עובדים עם 3+ דגימות)</div>
             <HBarChart data={rated.map(w=>({label:w.userName,value:Math.round(w.index),color:effColor(w.index),sub:`· ${w.n} דג'`}))} formatVal={v=>v+"%"}/>
           </Card>
 
           <Card>
             <div style={{fontWeight:700,fontSize:14,marginBottom:4}}>טבלת ביצועי עובדים</div>
-            <div style={{fontSize:11.5,color:"var(--c-dim)",marginBottom:12}}>"מדד תקן" משווה כל עובד לעבודות זהות לשלו · "ניצול מכירה" משווה מול המחירון · "עקביות" מודדת כמה הזמנים שלו יציבים</div>
+            <div style={{fontSize:11.5,color:"var(--c-dim)",marginBottom:12}}>"עמידה בתקן" משווה מול הזמן שהוגדר · "מדד מול ממוצע" משווה כל עובד לעבודות זהות לשלו · "ניצול מכירה" משווה מול המחירון · "עקביות" מודדת כמה הזמנים שלו יציבים</div>
             <div style={{overflowX:"auto"}}>
-              <table style={{width:"100%",minWidth:620}}>
+              <table style={{width:"100%",minWidth:700}}>
                 <thead><tr>
-                  <th style={{textAlign:"right"}}>עובד</th><th>דגימות</th><th>מק״טים</th><th>שלבים</th><th>ממוצע לפעולה</th><th>מדד תקן</th><th>ניצול מכירה</th><th>עקביות</th><th>הערכה</th>
+                  <th style={{textAlign:"right"}}>עובד</th><th>דגימות</th><th>מק״טים</th><th>שלבים</th><th>ממוצע לפעולה</th><th>עמידה בתקן</th><th>מדד מול ממוצע</th><th>ניצול מכירה</th><th>עקביות</th><th>הערכה</th>
                 </tr></thead>
                 <tbody>
                   {workerRows.map(w=>{
@@ -4216,10 +4523,11 @@ function StandardTimes({orders,stages,stageBlocks,workLogs,users,projects}){
                         <td style={{fontSize:12,color:"var(--c-muted)"}}>{w.pnCount}</td>
                         <td style={{fontSize:12,color:"var(--c-muted)"}}>{w.stageCount}</td>
                         <td style={{fontSize:12,color:"var(--c-muted)"}}>{fmtMinP(w.avgMin)}</td>
-                        <td><span style={{fontWeight:800,fontSize:13,color:effColor(w.index)}}>{w.index.toFixed(0)}%</span></td>
+                        <td><span style={{fontWeight:800,fontSize:13,color:w.adh==null?"var(--c-dim)":effColor(w.adh)}}>{w.adh==null?"—":w.adh.toFixed(0)+"%"}</span></td>
+                        <td><span style={{fontWeight:700,fontSize:12.5,color:effColor(w.index)}}>{w.index.toFixed(0)}%</span></td>
                         <td style={{fontSize:12,fontWeight:700,color:w.eff==null?"var(--c-dim)":effColor(w.eff)}}>{w.eff==null?"—":w.eff.toFixed(0)+"%"}</td>
                         <td><span style={{fontSize:11,color:ci.color,fontWeight:700}}>{w.consistency.toFixed(0)}%</span><div style={{fontSize:9.5,color:"var(--c-dim)"}}>{ci.label}</div></td>
-                        <td>{rateable?<span style={{fontSize:10.5,background:effColor(w.index)+"22",color:effColor(w.index),padding:"2px 8px",borderRadius:10,fontWeight:700,whiteSpace:"nowrap"}}>{effLabel(w.index)}</span>:<span style={{fontSize:10.5,color:"var(--c-dim)"}}>—</span>}</td>
+                        <td>{rateable?<span style={{fontSize:10.5,background:effColor(w.adh!=null?w.adh:w.index)+"22",color:effColor(w.adh!=null?w.adh:w.index),padding:"2px 8px",borderRadius:10,fontWeight:700,whiteSpace:"nowrap"}}>{effLabel(w.adh!=null?w.adh:w.index)}</span>:<span style={{fontSize:10.5,color:"var(--c-dim)"}}>—</span>}</td>
                       </tr>
                     );
                   })}
@@ -4229,6 +4537,41 @@ function StandardTimes({orders,stages,stageBlocks,workLogs,users,projects}){
           </Card>
         </>);
       })()}
+
+      {view==="def"&&(<>
+        <Card style={{marginBottom:12,padding:"10px 12px"}}>
+          <div style={{display:"flex",gap:8,flexWrap:"wrap",alignItems:"center"}}>
+            <span style={{fontSize:11.5,color:"var(--c-dim)",fontWeight:600}}>חיפוש:</span>
+            <input value={defSearch} onChange={e=>setDefSearch(e.target.value)} placeholder='מק״ט או תיאור' style={{padding:"6px 9px",fontSize:12,width:"auto",minWidth:170}}/>
+            <select value={defFilter} onChange={e=>setDefFilter(e.target.value)} style={sel}>
+              <option value="all">כל המק״טים ({defStats.total})</option>
+              <option value="with">עם זמן תקן ({defStats.with})</option>
+              <option value="without">ללא זמן תקן ({defStats.total-defStats.with})</option>
+            </select>
+            {(defSearch||defFilter!=="all")&&<Btn small onClick={()=>{setDefSearch("");setDefFilter("all")}}>נקה</Btn>}
+            <span style={{marginRight:"auto",fontSize:11.5,color:"var(--c-dim)"}}>הוגדר תקן ל-{defStats.with} מתוך {defStats.total} מק״טים</span>
+          </div>
+        </Card>
+
+        <Card>
+          <div style={{display:"flex",alignItems:"center",gap:7,marginBottom:4}}>
+            <div style={{fontWeight:700,fontSize:14}}>⚙️ הגדרת זמן תקן לכל מק״ט</div>
+            <ChartInfo title="הגדרת זמן תקן"
+              shows="רשימת כל המק״טים במערכת, עם זמן התקן שהוגדר לכל אחד — שלב אחר שלב — לצד הזמן בפועל שנמדד וזמן המכירה שבמחירון."
+              data="זמן התקן נשמר לכל מק״ט בנפרד ומשמש כבסיס להשוואה בכל הגרפים והטבלאות בלשונית זו."
+              how={["לחיצה על ״הגדר תקן״ פותחת שדה לכל שלב במסלול המק״ט.","ניתן למלא ידנית, או להעתיק בלחיצה מהזמן בפועל / מהמחירון.","סכום השלבים הוא זמן התקן ליחידה שלמה."]}
+              tip="דרך מקובלת לקבוע תקן ראשוני: להתחיל מהזמן בפועל של עובד מיומן, ואז להדק אותו בהדרגה. תקן שאיש אינו עומד בו רק מייצר רעש."/>
+          </div>
+          <div style={{fontSize:11.5,color:"var(--c-dim)",marginBottom:12}}>
+            {canEdit?"זמן התקן נשמר לכל מק״ט ומתעדכן מיד בכל הגרפים והטבלאות":"לצפייה בלבד — נדרשת הרשאת עריכה כדי לשנות זמני תקן"}
+          </div>
+          {defShown.length===0?<EmptyState icon="🔍" title="אין מק״טים תואמים" subtitle="נסה לשנות את החיפוש או הסינון"/>:(
+            <div style={{display:"flex",flexDirection:"column",gap:8}}>
+              {defShown.map(r=><StdDefRow key={r.pn} row={r} canEdit={canEdit} onSave={onSavePnStd} onDelete={onDeletePnStd}/>)}
+            </div>
+          )}
+        </Card>
+      </>)}
     </div>
   );
 }
@@ -4379,7 +4722,8 @@ const hrs=m=>Math.round((Number(m)||0)/60*10)/10;
 // One flat row per completed work log in range, already normalised against the
 // sold time, then grouped worker → day.
 function buildTeamReport(opt){
-  const {from,to,ptype,users=[],workLogs=[],orders=[],stages=[],stageBlocks=[],projects=[],customTasks=[],dailyPlans=[],manager,scopeLabel,showEmpty}=opt||{};
+  const {from,to,ptype,users=[],workLogs=[],orders=[],stages=[],stageBlocks=[],projects=[],customTasks=[],dailyPlans=[],pnStandards=[],manager,scopeLabel,showEmpty}=opt||{};
+  const stdIdx=pnStdIndex(pnStandards);
   const oMap=new Map(orders.map(o=>[o.id,o]));
   const sMap=new Map(stages.map(s=>[s.id,s]));
   const pMap=new Map(projects.map(p=>[p.id,p.name]));
@@ -4398,15 +4742,21 @@ function buildTeamReport(opt){
     const actual=Number(w.durationMin||0);
     const salePer=o&&st?stageMinutesFor(o,st,stageBlocks):Number(st?.minutes||0);
     const saleTot=salePer*units;
+    const pn=(o?.pn||"").trim()||"—";
+    // The standard defined for this מק"ט+שלב, scaled to the units of this log.
+    const stdPer=st?stdStageMin(stdIdx.get(pnKey(pn)),st.id):0;
+    const stdTot=stdPer*units;
     const comparable=saleTot>0&&actual>0;   // a sign-off (0 דק') carries no timing
+    const stdCmp=stdTot>0&&actual>0;
     rows.push({
       id:w.id,userId:w.userId,userName:w.userName||"—",day,
-      wo:o?.woNumber||"—",pn:(o?.pn||"").trim()||"—",desc:o?.description||"",
+      wo:o?.woNumber||"—",pn,desc:o?.description||"",
       project:pMap.get(o?.projectId)||"—",sn:w.serialSn||"—",
       stage:st?.name||"—",color:st?.color||"#64748b",
       start:w.startTime,end:w.endTime,units,actual,pause:Number(w.totalPauseMin||0),
-      perUnit:units>0?actual/units:actual,salePer,saleTot,
+      perUnit:units>0?actual/units:actual,salePer,saleTot,stdPer,stdTot,
       gap:comparable?actual-saleTot:null,eff:comparable?saleTot/actual*100:null,
+      stdGap:stdCmp?actual-stdTot:null,adh:stdCmp?stdTot/actual*100:null,
       signOff:!(actual>0),kind:w.bulk?"קבוצתי":(actual>0?"עבודה":"חתימה")
     });
   });
@@ -4432,8 +4782,11 @@ function buildTeamReport(opt){
     const taskMin=wt.reduce((s,t)=>s+t.min,0);
     const cmp=wr.filter(r=>r.eff!=null);
     const mAct=cmp.reduce((s,r)=>s+r.actual,0),mSale=cmp.reduce((s,r)=>s+r.saleTot,0);
+    const sCmp=wr.filter(r=>r.adh!=null);
+    const sAct=sCmp.reduce((s,r)=>s+r.actual,0),sStd=sCmp.reduce((s,r)=>s+r.stdTot,0);
     return{user:u,rows:wr,tasks:wt,plans:wp,days,workMin,taskMin,totalMin:workMin+taskMin,
       sale:wr.reduce((s,r)=>s+r.saleTot,0),mAct,mSale,cmpN:cmp.length,
+      sAct,sStd,stdN:sCmp.length,stdGap:sCmp.length?sAct-sStd:null,adh:sAct>0?sStd/sAct*100:null,
       gap:cmp.length?mAct-mSale:null,eff:mAct>0?mSale/mAct*100:null,
       units:wr.reduce((s,r)=>s+r.units,0),actions:wr.length,signs:wr.filter(r=>r.signOff).length,
       orders:new Set(wr.map(r=>r.wo)).size,pns:new Set(wr.filter(r=>r.pn!=="—").map(r=>r.pn)).size,
@@ -4442,11 +4795,14 @@ function buildTeamReport(opt){
     .sort((a,b)=>b.totalMin-a.totalMin||String(a.user.name||"").localeCompare(String(b.user.name||""),"he"));
 
   const mAct=workers.reduce((s,w)=>s+w.mAct,0),mSale=workers.reduce((s,w)=>s+w.mSale,0);
+  const sAct=workers.reduce((s,w)=>s+w.sAct,0),sStd=workers.reduce((s,w)=>s+w.sStd,0);
   const totals={
     workers:workers.length,actions:workers.reduce((s,w)=>s+w.actions,0),
     signs:workers.reduce((s,w)=>s+w.signs,0),units:workers.reduce((s,w)=>s+w.units,0),
     workMin:workers.reduce((s,w)=>s+w.workMin,0),taskMin:workers.reduce((s,w)=>s+w.taskMin,0),
     totalMin:workers.reduce((s,w)=>s+w.totalMin,0),sale:workers.reduce((s,w)=>s+w.sale,0),
+    sAct,sStd,stdN:workers.reduce((s,w)=>s+w.stdN,0),
+    stdGap:sAct>0?sAct-sStd:null,adh:sAct>0?sStd/sAct*100:null,
     mAct,mSale,gap:mAct>0?mAct-mSale:null,eff:mAct>0?mSale/mAct*100:null,
     tasks:workers.reduce((s,w)=>s+w.tasks.length,0),
     planTotal:workers.reduce((s,w)=>s+w.planTotal,0),planDone:workers.reduce((s,w)=>s+w.planDone,0),
@@ -4486,6 +4842,9 @@ function reportHTML(m){
     <td>${w.days.length}</td><td>${w.actions}</td><td>${w.units}</td><td>${w.orders}</td>
     <td>${esc(fmtTime(w.totalMin))}</td>
     <td>${w.cmpN?esc(fmtTime(w.mAct)):"—"}</td>
+    <td>${w.stdN?esc(fmtTime(w.sStd)):"—"}</td>
+    <td class="${gapCls(w.stdGap)}">${gapTxt(w.stdGap)}</td>
+    <td class="${effCls(w.adh)} b7">${effTxt(w.adh)}</td>
     <td>${w.cmpN?esc(fmtTime(w.mSale)):"—"}</td>
     <td class="${gapCls(w.gap)}">${gapTxt(w.gap)}</td>
     <td class="${effCls(w.eff)} b7">${effTxt(w.eff)}</td>
@@ -4495,14 +4854,16 @@ function reportHTML(m){
   const dayTable=rs=>`<table class="det"><thead><tr>
       <th style="width:64px">שעות</th><th style="width:78px">פק"ע</th><th style="width:78px">מק"ט</th>
       <th style="width:86px">S/N</th><th>פעולה</th><th style="width:34px">יח'</th>
-      <th style="width:60px">בפועל</th><th style="width:60px">מכירה</th>
-      <th style="width:58px">פער</th><th style="width:48px">יעילות</th><th style="width:48px">סוג</th>
+      <th style="width:56px">תקן</th><th style="width:60px">בפועל</th><th style="width:58px">פער תקן</th>
+      <th style="width:60px">מכירה</th><th style="width:58px">פער</th><th style="width:48px">יעילות</th><th style="width:48px">סוג</th>
     </tr></thead><tbody>${rs.map(r=>`<tr>
       <td class="tm">${esc(fmtClock(r.start))}–${esc(fmtClock(r.end))}</td>
       <td class="mono">${esc(r.wo)}</td><td class="mono">${esc(r.pn)}</td><td class="mono sn">${esc(r.sn)}</td>
       <td class="st"><span class="dot" style="background:${esc(r.color)}"></span>${esc(r.stage)}</td>
       <td>${r.units}</td>
+      <td>${r.stdTot>0?esc(fmtMinP(r.stdTot)):"—"}</td>
       <td>${r.signOff?'<span class="dim">חתימה</span>':esc(fmtMinP(r.actual))}</td>
+      <td class="${gapCls(r.stdGap)}">${gapTxt(r.stdGap)}</td>
       <td>${r.eff!=null?esc(fmtMinP(r.saleTot)):"—"}</td>
       <td class="${gapCls(r.gap)}">${gapTxt(r.gap)}</td>
       <td class="${effCls(r.eff)} b7">${effTxt(r.eff)}</td>
@@ -4522,11 +4883,13 @@ function reportHTML(m){
       const act=rs.reduce((s,r)=>s+r.actual,0);
       const cmp=rs.filter(r=>r.eff!=null),ca=cmp.reduce((s,r)=>s+r.actual,0),cs=cmp.reduce((s,r)=>s+r.saleTot,0);
       const dEff=ca>0?cs/ca*100:null,dGap=cmp.length?ca-cs:null;
+      const sc=rs.filter(r=>r.adh!=null),sa=sc.reduce((s,r)=>s+r.actual,0),ss=sc.reduce((s,r)=>s+r.stdTot,0);
+      const dAdh=sa>0?ss/sa*100:null,dSGap=sc.length?sa-ss:null;
       const tMin=ts.reduce((s,t)=>s+t.min,0);
       return`<div class="day">
         <div class="dayhead">
           <span class="dd">${esc(fmtDayHeb(d))}</span>
-          <span class="ds">${rs.length===1?"פעולה אחת":`${rs.length} פעולות`}${ts.length?` · ${ts.length===1?"משימה אחת":`${ts.length} משימות`}`:""} · בפועל ${esc(fmtTime(act+tMin))} · נמדד מול תקן ${esc(fmtTime(ca))} מול ${esc(fmtTime(cs))} · פער <b class="${gapCls(dGap)}">${gapTxt(dGap)}</b> · יעילות <b class="${effCls(dEff)}">${effTxt(dEff)}</b></span>
+          <span class="ds">${rs.length===1?"פעולה אחת":`${rs.length} פעולות`}${ts.length?` · ${ts.length===1?"משימה אחת":`${ts.length} משימות`}`:""} · בפועל ${esc(fmtTime(act+tMin))} · תקן ${sc.length?esc(fmtTime(ss)):"—"} · פער תקן <b class="${gapCls(dSGap)}">${gapTxt(dSGap)}</b> · עמידה בתקן <b class="${effCls(dAdh)}">${effTxt(dAdh)}</b> · מכירה ${esc(fmtTime(cs))} · ניצול <b class="${effCls(dEff)}">${effTxt(dEff)}</b></span>
         </div>
         ${ps.length?`<div class="plan">🗓️ תוכנית היום: ${ps.map(p=>`${esc(p.wo)} · ${esc(p.stage)}${p.target?` (${p.target} יח')`:""} ${p.done?"✔":"✖"}`).join(" | ")}</div>`:""}
         ${rs.length?dayTable(rs):'<div class="none">לא נרשמו פעולות ייצור ביום זה</div>'}
@@ -4540,9 +4903,12 @@ function reportHTML(m){
           <span>ימי עבודה <b>${w.days.length}</b></span><span>פעולות <b>${w.actions}</b></span>
           <span>יחידות <b>${w.units}</b></span><span>בפועל <b>${esc(fmtTime(w.totalMin))}</b></span>
           <span>נמדד <b>${w.cmpN?esc(fmtTime(w.mAct)):"—"}</b></span>
+          <span>תקן <b>${w.stdN?esc(fmtTime(w.sStd)):"—"}</b></span>
+          <span>פער תקן <b class="${gapCls(w.stdGap)}">${gapTxt(w.stdGap)}</b></span>
+          <span>עמידה בתקן <b class="${effCls(w.adh)}">${effTxt(w.adh)}</b></span>
           <span>מכירה <b>${w.cmpN?esc(fmtTime(w.mSale)):"—"}</b></span>
-          <span>פער <b class="${gapCls(w.gap)}">${gapTxt(w.gap)}</b></span>
-          <span>יעילות <b class="${effCls(w.eff)}">${effTxt(w.eff)}</b></span>
+          <span>פער מכירה <b class="${gapCls(w.gap)}">${gapTxt(w.gap)}</b></span>
+          <span>ניצול <b class="${effCls(w.eff)}">${effTxt(w.eff)}</b></span>
         </div>
       </div>
       ${days||'<div class="none">אין פעילות בתקופה שנבחרה</div>'}
@@ -4614,21 +4980,24 @@ tbody tr:nth-child(even){background:#f4f8fd}
   ${kpi(T.actions,"פעולות שנחתמו","#7c3aed")}
   ${kpi(T.units,"יחידות שטופלו","#0891b2")}
   ${kpi(fmtTime(T.totalMin),"זמן עבודה בפועל","#111827")}
-  ${kpi(fmtTime(T.mSale),"זמן מכירה (תקן)","#047857")}
-  ${kpi(gapTxt(T.gap),"פער מול התקן",T.gap==null?"#6b7280":T.gap>0?"#b45309":"#047857")}
-  ${kpi(effTxt(T.eff),"יעילות ממוצעת",T.eff==null?"#6b7280":T.eff>=95?"#047857":"#b45309")}
+  ${kpi(fmtTime(T.sStd),"זמן תקן מוגדר","#047857")}
+  ${kpi(gapTxt(T.stdGap),"פער מול זמן התקן",T.stdGap==null?"#6b7280":T.stdGap>0?"#b45309":"#047857")}
+  ${kpi(effTxt(T.adh),"עמידה בזמן התקן",T.adh==null?"#6b7280":T.adh>=95?"#047857":"#b45309")}
+  ${kpi(fmtTime(T.mSale),"זמן מכירה (מחירון)","#6d28d9")}
+  ${kpi(effTxt(T.eff),"ניצול זמן מכירה",T.eff==null?"#6b7280":T.eff>=95?"#047857":"#b45309")}
   ${kpi(T.tasks,"משימות שהושלמו","#be185d")}
 </div>
 <h2>📊 סיכום לפי עובד</h2>
 <table class="sum"><thead><tr>
   <th>עובד</th><th>תפקיד</th><th>ימי עבודה</th><th>פעולות</th><th>יחידות</th><th>פק"ע</th>
-  <th>זמן בפועל</th><th>מתוכו נמדד</th><th>זמן מכירה</th><th>פער</th><th>יעילות</th><th>משימות</th><th>תוכנית</th>
-</tr></thead><tbody>${summaryRows||'<tr><td colspan="13" class="dim">לא נמצאה פעילות בתקופה שנבחרה</td></tr>'}</tbody></table>
+  <th>זמן בפועל</th><th>מתוכו נמדד</th><th>זמן תקן</th><th>פער תקן</th><th>עמידה בתקן</th>
+  <th>זמן מכירה</th><th>פער מכירה</th><th>ניצול</th><th>משימות</th><th>תוכנית</th>
+</tr></thead><tbody>${summaryRows||'<tr><td colspan="16" class="dim">לא נמצאה פעילות בתקופה שנבחרה</td></tr>'}</tbody></table>
 <div class="legend">
-  <b>איך קוראים את הדוח:</b> <b>זמן בפועל</b> — כל הזמן שנרשם בפועל בתקופה, כולל משימות. <b>מתוכו נמדד</b> — רק הפעולות שיש להן גם מדידת זמן וגם זמן מכירה במחירון, ורק הן נכנסות להשוואה מול התקן.
-  <b>זמן מכירה</b> — הזמן שהוקצה לאותן פעולות במחירון (זמן תקן).
-  <b>פער</b> — נמדד פחות מכירה; ערך שלילי (<span class="g">ירוק</span>) = מהיר מהתקן, חיובי (<span class="w">כתום</span>) = חריגה מהתקן.
-  <b>יעילות</b> — זמן מכירה חלקי הזמן שנמדד: 100% = בדיוק בתקן, מעל 100% = מהיר יותר. פעולות שנחתמו ללא מדידת זמן (חתימה) אינן נכללות בהשוואה.
+  <b>איך קוראים את הדוח:</b> <b>זמן בפועל</b> — כל הזמן שנרשם בפועל בתקופה, כולל משימות. <b>מתוכו נמדד</b> — רק הפעולות שיש להן גם מדידת זמן וגם זמן מכירה במחירון, ורק הן נכנסות להשוואה מול המחירון.
+  <b>זמן תקן</b> — הזמן שהוגדר מראש למק"ט ולשלב של אותן פעולות. <b>פער תקן</b> — בפועל פחות תקן; ערך שלילי (<span class="g">ירוק</span>) = מהיר מהתקן, חיובי (<span class="w">כתום</span>) = חריגה מהתקן.
+  <b>עמידה בתקן</b> — זמן התקן חלקי הזמן בפועל: 100% = בדיוק בתקן, מעל 100% = מהיר יותר.
+  <b>זמן מכירה</b> — הזמן שהוקצה לאותן פעולות במחירון. <b>ניצול</b> — זמן מכירה חלקי הזמן בפועל. פעולות שנחתמו ללא מדידת זמן (חתימה) אינן נכללות בהשוואות.
 </div>
 ${m.workers.length?`<h2>🧾 פירוט פעולות לפי עובד ולפי יום</h2>${workerBlocks}`:""}
 <div class="foot">
@@ -4642,23 +5011,28 @@ ${m.workers.length?`<h2>🧾 פירוט פעולות לפי עובד ולפי י
 // the period further in Excel.
 function exportTeamReportXlsx(m){
   const wb=XLSX.utils.book_new();
-  const h1=['עובד','תפקיד','ימי עבודה','פעולות','יחידות','פק"ע','זמן בפועל (שע\')','מתוכו נמדד (שע\')','זמן מכירה (שע\')','פער (שע\')','יעילות %','משימות','זמן משימות (שע\')','תוכנית בוצעה','תוכנית סה"כ'];
+  const effStyle=v=>(v===""||v==null)?null:(v>=110?XL_OK:v>=95?XL_INFO:v>=80?XL_WARN:XL_BAD);
+  const h1=['עובד','תפקיד','ימי עבודה','פעולות','יחידות','פק"ע','זמן בפועל (שע\')','מתוכו נמדד (שע\')','זמן תקן (שע\')','פער מול תקן (שע\')','עמידה בתקן %','זמן מכירה (שע\')','פער מכירה (שע\')','ניצול %','משימות','זמן משימות (שע\')','תוכנית בוצעה','תוכנית סה"כ'];
   const r1=m.workers.map(w=>[w.user.name||"—",ROLES[w.user.role]?.label||w.user.role||"",w.days.length,w.actions,w.units,w.orders,
-    hrs(w.totalMin),w.cmpN?hrs(w.mAct):"",w.cmpN?hrs(w.mSale):"",w.gap==null?"":hrs(w.gap),w.eff==null?"":Math.round(w.eff),
+    hrs(w.totalMin),w.cmpN?hrs(w.mAct):"",w.stdN?hrs(w.sStd):"",w.stdGap==null?"":hrs(w.stdGap),w.adh==null?"":Math.round(w.adh),
+    w.cmpN?hrs(w.mSale):"",w.gap==null?"":hrs(w.gap),w.eff==null?"":Math.round(w.eff),
     w.tasks.length,hrs(w.taskMin),w.planDone,w.planTotal]);
-  addSheet(wb,"סיכום לפי עובד",h1,r1,[18,14,10,10,10,10,14,15,14,12,10,10,14,12,12]);
-  const h2=['תאריך','יום','עובד','פק"ע','מק"ט','S/N','פעולה','פרויקט','התחלה','סיום','יחידות','זמן בפועל (דק\')','זמן מכירה (דק\')','פער (דק\')','יעילות %','סוג רישום'];
+  addSheet(wb,"סיכום לפי עובד",h1,r1,[18,14,10,10,10,10,14,15,13,15,12,14,15,10,10,14,12,12],
+    (ri,c,row)=>(c===10||c===13)?effStyle(row[c]):null);
+  const h2=['תאריך','יום','עובד','פק"ע','מק"ט','S/N','פעולה','פרויקט','התחלה','סיום','יחידות','זמן תקן (דק\')','זמן בפועל (דק\')','פער מול תקן (דק\')','עמידה בתקן %','זמן מכירה (דק\')','פער מכירה (דק\')','ניצול %','סוג רישום'];
   const r2=m.workers.flatMap(w=>w.rows.map(r=>[r.day,HEB_DAYS[new Date(r.day+"T00:00:00").getDay()],r.userName,r.wo,r.pn,r.sn,r.stage,r.project,
-    fmtClock(r.start),fmtClock(r.end),r.units,Math.round(r.actual*10)/10,r.eff==null?"":Math.round(r.saleTot*10)/10,
-    r.gap==null?"":Math.round(r.gap*10)/10,r.eff==null?"":Math.round(r.eff),r.kind]));
-  addSheet(wb,"פירוט פעולות",h2,r2,[12,9,16,14,14,18,18,14,10,10,9,14,14,11,10,11]);
+    fmtClock(r.start),fmtClock(r.end),r.units,r.stdTot>0?Math.round(r.stdTot*10)/10:"",Math.round(r.actual*10)/10,
+    r.stdGap==null?"":Math.round(r.stdGap*10)/10,r.adh==null?"":Math.round(r.adh),
+    r.eff==null?"":Math.round(r.saleTot*10)/10,r.gap==null?"":Math.round(r.gap*10)/10,r.eff==null?"":Math.round(r.eff),r.kind]));
+  addSheet(wb,"פירוט פעולות",h2,r2,[12,9,16,14,14,18,18,14,10,10,9,13,14,15,12,14,15,10,11],
+    (ri,c,row)=>(c===14||c===17)?effStyle(row[c]):null);
   const h3=['תאריך','עובד','משימה','תיאור','התחלה','סיום','זמן (דק\')','סטטוס','מחיר'];
   const r3=m.workers.flatMap(w=>w.tasks.map(t=>[t.day,t.userName,t.name,t.desc,fmtClock(t.start),fmtClock(t.end),Math.round(t.min),t.partial?"חלקית":"הושלמה",t.price]));
   addSheet(wb,"משימות",h3,r3,[12,16,24,30,10,10,11,11,10]);
   XLSX.writeFile(wb,`דוח_עובדים_${m.from}_${m.to}.xlsx`);
 }
 
-function TeamReports({users,workLogs,orders,stages,stageBlocks,projects,customTasks,dailyPlans,departments}){
+function TeamReports({users,workLogs,orders,stages,stageBlocks,projects,customTasks,dailyPlans,departments,pnStandards}){
   const {currentUser}=useAuth();
   const {toast}=useToast();
   const isAdmin=currentUser?.role==="admin";
@@ -4689,8 +5063,8 @@ function TeamReports({users,workLogs,orders,stages,stageBlocks,projects,customTa
 
   const selUsers=useMemo(()=>sel.length?team.filter(u=>sel.includes(u.id)):team,[sel,team]);
   const model=useMemo(()=>buildTeamReport({from:range.from,to:range.to,ptype,users:selUsers,workLogs,orders,stages,stageBlocks,
-    projects,customTasks,dailyPlans,manager:currentUser,scopeLabel,showEmpty}),
-    [range,ptype,selUsers,workLogs,orders,stages,stageBlocks,projects,customTasks,dailyPlans,currentUser,scopeLabel,showEmpty]);
+    projects,customTasks,dailyPlans,pnStandards,manager:currentUser,scopeLabel,showEmpty}),
+    [range,ptype,selUsers,workLogs,orders,stages,stageBlocks,projects,customTasks,dailyPlans,pnStandards,currentUser,scopeLabel,showEmpty]);
   const html=useMemo(()=>reportHTML(model),[model]);
 
   const shiftPeriod=dir=>{
@@ -4851,7 +5225,8 @@ const XL_TYP={quality:"איכות",process:"תהליך",material:"חומר גל�
 const xlRound=(n,d=1)=>{const p=Math.pow(10,d);return Math.round((Number(n)||0)*p)/p};
 
 function doExport(ctx){
-  const {orders=[],projects=[],stages=[],stageBlocks=[],workLogs=[],users=[],customTasks=[],dailyPlans=[],departments=[]}=ctx||{};
+  const {orders=[],projects=[],stages=[],stageBlocks=[],workLogs=[],users=[],customTasks=[],dailyPlans=[],departments=[],pnStandards=[]}=ctx||{};
+  const stdIdx=pnStdIndex(pnStandards);
   const wb=XLSX.utils.book_new();
   const pMap=new Map(projects.map(p=>[p.id,p.name]));
   const sMap=new Map(stages.map(s=>[s.id,s]));
@@ -4877,6 +5252,14 @@ function doExport(ctx){
   // ── 0: סיכום כללי ───────────────────────────────────────────────────────
   const totMin=done.reduce((s,w)=>s+Number(w.durationMin||0),0);
   const totSale=done.reduce((s,w)=>s+saleOf(oMap.get(w.orderId),w),0);
+  // Standard time only counts where a standard exists, so the actual time it is
+  // compared against is summed over exactly the same logs.
+  const stdPairs=done.reduce((a,w)=>{
+    const m=Number(w.durationMin||0);if(!(m>0))return a;
+    const st=stdStageMin(stdIdx.get(pnKey(oMap.get(w.orderId)?.pn)),w.stageId);
+    if(!(st>0))return a;
+    a.std+=st*unitsOf(w);a.act+=m;return a;
+  },{std:0,act:0});
   const openDef=orders.reduce((s,o)=>s+(o.defects||[]).filter(d=>d.status!=="closed").length,0);
   const openSh=orders.reduce((s,o)=>s+(o.shortages||[]).filter(h=>!h.received).length,0);
   const sumRows=[
@@ -4887,9 +5270,13 @@ function doExport(ctx){
     ["סידוריים שנמסרו",orders.reduce((s,o)=>s+(o.deliveredSerials||[]).length,0)],
     ["פעולות שנרשמו",done.length],
     ["שעות עבודה בפועל",xlRound(totMin/60)],
-    ["שעות מכירה (תקן)",xlRound(totSale/60)],
-    ["פער מול התקן (שע')",xlRound((totMin-totSale)/60)],
-    ["יעילות כללית %",effOf(totMin,totSale)],
+    ["שעות תקן (על עבודות עם תקן)",xlRound(stdPairs.std/60)],
+    ["פער מול זמן התקן (שע')",stdPairs.std>0?xlRound((stdPairs.act-stdPairs.std)/60):""],
+    ["עמידה בזמן התקן %",effOf(stdPairs.act,stdPairs.std)],
+    ["מק\"טים עם זמן תקן מוגדר",(pnStandards||[]).filter(r=>stdTotalMin(r,null)>0).length],
+    ["שעות מכירה (מחירון)",xlRound(totSale/60)],
+    ["פער מול המחירון (שע')",xlRound((totMin-totSale)/60)],
+    ["ניצול זמן מכירה %",effOf(totMin,totSale)],
     ["תקלות פתוחות",openDef],
     ["תקלות סה\"כ",orders.reduce((s,o)=>s+(o.defects||[]).length,0)],
     ["חוסרים פתוחים",openSh],
@@ -4903,11 +5290,16 @@ function doExport(ctx){
   addSheet(wb,"סיכום כללי",["מדד","ערך"],sumRows,[30,26],null,"0F2942");
 
   // ── 1: פקודות עבודה ─────────────────────────────────────────────────────
-  const h1=['מספר פק"ע','P/N (מק"ט)','תיאור','פרויקט','סטטוס','כמות מוזמנת','סידוריים','נמסרו','% השלמה','מחיר ליחידה','שווי כולל','תאריך קבלה','יעד אספקה','ימים ליעד','שלבים','בלוק','זמן מכירה ליח\' (דק\')','זמן מכירה שנצבר (שע\')','זמן בפועל (שע\')','פער (שע\')','יעילות %','תקלות פתוחות','תקלות סה"כ','חוסרים פתוחים'];
+  const h1=['מספר פק"ע','P/N (מק"ט)','תיאור','פרויקט','סטטוס','כמות מוזמנת','סידוריים','נמסרו','% השלמה','מחיר ליחידה','שווי כולל','תאריך קבלה','יעד אספקה','ימים ליעד','שלבים','בלוק','זמן תקן ליח\' (דק\')','זמן מכירה ליח\' (דק\')','זמן תקן שנצבר (שע\')','זמן מכירה שנצבר (שע\')','זמן בפועל (שע\')','פער מול תקן (שע\')','עמידה בתקן %','פער מכירה (שע\')','ניצול %','תקלות פתוחות','תקלות סה"כ','חוסרים פתוחים'];
   const r1=orders.map(o=>{
     const sers=o.serials||[],logs=byOrder.get(o.id)||[];
     const act=logs.reduce((s,w)=>s+Number(w.durationMin||0),0);
     const sale=logs.reduce((s,w)=>s+saleOf(o,w),0);
+    // Standard minutes the logged work should have taken, at the same granularity
+    const stdRec=stdIdx.get(pnKey(o.pn));
+    const stdPerUnit=stdTotalMin(stdRec,o.stageIds||[]);
+    const stdAcc=logs.reduce((s,w)=>{const m=Number(w.durationMin||0);if(!(m>0))return s;return s+stdStageMin(stdRec,w.stageId)*unitsOf(w)},0);
+    const stdAct=logs.reduce((s,w)=>{const m=Number(w.durationMin||0);if(!(m>0)||!(stdStageMin(stdRec,w.stageId)>0))return s;return s+m},0);
     const pairs=new Set(logs.map(w=>`${w.serialId}|${w.stageId}`));
     const totalPairs=(sers.length||Number(o.qty||0))*(o.stageIds||[]).length;
     const stNames=(o.stageIds||[]).map(id=>sMap.get(id)?.name).filter(Boolean).join(", ");
@@ -4916,13 +5308,15 @@ function doExport(ctx){
       totalPairs>0?Math.round(pairs.size/totalPairs*100):0,
       Number(o.unitPrice||0),Number(o.unitPrice||0)*Number(o.qty||0),
       o.receivedDate||"",o.targetDate||"",o.targetDate?daysBetween(todays(),o.targetDate):"",
-      stNames,bMap.get(o.blockId)||"",xlRound(orderPerUnitMin(o,stages,stageBlocks)),
-      xlRound(sale/60),xlRound(act/60),xlRound((act-sale)/60),effOf(act,sale),
+      stNames,bMap.get(o.blockId)||"",stdPerUnit>0?xlRound(stdPerUnit):"",xlRound(orderPerUnitMin(o,stages,stageBlocks)),
+      stdAcc>0?xlRound(stdAcc/60):"",xlRound(sale/60),xlRound(act/60),
+      stdAcc>0?xlRound((stdAct-stdAcc)/60):"",effOf(stdAct,stdAcc),
+      xlRound((act-sale)/60),effOf(act,sale),
       (o.defects||[]).filter(d=>d.status!=="closed").length,(o.defects||[]).length,
       (o.shortages||[]).filter(h=>!h.received).length];
   });
-  addSheet(wb,"פקודות עבודה",h1,r1,[15,14,28,14,11,12,10,9,10,12,13,12,12,10,30,14,15,16,14,12,10,11,11,11],
-    (ri,c,row)=>c===4?(row[4]==="הושלמה"?XL_OK:row[4]==="תקועה"?XL_BAD:row[4]==="חלקית"?XL_INFO:XL_WARN):(c===20?effStyle(row[20]):null));
+  addSheet(wb,"פקודות עבודה",h1,r1,[15,14,28,14,11,12,10,9,10,12,13,12,12,10,30,14,15,15,16,16,14,15,12,14,10,11,11,11],
+    (ri,c,row)=>c===4?(row[4]==="הושלמה"?XL_OK:row[4]==="תקועה"?XL_BAD:row[4]==="חלקית"?XL_INFO:XL_WARN):((c===22||c===24)?effStyle(row[c]):null));
 
   // ── 2: סידוריים ─────────────────────────────────────────────────────────
   const h2=['פק"ע','P/N (מק"ט)','S/N','פרויקט','שלבים שהושלמו','מתוך','סטטוס','נמסר','זמן בפועל (דק\')','זמן מכירה (דק\')','פער (דק\')','יעילות %','עובדים','פעולה ראשונה','פעולה אחרונה'];
@@ -4964,20 +5358,22 @@ function doExport(ctx){
     (ri,c,row)=>c===8?(row[8]==="התקבל"?XL_OK:XL_WARN):null,"78350F");
 
   // ── 5: לוג עבודה ────────────────────────────────────────────────────────
-  const h5=['תאריך','יום','עובד','תפקיד','מחלקה','פק"ע','P/N (מק"ט)','S/N','פעולה (שלב)','פרויקט','סוג רישום','התחלה','סיום','זמן נטו (דק\')','הפסקות (דק\')','יחידות','זמן ליחידה (דק\')','זמן מכירה (דק\')','פער (דק\')','יעילות %'];
+  const h5=['תאריך','יום','עובד','תפקיד','מחלקה','פק"ע','P/N (מק"ט)','S/N','פעולה (שלב)','פרויקט','סוג רישום','התחלה','סיום','זמן נטו (דק\')','הפסקות (דק\')','יחידות','זמן ליחידה (דק\')','זמן תקן (דק\')','פער מול תקן (דק\')','עמידה בתקן %','זמן מכירה (דק\')','פער מכירה (דק\')','ניצול %'];
   const r5=done.slice().sort((a,b)=>String(b.endTime||"").localeCompare(String(a.endTime||""))).map(w=>{
     const o=oMap.get(w.orderId),u=uMap.get(w.userId),st=sMap.get(w.stageId);
     const day=w.endTime||w.startTime?isoOf(new Date(w.endTime||w.startTime)):"";
     const act=Number(w.durationMin||0),n=unitsOf(w),sale=saleOf(o,w);
+    const std=act>0?stdStageMin(stdIdx.get(pnKey(o?.pn)),w.stageId)*n:0;
     return[day,day?HEB_DAYS[new Date(day+"T00:00:00").getDay()]:"",w.userName||"",ROLES[u?.role]?.label||"",dMap.get(u?.departmentId)||"",
       o?.woNumber||"",o?.pn||"",w.serialSn||"",st?.name||"",pMap.get(o?.projectId)||"",
       w.bulk?"קבוצתי":act>0?"עבודה":"חתימה",
       w.startTime?w.startTime.slice(0,16).replace("T"," "):"",w.endTime?w.endTime.slice(0,16).replace("T"," "):"",
       xlRound(act),xlRound(w.totalPauseMin||0),n,xlRound(n>0?act/n:act),
+      std>0?xlRound(std):"",std>0?xlRound(act-std):"",effOf(act,std),
       sale>0?xlRound(sale):"",sale>0?xlRound(act-sale):"",effOf(act,sale)];
   });
-  addSheet(wb,"לוג עבודה",h5,r5,[12,8,16,13,14,14,13,17,15,13,10,17,17,12,12,8,14,14,11,10],
-    (ri,c,row)=>c===19?effStyle(row[19]):null,"1E3A8A");
+  addSheet(wb,"לוג עבודה",h5,r5,[12,8,16,13,14,14,13,17,15,13,10,17,17,12,12,8,14,13,15,12,14,15,10],
+    (ri,c,row)=>(c===19||c===22)?effStyle(row[c]):null,"1E3A8A");
 
   // ── 6: משימות ───────────────────────────────────────────────────────────
   const h6=['תאריך','עובד','תפקיד','משימה','תיאור','מחיר','סטטוס','התחלה','סיום','זמן (דק\')','הפסקות (דק\')'];
@@ -5020,21 +5416,46 @@ function doExport(ctx){
   addSheet(wb,"ביצועי עובדים",h8,r8,[16,14,13,14,15,7,11,10,9,9,9,12,12,11,10,10,11,11,11,14],
     (ri,c,row)=>c===14?effStyle(row[14]):null,"0F766E");
 
-  // ── 9: זמני תקן ─────────────────────────────────────────────────────────
-  // The measured time per מק"ט × שלב against the time the price list sells.
-  const h9=['P/N (מק"ט)','שלב','דגימות','ממוצע (דק\')','חציון (דק\')','סטיית תקן','פיזור CV %','מהיר ביותר','איטי ביותר','זמן מכירה (דק\')','פער (דק\')','יעילות %','רמת ביטחון','יציבות'];
-  const samples=timeSamples(done,orders,stages,stageBlocks);
+  // ── 9: זמן תקן מול בפועל ────────────────────────────────────────────────
+  // Per מק"ט × שלב: the standard defined up-front, the time actually measured,
+  // and the time the price list sells — with the gaps between them.
+  const h9=['P/N (מק"ט)','שלב','דגימות','זמן תקן (דק\')','זמן בפועל ממוצע (דק\')','חציון (דק\')','פער מול תקן (דק\')','עמידה בתקן %','סטיית תקן','פיזור CV %','מהיר ביותר','איטי ביותר','זמן מכירה (דק\')','פער מכירה (דק\')','ניצול %','רמת ביטחון','יציבות'];
+  const samples=timeSamples(done,orders,stages,stageBlocks,stdIdx);
   const grp=new Map();
-  samples.forEach(s=>{const k=`${s.pn}|${s.stageId}`;if(!grp.has(k))grp.set(k,{pn:s.pn,stage:s.stageName,order:s.stageOrder,sale:0,vals:[]});
-    const g=grp.get(k);g.vals.push(s.min);if(s.sale>0)g.sale=s.sale});
+  samples.forEach(s=>{const k=`${s.pn}|${s.stageId}`;if(!grp.has(k))grp.set(k,{pn:s.pn,stageId:s.stageId,stage:s.stageName,order:s.stageOrder,sale:0,std:0,vals:[]});
+    const g=grp.get(k);g.vals.push(s.min);if(s.sale>0)g.sale=s.sale;if(s.std>0)g.std=s.std});
+  // A מק"ט+שלב that carries a standard but was never measured still belongs here
+  (pnStandards||[]).forEach(rec=>{
+    Object.entries(rec.stageMin||{}).forEach(([sid,v])=>{
+      const min=Number(v)||0;if(!(min>0))return;
+      const k=`${pnKey(rec.pn)}|${sid}`;if(grp.has(k))return;
+      const st=sMap.get(sid);
+      grp.set(k,{pn:pnKey(rec.pn),stageId:sid,stage:st?.name||sid,order:Number(st?.order||99),sale:0,std:min,vals:[]});
+    });
+  });
   const r9=[...grp.values()].map(g=>{
     const st=statsOf(g.vals);
-    return[g.pn,g.stage,st.n,xlRound(st.mean),xlRound(st.median),xlRound(st.sd),Math.round(st.cv),xlRound(st.lo),xlRound(st.hi),
-      xlRound(g.sale),g.sale>0?xlRound(st.mean-g.sale):"",g.sale>0&&st.mean>0?Math.round(g.sale/st.mean*100):"",
+    const adh=g.std>0&&st.mean>0?Math.round(g.std/st.mean*100):"";
+    return[g.pn,g.stage,st.n,g.std>0?xlRound(g.std):"",st.n?xlRound(st.mean):"",st.n?xlRound(st.median):"",
+      g.std>0&&st.n?xlRound(st.mean-g.std):"",adh,
+      xlRound(st.sd),Math.round(st.cv),st.n?xlRound(st.lo):"",st.n?xlRound(st.hi):"",
+      xlRound(g.sale),g.sale>0&&st.n?xlRound(st.mean-g.sale):"",g.sale>0&&st.mean>0?Math.round(g.sale/st.mean*100):"",
       confOf(st.n).label,cvInfo(st.cv).label];
   }).sort((a,b)=>String(a[0]).localeCompare(String(b[0]),"he")||String(a[1]).localeCompare(String(b[1]),"he"));
-  addSheet(wb,"זמני תקן",h9,r9,[14,16,9,12,12,11,11,12,12,14,11,10,12,12],
-    (ri,c,row)=>c===11?effStyle(row[11]):null,"5B21B6");
+  addSheet(wb,"זמן תקן מול בפועל",h9,r9,[14,16,9,12,16,12,14,11,11,11,12,12,14,13,10,12,12],
+    (ri,c,row)=>(c===7||c===14)?effStyle(row[c]):null,"5B21B6");
+
+  // ── 9b: הגדרות זמן תקן ──────────────────────────────────────────────────
+  // The standards themselves, one row per מק"ט, exactly as they were entered.
+  const h9b=['P/N (מק"ט)','זמן תקן ליחידה (דק\')','שלבים מוגדרים','פירוט לפי שלב','הערה','עודכן ע"י','עודכן בתאריך'];
+  const r9b=(pnStandards||[]).map(rec=>{
+    const ids=Object.keys(rec.stageMin||{}).filter(id=>Number(rec.stageMin[id])>0)
+      .sort((a,b)=>Number(sMap.get(a)?.order||99)-Number(sMap.get(b)?.order||99));
+    return[pnKey(rec.pn),xlRound(stdTotalMin(rec,ids)),ids.length,
+      ids.map(id=>`${sMap.get(id)?.name||id}: ${xlRound(rec.stageMin[id])}`).join(" · "),
+      rec.note||"",rec.updatedBy||"",String(rec.updatedAt||"").slice(0,10)];
+  }).sort((a,b)=>String(a[0]).localeCompare(String(b[0]),"he"));
+  addSheet(wb,"הגדרות זמן תקן",h9b,r9b,[16,18,13,52,26,16,14],null,"065F46");
 
   // ── 10: שלבים ───────────────────────────────────────────────────────────
   const h10=['שלב','סדר','זמן מכירה (דק\')','מחיר','תעריף שעתי','תפקיד נדרש','צבע','פעולות שנרשמו','זמן ממוצע בפועל (דק\')','פער (דק\')','יעילות %'];
@@ -5282,7 +5703,7 @@ function doImport(file,ctx,cb){
   fr.readAsArrayBuffer(file);
 }
 
-function ExcelTab({orders,projects,stages,stageBlocks,workLogs,users,customTasks,dailyPlans,departments,updO,canImport}){
+function ExcelTab({orders,projects,stages,stageBlocks,workLogs,users,customTasks,dailyPlans,departments,pnStandards,updO,canImport}){
   const {toast}=useToast();
   const [res,setRes]=useState(null);const[mode,setMode]=useState("replace");const[drag,setDrag]=useState(false);
   const [showIssues,setShowIssues]=useState(false);
@@ -5291,7 +5712,7 @@ function ExcelTab({orders,projects,stages,stageBlocks,workLogs,users,customTasks
     setRes(data);setShowIssues(false);
     toast(`נקראו ${data.stats.orders} פק"ע · ${data.stats.serials} סידוריים`,"success");
   })};
-  const exportCtx={orders,projects,stages,stageBlocks,workLogs,users,customTasks,dailyPlans,departments};
+  const exportCtx={orders,projects,stages,stageBlocks,workLogs,users,customTasks,dailyPlans,departments,pnStandards};
   const errCount=(res?.issues||[]).filter(x=>x.level!=="info").length;
   return(
     <div className="fade-in">
@@ -5301,7 +5722,7 @@ function ExcelTab({orders,projects,stages,stageBlocks,workLogs,users,customTasks
       <Card style={{marginBottom:14}}>
         <div style={{fontWeight:700,marginBottom:6}}>📤 ייצוא דוח מלא</div>
         <div style={{fontSize:13,color:"var(--c-muted)",marginBottom:10}}>
-          14 גיליונות מעוצבים: סיכום כללי · פקודות עבודה · סידוריים · תקלות · חוסרים · לוג עבודה · משימות · תוכניות עבודה · ביצועי עובדים · זמני תקן · שלבים · בלוקים · עובדים · מחלקות
+          15 גיליונות מעוצבים: סיכום כללי · פקודות עבודה · סידוריים · תקלות · חוסרים · לוג עבודה · משימות · תוכניות עבודה · ביצועי עובדים · זמן תקן מול בפועל · הגדרות זמן תקן · שלבים · בלוקים · עובדים · מחלקות
         </div>
         <div style={{display:"flex",gap:12,flexWrap:"wrap",marginBottom:12,fontSize:11.5,color:"var(--c-dim)"}}>
           <span>📋 {orders.length} פק"ע</span><span>🏷️ {orders.reduce((s,o)=>s+(o.serials||[]).length,0)} סידוריים</span>
@@ -6295,6 +6716,7 @@ function App(){
   const [customTasks,setCustomTasks]=useState([]);
   const [departments,setDepartments]=useState([]);
   const [dailyPlans,setDailyPlans]=useState([]);
+  const [pnStandards,setPnStandards]=useState([]);
   const [workdayHours,setWorkdayHours]=useState(()=>{const v=Number(LS.get(WORKDAY_LS_KEY));return v>0?v:8});
   const [loading,setLoading]=useState(true);
   const [sync,setSync]=useState("ok");
@@ -6355,6 +6777,7 @@ function App(){
       const lsb=LS.get("stageBlocks");if(lsb)setStageBlocks(lsb);
       const ldp=LS.get("departments");if(ldp)setDepartments(ldp);
       const lpl=LS.get("dailyPlans");if(lpl)setDailyPlans(lpl);
+      const lps=LS.get("pnStandards");if(lps)setPnStandards(lps);
     }
 
     // Then always load from Supabase (Supabase is the source of truth)
@@ -6369,6 +6792,8 @@ function App(){
         setStageBlocks(data.stageBlocks||[]);LS.set("stageBlocks",data.stageBlocks||[]);
         setDepartments(data.departments||[]);LS.set("departments",data.departments||[]);
         setDailyPlans(data.dailyPlans||[]);LS.set("dailyPlans",data.dailyPlans||[]);
+        // null = the pn_standards table isn't there yet — keep the local copy
+        if(data.pnStandards){setPnStandards(data.pnStandards);LS.set("pnStandards",data.pnStandards)}
         LS.set("session_company",_companyId);
       }
       if(users?.length){LS.set("users",users)}
@@ -6445,6 +6870,7 @@ function App(){
         if(data.stageBlocks){setStageBlocks(data.stageBlocks);LS.set("stageBlocks",data.stageBlocks)}
         if(data.departments){setDepartments(data.departments);LS.set("departments",data.departments)}
         if(data.dailyPlans){setDailyPlans(data.dailyPlans);LS.set("dailyPlans",data.dailyPlans)}
+        if(data.pnStandards){setPnStandards(data.pnStandards);LS.set("pnStandards",data.pnStandards)}
       }
       if(users?.length)LS.set("users",users);
       setSync("ok");
@@ -6495,7 +6921,7 @@ function App(){
         ws=new WebSocket(wsUrl);
         ws.onopen=()=>{
           console.log("Realtime WS connected");
-          const tables=["orders","work_logs","custom_tasks","stages","projects","stage_blocks","departments","daily_plans"];
+          const tables=["orders","work_logs","custom_tasks","stages","projects","stage_blocks","departments","daily_plans","pn_standards"];
           tables.forEach((t,i)=>{
             ws.send(JSON.stringify({
               topic:`realtime:public:${t}`,
@@ -6561,6 +6987,8 @@ function App(){
   useEffect(()=>{dpRef.current=departments},[departments]);
   const plRef=useRef(dailyPlans);
   useEffect(()=>{plRef.current=dailyPlans},[dailyPlans]);
+  const psRef=useRef(pnStandards);
+  useEffect(()=>{psRef.current=pnStandards},[pnStandards]);
 
   // Saves the latest state (from refs) to Supabase. Marks the data "unsaved" again and
   // retries on failure, so polling/realtime never overwrite a change that didn't land.
@@ -6578,6 +7006,9 @@ function App(){
         SB.upsert("custom_tasks",ctRef.current.map(taskToDb)),
         SB.upsert("departments",dpRef.current.map(deptToDb)),
         SB.upsert("daily_plans",plRef.current.map(planToDb)),
+        // Standard times live in their own (newer) table — if it hasn't been created
+        // yet the rest of the save must still succeed; the local cache keeps them.
+        SB.upsert("pn_standards",psRef.current.map(pnStdToDb)).catch(e=>console.warn("pn_standards save skipped",e)),
       ]);
       lastPersistRef.current=Date.now();
       setSync("ok");
@@ -6588,12 +7019,12 @@ function App(){
     }finally{saveRunningRef.current=false}
   };
   doSaveRef.current=doSave;
-  const persist=(no,np,ns,nw,nct,nsb,ndp,npl)=>{
-    const o=no??oRef.current,p=np??pRef.current,s=ns??sRef.current,w=nw??wRef.current,ct=nct??ctRef.current,sb=nsb??sbRef.current,dp=ndp??dpRef.current,pl=npl??plRef.current;
+  const persist=(no,np,ns,nw,nct,nsb,ndp,npl,nps)=>{
+    const o=no??oRef.current,p=np??pRef.current,s=ns??sRef.current,w=nw??wRef.current,ct=nct??ctRef.current,sb=nsb??sbRef.current,dp=ndp??dpRef.current,pl=npl??plRef.current,ps=nps??psRef.current;
     // Refs lag one render behind the state — sync them now so doSave sees this change
-    oRef.current=o;pRef.current=p;sRef.current=s;wRef.current=w;ctRef.current=ct;sbRef.current=sb;dpRef.current=dp;plRef.current=pl;
+    oRef.current=o;pRef.current=p;sRef.current=s;wRef.current=w;ctRef.current=ct;sbRef.current=sb;dpRef.current=dp;plRef.current=pl;psRef.current=ps;
     // Always save to localStorage immediately
-    LS.set("orders",o);LS.set("projects",p);LS.set("stages",s);LS.set("workLogs",w);LS.set("customTasks",ct);LS.set("stageBlocks",sb);LS.set("departments",dp);LS.set("dailyPlans",pl);
+    LS.set("orders",o);LS.set("projects",p);LS.set("stages",s);LS.set("workLogs",w);LS.set("customTasks",ct);LS.set("stageBlocks",sb);LS.set("departments",dp);LS.set("dailyPlans",pl);LS.set("pnStandards",ps);
     lastPersistRef.current=Date.now();
     pendingSaveRef.current=true;
     setSync("saving");clearTimeout(saveTimer);
@@ -6606,8 +7037,8 @@ function App(){
     setCompanyId(cid);
     // If company changed — clear stale cache immediately so no data leaks between companies
     if(cid!==prevCid){
-      setOrders([]);setProjects(DEF_PROJ);setStages(DEF_STAGES);setWorkLogs([]);setCustomTasks([]);setStageBlocks([]);setDepartments([]);setDailyPlans([]);
-      ["orders","projects","stages","workLogs","customTasks","stageBlocks","departments","dailyPlans"].forEach(k=>{try{localStorage.removeItem(LS_PREFIX+k)}catch{}});
+      setOrders([]);setProjects(DEF_PROJ);setStages(DEF_STAGES);setWorkLogs([]);setCustomTasks([]);setStageBlocks([]);setDepartments([]);setDailyPlans([]);setPnStandards([]);
+      ["orders","projects","stages","workLogs","customTasks","stageBlocks","departments","dailyPlans","pnStandards"].forEach(k=>{try{localStorage.removeItem(LS_PREFIX+k)}catch{}});
     }
     setCurrentUser(u);
     try{localStorage.setItem(LS_PREFIX+"session",JSON.stringify({id:u.id,username:u.username,companyId:cid}))}catch{}
@@ -6666,6 +7097,43 @@ function App(){
   const updO=useCallback((fn)=>{setOrders(prev=>{const next=typeof fn==="function"?fn(prev):fn;persist(next,null,null,null);return next})},[]);
   const updP=useCallback((fn)=>{setProjects(prev=>{const next=typeof fn==="function"?fn(prev):fn;persist(null,next,null,null);return next})},[]);
   const updD=useCallback((fn)=>{setDepartments(prev=>{const next=typeof fn==="function"?fn(prev):fn;persist(null,null,null,null,null,null,next);return next})},[]);
+
+  // ── Standard times (זמן תקן) — one record per מק"ט, minutes per stage ──
+  // Stages left blank are dropped, so a מק"ט with nothing filled in simply has
+  // no standard rather than a standard of zero.
+  const savePnStd=useCallback((pn,stageMin,extra)=>{
+    const k=pnKey(pn);if(!k)return;
+    setPnStandards(prev=>{
+      const clean={};
+      Object.entries(stageMin||{}).forEach(([sid,v])=>{const n=Number(v);if(sid.startsWith("__")||!(n>0))return;clean[sid]=Math.round(n*10)/10});
+      // Saving is also the moment to collapse any duplicate rows for this מק"ט:
+      // keep the newest, drop the rest here and in the DB.
+      const mine=prev.filter(r=>pnKey(r.pn)===k).sort((a,b)=>String(b.updatedAt||"").localeCompare(String(a.updatedAt||"")));
+      const others=prev.filter(r=>pnKey(r.pn)!==k);
+      const stale=mine.slice(1);
+      const base=mine[0]||{id:"std_"+uid(),pn:k,total:0,note:""};
+      const rec={...base,...(extra||{}),pn:k,stageMin:clean,updatedBy:currentUser?.name||"",updatedAt:nowISO()};
+      // Everything cleared = no standard at all, not a standard of zero
+      const drop=(!Object.keys(clean).length&&!(Number(rec.total)>0))?mine:stale;
+      if(drop===mine&&!mine.length)return prev;
+      const next=drop===mine?others:[...others,rec];
+      persist(null,null,null,null,null,null,null,null,next);
+      drop.forEach(r=>SB.del("pn_standards",{id:r.id}).catch(()=>{}));
+      return next;
+    });
+    addAuditEntry({userId:currentUser?.id,username:currentUser?.username,name:currentUser?.name,action:"עדכון זמן תקן",target:k,details:""});
+  },[currentUser]);
+  const deletePnStd=useCallback((pn)=>{
+    const k=pnKey(pn);
+    setPnStandards(prev=>{
+      const gone=prev.filter(r=>pnKey(r.pn)===k);
+      const next=prev.filter(r=>pnKey(r.pn)!==k);
+      persist(null,null,null,null,null,null,null,null,next);
+      gone.forEach(r=>SB.del("pn_standards",{id:r.id}).catch(()=>{}));
+      return next;
+    });
+    addAuditEntry({userId:currentUser?.id,username:currentUser?.username,name:currentUser?.name,action:"מחיקת זמן תקן",target:k,details:""});
+  },[currentUser]);
 
   // Auto-delivery: per serial — when a serial finishes all stages, mark it as delivered
   const checkAutoDelivery=(orderId,nextLogs)=>{
@@ -6804,7 +7272,7 @@ function App(){
     {id:"shortages",label:"⚠️ חוסרים"},
     {id:"mywork",label:"🔨 עבודה"},
     {id:"workers",label:"👥 עובדים"},
-    {id:"stdtimes",label:"⏱️ זמני תקן"},
+    {id:"stdtimes",label:"⏱️ זמן תקן ובפועל"},
     {id:"reports",label:"📄 דוחות"},
     {id:"yield",label:"📉 Yield"},
     {id:"stages",label:"🔧 שלבים"},
@@ -6819,7 +7287,7 @@ function App(){
     {id:"shortages",label:"⚠️ חוסרים"},
     {id:"mywork",label:"🔨 עבודה"},
     {id:"workers",label:"👥 עובדים"},
-    {id:"stdtimes",label:"⏱️ זמני תקן"},
+    {id:"stdtimes",label:"⏱️ זמן תקן ובפועל"},
     {id:"reports",label:"📄 דוחות"},
     {id:"yield",label:"📉 Yield"},
     {id:"projects",label:"🏗️ פרויקטים"},
@@ -6828,7 +7296,7 @@ function App(){
     {id:"team",label:"👥 הצוות שלי"},
     {id:"reports",label:"📄 דוחות"},
     {id:"mywork",label:"🔨 העבודה שלי",badge:myPlanCount},
-    {id:"stdtimes",label:"⏱️ זמני תקן"},
+    {id:"stdtimes",label:"⏱️ זמן תקן ובפועל"},
     {id:"orders",label:'📋 פק"ע'},
   ]:[
     {id:"mywork",label:"🔨 העבודה שלי",badge:myPlanCount},
@@ -6858,13 +7326,20 @@ function App(){
       const dProj=[{id:"p1",name:"פרויקט אלפא"},{id:"p2",name:"פרויקט בטא"},{id:"p3",name:"פרויקט גמא"},{id:"p4",name:"פרויקט דלתא"}];
       // minutes = the time sold for the stage per the price list (זמן מכירה)
       const dStages=[{id:"s1",name:"קליטה וקלט",stage_order:1,color:"#3b82f6",price:80,hourly_rate:160,minutes:30},{id:"s2",name:"הרכבה",stage_order:2,color:"#8b5cf6",price:150,hourly_rate:180,minutes:50},{id:"s3",name:"בדיקת חשמל",stage_order:3,color:"#06b6d4",price:120,hourly_rate:180,minutes:40},{id:"s4",name:"בדיקת מכנית",stage_order:4,color:"#f59e0b",price:100,hourly_rate:170,minutes:35},{id:"s5",name:"QC סופי",stage_order:5,color:"#10b981",price:90,hourly_rate:170,minutes:32},{id:"s6",name:"אריזה ומשלוח",stage_order:6,color:"#ec4899",price:60,hourly_rate:150,minutes:24}];
-      // Demo work times are built from the sold time so the standard-time analysis
-      // has something to say: every worker gets a stable skill factor (below 1 =
+      // Demo work times are built from the sold time so the time analysis has
+      // something to say: every worker gets a stable skill factor (below 1 =
       // faster than the price list) plus a little noise, and heavier מק"טים take
       // proportionally longer.
-      const stdMin=Object.fromEntries(dStages.map(s2=>[s2.id,s2.minutes]));
+      const saleMin=Object.fromEntries(dStages.map(s2=>[s2.id,s2.minutes]));
       const SKILL={w1:0.82,w2:0.9,w3:1.16,w4:1.28,w5:0.95,w6:1.05,w7:0.88,w8:1.0,w9:1.22,w10:0.93,w11:1.08,w12:1.34};
       const SPREAD={w1:0.08,w2:0.12,w3:0.3,w4:0.34,w5:0.1,w6:0.16,w7:0.09,w8:0.14,w9:0.28,w10:0.11,w11:0.2,w12:0.36};
+      // How much longer a heavy מק"ט takes than the price list — the same factor
+      // drives both its standard time and the times the floor reports.
+      const pnFactorOf=pi=>0.85+((pi%5)*0.09);
+      // זמן תקן — the engineering standard defined up-front per מק"ט. Deliberately
+      // not identical to the price list: some מק"טים are given a tight standard the
+      // floor struggles to meet, others a generous one it beats comfortably.
+      const STD_TARGET=[1.02,0.93,1.10,0.97,1.14,0.90,1.06,1.0];
 
       // Generate 12 months of orders
       const orders=[];const wlogs=[];const tasks=[];
@@ -6901,10 +7376,10 @@ function App(){
               stageIds.forEach((sid,stIdx)=>{
                 const wId=WIDS[(si+stIdx)%WIDS.length];
                 const startT=new Date(baseDate.getTime()+(si*2+stIdx)*864e5+(8*3600000));
-                const pnFactor=0.85+((pi%5)*0.09);
+                const pnFactor=pnFactorOf(pi);
                 const skill=SKILL[wId]||1,spread=SPREAD[wId]||0.15;
                 const noise=1+(Math.random()+Math.random()-1)*spread;   // roughly bell-shaped around 1
-                const dur=Math.max(4,Math.round((stdMin[sid]||30)*pnFactor*skill*noise));
+                const dur=Math.max(4,Math.round((saleMin[sid]||30)*pnFactor*skill*noise));
                 const breaks=Math.random()>0.7?[{start:new Date(startT.getTime()+20*60000).toISOString(),end:new Date(startT.getTime()+35*60000).toISOString()}]:[];
                 wlogs.push({id:`wl_${oId}_${sr.id}_${sid}`,user_id:wId,user_name:W[wId],serial_id:sr.id,serial_sn:sr.sn,stage_id:sid,order_id:oId,start_time:startT.toISOString(),end_time:new Date(startT.getTime()+dur*60000).toISOString(),completed:true,duration_min:dur,paused:false,pause_start:null,total_pause_min:breaks.length?15:0,pause_log:breaks,bulk:false,bulk_group_id:null,bulk_count:null});
               });
@@ -6912,6 +7387,16 @@ function App(){
           }
         });
       }
+
+      // Standard times (זמן תקן) — one record per מק"ט, minutes per stage
+      const dPnStd=pns.map(([pn,desc],pi)=>{
+        const route=["s1","s2","s3","s4","s5","s6"].slice(0,4+(pi%3));
+        const f=pnFactorOf(pi),tf=STD_TARGET[pi%STD_TARGET.length];
+        const stageMin={};
+        route.forEach(sid=>{stageMin[sid]=Math.max(1,Math.round((saleMin[sid]||30)*f*tf))});
+        return pnStdToDb({id:`demo_std_${pi}`,pn,stageMin,total:0,
+          note:`תקן הנדסי — ${desc}`,updatedBy:"נתוני דמו",companyId:_companyId});
+      });
 
       // Custom tasks - spread across the year
       const taskNames=["הכנת דוח חודשי","סידור מחסן","ניקוי ציוד","הדרכת עובד חדש","בדיקת מלאי","עדכון נהלים","תיקון כלי עבודה","ביקורת בטיחות"];
@@ -6940,6 +7425,11 @@ function App(){
       for(const chunk of chunked(orders,CHUNK))await SB.upsert("orders",chunk);
       for(const chunk of chunked(wlogs,CHUNK))await SB.upsert("work_logs",chunk);
       for(const chunk of chunked(tasks,CHUNK))await SB.upsert("custom_tasks",chunk);
+      // The standards table is newer than the rest — if it hasn't been created the
+      // demo still works, the standards simply stay in the local cache.
+      await SB.upsert("pn_standards",dPnStd).catch(e=>console.warn("pn_standards demo upsert skipped",e));
+      const localStd=dPnStd.map(dbToPnStd);
+      setPnStandards(localStd);LS.set("pnStandards",localStd);psRef.current=localStd;
 
       // Reload
       const [data,freshUsers]=await Promise.all([dbLoadAll(),dbLoadUsers()]);
@@ -6948,6 +7438,7 @@ function App(){
       if(data.stages){setStages(data.stages);LS.set("stages",data.stages)}
       if(data.workLogs){setWorkLogs(data.workLogs);LS.set("workLogs",data.workLogs)}
       if(data.customTasks){setCustomTasks(data.customTasks);LS.set("customTasks",data.customTasks)}
+      if(data.pnStandards?.length){setPnStandards(data.pnStandards);LS.set("pnStandards",data.pnStandards)}
       if(freshUsers?.length){LS.set("users",freshUsers)}
       setSync("ok");
       toast("נתוני דמו נטענו בהצלחה!","success");
@@ -6955,7 +7446,7 @@ function App(){
   };
 
   const deleteDemoData=async()=>{
-    if(!confirm("למחוק את כל נתוני הדמו? (פקעות, לוגים, משימות שמתחילות ב-demo_)"))return;
+    if(!confirm("למחוק את כל נתוני הדמו? (פקעות, לוגים, משימות וזמני תקן שמתחילים ב-demo_)"))return;
     setSync("saving");
     try{
       // Delete demo records by ID prefix using Supabase like operator
@@ -6965,18 +7456,22 @@ function App(){
       ]);
       await fetch(`${SB_URL}/rest/v1/orders?id=like.demo_o_*`,{method:"DELETE",headers:sbHeaders()});
       await fetch(`${SB_URL}/rest/v1/departments?id=like.demo_d*`,{method:"DELETE",headers:sbHeaders()}).catch(()=>{});
+      await fetch(`${SB_URL}/rest/v1/pn_standards?id=like.demo_std_*`,{method:"DELETE",headers:sbHeaders()}).catch(()=>{});
+      const noDemoStd=psRef.current.filter(r=>!String(r.id||"").startsWith("demo_std_"));
+      setPnStandards(noDemoStd);LS.set("pnStandards",noDemoStd);psRef.current=noDemoStd;
       const data=await dbLoadAll();
       if(data.orders){setOrders(data.orders);LS.set("orders",data.orders)}
       if(data.workLogs){setWorkLogs(data.workLogs);LS.set("workLogs",data.workLogs)}
       if(data.customTasks){setCustomTasks(data.customTasks);LS.set("customTasks",data.customTasks)}
       if(data.departments){setDepartments(data.departments);LS.set("departments",data.departments)}
+      if(data.pnStandards){setPnStandards(data.pnStandards);LS.set("pnStandards",data.pnStandards)}
       setSync("ok");
       toast("נתוני דמו נמחקו!","success");
     }catch(e){console.error(e);setSync("error");toast("שגיאה: "+e.message,"error")}
   };
   useEffect(()=>{const isi=window.matchMedia("(display-mode:standalone)").matches||window.navigator.standalone;if(isi){setIsStandalone(true);return;}const h=e=>{e.preventDefault();setInstallPrompt(e);setShowInstall(true)};window.addEventListener("beforeinstallprompt",h);window.addEventListener("appinstalled",()=>{setShowInstall(false);setInstallPrompt(null);setIsStandalone(true)});return()=>window.removeEventListener("beforeinstallprompt",h)},[]);
   // Service Worker
-  useEffect(()=>{if(!("serviceWorker" in navigator))return;navigator.serviceWorker.register("./sw.js?v=25").then(reg=>{swRegRef.current=reg;if(reg.waiting)setShowUpdate(true);reg.addEventListener("updatefound",()=>{const nw=reg.installing;if(!nw)return;nw.addEventListener("statechange",()=>{if(nw.state==="installed"&&navigator.serviceWorker.controller)setShowUpdate(true)})});setInterval(()=>reg.update(),30*60*1000)}).catch(()=>{});navigator.serviceWorker.addEventListener("controllerchange",()=>window.location.reload())},[]);
+  useEffect(()=>{if(!("serviceWorker" in navigator))return;navigator.serviceWorker.register("./sw.js?v=26").then(reg=>{swRegRef.current=reg;if(reg.waiting)setShowUpdate(true);reg.addEventListener("updatefound",()=>{const nw=reg.installing;if(!nw)return;nw.addEventListener("statechange",()=>{if(nw.state==="installed"&&navigator.serviceWorker.controller)setShowUpdate(true)})});setInterval(()=>reg.update(),30*60*1000)}).catch(()=>{});navigator.serviceWorker.addEventListener("controllerchange",()=>window.location.reload())},[]);
   // Network status
   useEffect(()=>{const on=()=>{setIsOffline(false);toast("החיבור חזר — מסנכרן נתונים...","success");refreshFromDB(true)};const off=()=>{setIsOffline(true)};window.addEventListener("online",on);window.addEventListener("offline",off);return()=>{window.removeEventListener("online",on);window.removeEventListener("offline",off)}},[]);
   // PWA Install
@@ -7010,16 +7505,16 @@ function App(){
       <main className="main-content" style={{maxWidth:1440,margin:"0 auto",padding:"16px 14px",paddingBottom:showInstall?"100px":"calc(16px + env(safe-area-inset-bottom,0px))"}}>
         {tab==="dashboard"&&<Dashboard orders={filteredOrders} projects={filteredProjects} stages={stages} users={visibleUsers} workLogs={filteredWorkLogs} departments={visibleDepartments} customTasks={customTasks}/>}
         {tab==="team"&&isLead&&<TeamDashboard users={getUsers()} workLogs={filteredWorkLogs} orders={filteredOrders} stages={stages} customTasks={customTasks} departments={departments} onAddTask={handleAddTask} onDeleteTask={handleDeleteTask} onMarkPartialTask={handleMarkPartialTask} onMarkDoneTask={handleMarkDoneTask} dailyPlans={dailyPlans} onAddPlan={handleAddPlan} onDeletePlan={handleDeletePlan} onTogglePlanDone={handleTogglePlanDone}/>}
-        {tab==="orders"&&<Orders orders={filteredOrders} projects={filteredProjects} stages={stages} stageBlocks={stageBlocks} updO={updO} workLogs={filteredWorkLogs} onWorkLog={handleStartWork} workdayHours={workdayHours} setWorkdayHours={setWorkdayHoursPersist}/>}
+        {tab==="orders"&&<Orders orders={filteredOrders} projects={filteredProjects} stages={stages} stageBlocks={stageBlocks} updO={updO} workLogs={filteredWorkLogs} onWorkLog={handleStartWork} workdayHours={workdayHours} setWorkdayHours={setWorkdayHoursPersist} pnStandards={pnStandards}/>}
         {tab==="shortages"&&<Shortages orders={filteredOrders} updO={updO} projects={filteredProjects}/>}
         {tab==="mywork"&&<MyWork orders={filteredOrders} stages={stages} workLogs={filteredWorkLogs} onStartWork={handleStartWork} onEndWork={handleEndWork} onPauseWork={handlePauseWork} onResumeWork={handleResumeWork} customTasks={customTasks} onAddTask={handleAddTask} onStartTask={handleStartTask} onEndTask={handleEndTask} onPauseTask={handlePauseTask} onResumeTask={handleResumeTask} onDeleteTask={handleDeleteTask} onMarkPartialTask={handleMarkPartialTask} onMarkDoneTask={handleMarkDoneTask} users={getUsers()} dailyPlans={dailyPlans} onMarkPlanDone={handleMarkPlanDone}/>}
         {tab==="workers"&&(isAdmin||isDeptMgr)&&<WorkersDashboard users={visibleUsers} workLogs={filteredWorkLogs} orders={filteredOrders} stages={stages} customTasks={customTasks} onAddTask={handleAddTask} onDeleteLog={handleDeleteLog} onDeleteTask={handleDeleteTask} onMarkPartialTask={handleMarkPartialTask} onMarkDoneTask={handleMarkDoneTask} dailyPlans={dailyPlans} onAddPlan={handleAddPlan} onDeletePlan={handleDeletePlan} onTogglePlanDone={handleTogglePlanDone}/>}
-        {tab==="stdtimes"&&(isAdmin||isDeptMgr||isLead)&&<StandardTimes orders={filteredOrders} stages={stages} stageBlocks={stageBlocks} workLogs={filteredWorkLogs} users={visibleUsers} projects={filteredProjects}/>}
+        {tab==="stdtimes"&&(isAdmin||isDeptMgr||isLead)&&<StandardTimes orders={filteredOrders} stages={stages} stageBlocks={stageBlocks} workLogs={filteredWorkLogs} users={visibleUsers} projects={filteredProjects} pnStandards={pnStandards} onSavePnStd={savePnStd} onDeletePnStd={deletePnStd}/>}
         {tab==="yield"&&<YieldDashboard orders={filteredOrders} projects={filteredProjects} stages={stages} workLogs={filteredWorkLogs}/>}
         {tab==="stages"&&isAdmin&&<StagesManagement stages={stages} setStages={setStages} stageBlocks={stageBlocks} setStageBlocks={setStageBlocks} persist={persist}/>}
         {tab==="projects"&&<Projects projects={filteredProjects} orders={filteredOrders} updP={updP} stages={stages} workLogs={filteredWorkLogs}/>}
-        {tab==="reports"&&(isAdmin||isDeptMgr||isLead)&&<TeamReports users={visibleUsers} workLogs={filteredWorkLogs} orders={filteredOrders} stages={stages} stageBlocks={stageBlocks} projects={filteredProjects} customTasks={visibleTasks} dailyPlans={visiblePlans} departments={visibleDepartments}/>}
-        {tab==="excel"&&(isAdmin||isDeptMgr)&&<ExcelTab orders={filteredOrders} projects={filteredProjects} stages={stages} stageBlocks={stageBlocks} workLogs={filteredWorkLogs} users={visibleUsers} customTasks={visibleTasks} dailyPlans={visiblePlans} departments={visibleDepartments} updO={updO} canImport={isAdmin}/>}
+        {tab==="reports"&&(isAdmin||isDeptMgr||isLead)&&<TeamReports users={visibleUsers} workLogs={filteredWorkLogs} orders={filteredOrders} stages={stages} stageBlocks={stageBlocks} projects={filteredProjects} customTasks={visibleTasks} dailyPlans={visiblePlans} departments={visibleDepartments} pnStandards={pnStandards}/>}
+        {tab==="excel"&&(isAdmin||isDeptMgr)&&<ExcelTab orders={filteredOrders} projects={filteredProjects} stages={stages} stageBlocks={stageBlocks} workLogs={filteredWorkLogs} users={visibleUsers} customTasks={visibleTasks} dailyPlans={visiblePlans} departments={visibleDepartments} pnStandards={pnStandards} updO={updO} canImport={isAdmin}/>}
       </main>
       {showInstall&&<InstallBanner onInstall={handleInstall} onDismiss={()=>setShowInstall(false)} lm={lm}/>}
       {showAdmin&&isAdmin&&<AdminPanel projects={projects} stages={stages} onClose={()=>setShowAdmin(false)} lightMode={lightMode} updO={updO} departments={departments} updD={updD}/>}
