@@ -521,9 +521,15 @@ const TIME_CAT={
 };
 // The standard time of a מק"ט, looked up by its (trimmed) part number.
 const pnKey=pn=>String(pn||"").trim();
+// Two devices can each create a record for the same מק"ט before they sync, so the
+// newest edit wins rather than whichever row happened to load last.
 function pnStdIndex(pnStandards){
   const m=new Map();
-  (pnStandards||[]).forEach(r=>{const k=pnKey(r.pn);if(k)m.set(k,r)});
+  (pnStandards||[]).forEach(r=>{
+    const k=pnKey(r.pn);if(!k)return;
+    const cur=m.get(k);
+    if(!cur||String(r.updatedAt||"")>=String(cur.updatedAt||""))m.set(k,r);
+  });
   return m;
 }
 const stdStageMin=(rec,stageId)=>Number(rec?.stageMin?.[stageId]||0)||0;
@@ -7100,19 +7106,19 @@ function App(){
     setPnStandards(prev=>{
       const clean={};
       Object.entries(stageMin||{}).forEach(([sid,v])=>{const n=Number(v);if(sid.startsWith("__")||!(n>0))return;clean[sid]=Math.round(n*10)/10});
-      const i=prev.findIndex(r=>pnKey(r.pn)===k);
-      const base=i>=0?prev[i]:{id:"std_"+uid(),pn:k,total:0,note:""};
+      // Saving is also the moment to collapse any duplicate rows for this מק"ט:
+      // keep the newest, drop the rest here and in the DB.
+      const mine=prev.filter(r=>pnKey(r.pn)===k).sort((a,b)=>String(b.updatedAt||"").localeCompare(String(a.updatedAt||"")));
+      const others=prev.filter(r=>pnKey(r.pn)!==k);
+      const stale=mine.slice(1);
+      const base=mine[0]||{id:"std_"+uid(),pn:k,total:0,note:""};
       const rec={...base,...(extra||{}),pn:k,stageMin:clean,updatedBy:currentUser?.name||"",updatedAt:nowISO()};
       // Everything cleared = no standard at all, not a standard of zero
-      if(!Object.keys(clean).length&&!(Number(rec.total)>0)){
-        if(i<0)return prev;
-        const next=prev.filter((r,j)=>j!==i);
-        persist(null,null,null,null,null,null,null,null,next);
-        SB.del("pn_standards",{id:prev[i].id}).catch(()=>{});
-        return next;
-      }
-      const next=i>=0?prev.map((r,j)=>j===i?rec:r):[...prev,rec];
+      const drop=(!Object.keys(clean).length&&!(Number(rec.total)>0))?mine:stale;
+      if(drop===mine&&!mine.length)return prev;
+      const next=drop===mine?others:[...others,rec];
       persist(null,null,null,null,null,null,null,null,next);
+      drop.forEach(r=>SB.del("pn_standards",{id:r.id}).catch(()=>{}));
       return next;
     });
     addAuditEntry({userId:currentUser?.id,username:currentUser?.username,name:currentUser?.name,action:"עדכון זמן תקן",target:k,details:""});

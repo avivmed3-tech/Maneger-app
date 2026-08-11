@@ -214,7 +214,11 @@ ALTER PUBLICATION supabase_realtime ADD TABLE public.daily_plans;
 | **זמן בפועל** | הזמן שנמדד באמת מדיווחי העובדים (מה שנקרא בעבר "זמן תקן") | מחושב מרישומי העבודה שהסתיימו |
 | **זמן מכירה** | הדקות שהוקצו לשלב במחירון / בבלוק | שדה `minutes` בשלב או בבלוק |
 
-זמן התקן נשמר בטבלה חדשה. הרץ ב-SQL Editor:
+זמן התקן נשמר בטבלה חדשה, `pn_standards`.
+
+> ✅ **הטבלה כבר נוצרה** בפרויקט `production-line-manager`
+> (`lwiurzkiojctwzllpnmr`) — אין צורך להריץ כלום. ה-SQL כאן הוא לתיעוד
+> ולהקמת פרויקט Supabase חדש.
 
 ```sql
 -- זמן תקן לכל מק"ט — דקות לכל שלב (jsonb: {"s1":28,"s2":52,...})
@@ -229,16 +233,18 @@ CREATE TABLE IF NOT EXISTS public.pn_standards (
   updated_at timestamptz DEFAULT now(),
   company_id uuid DEFAULT '00000000-0000-0000-0000-000000000001'::uuid REFERENCES public.companies(id)
 );
-CREATE UNIQUE INDEX IF NOT EXISTS pn_standards_company_pn_idx ON public.pn_standards (company_id, pn);
+-- אינדקס חיפוש בלבד, בכוונה לא ייחודי: הלקוח שומר את כל הרשומות בכל שמירה,
+-- ושגיאת כפילות הייתה משתקת את הסנכרון. כפילויות מאוחדות בצד הלקוח.
+CREATE INDEX IF NOT EXISTS pn_standards_company_pn_idx ON public.pn_standards (company_id, pn);
 ALTER TABLE public.pn_standards ENABLE ROW LEVEL SECURITY;
 DROP POLICY IF EXISTS anon_all_pn_standards ON public.pn_standards;
 CREATE POLICY anon_all_pn_standards ON public.pn_standards FOR ALL USING (true) WITH CHECK (true);
 ALTER PUBLICATION supabase_realtime ADD TABLE public.pn_standards;
 ```
 
-> ⚠️ **עד שה-SQL ירוץ** האפליקציה תמשיך לעבוד: זמני התקן יישמרו בזיכרון המקומי
-> (localStorage) של הדפדפן בלבד ולא יסונכרנו בין מכשירים. אחרי יצירת הטבלה
-> הם ייסנכרנו אוטומטית בשמירה הבאה.
+> 💡 אם בכל זאת הטבלה חסרה (למשל בפרויקט חדש) האפליקציה לא נשברת: זמני התקן
+> יישמרו בזיכרון המקומי (localStorage) של הדפדפן בלבד ולא יסונכרנו בין
+> מכשירים, ואחרי יצירת הטבלה הם ייסנכרנו אוטומטית בשמירה הבאה.
 
 **איפה זה מופיע:** לשונית ⏱️ *זמן תקן ובפועל* (גרפים, טבלאות לפי מק"ט/שלב/עובד
 והמסך להגדרת התקן), מסך הפק"ע (זמן תקן ליחידה וצפי לפי תקן), דוחות הצוות
@@ -247,3 +253,5 @@ ALTER PUBLICATION supabase_realtime ADD TABLE public.pn_standards;
 
 **נתוני דמו:** כפתור טעינת נתוני הדמו יוצר זמן תקן לכל אחד מ-8 המק"טים
 (מזהים שמתחילים ב-`demo_std_`), כך שאפשר לראות מיד את ההשוואה בין תקן, בפועל ומכירה.
+שמונת התקנים האלה כבר נזרעו למסד הקיים, כך שהתצוגה עובדת גם בלי לטעון דמו מחדש.
+מחיקת נתוני הדמו מוחקת גם אותם.
