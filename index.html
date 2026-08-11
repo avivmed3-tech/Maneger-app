@@ -310,6 +310,17 @@ const SB={
   }
 };
 
+// PostgREST hands back a JSON blob as the error text — pull out the part a person
+// can actually act on instead of dumping the raw payload into a toast.
+function sbErrMsg(e){
+  const raw=(e&&e.message)||String(e||"");
+  let j=null;try{j=JSON.parse(raw)}catch{return raw}
+  if(!j||typeof j!=="object")return raw;
+  if(j.code==="23505"&&/app_users_username_key/.test(j.message||""))return "שם משתמש כבר תפוס במערכת";
+  if(j.code==="23505")return "הרשומה כבר קיימת במערכת";
+  return [j.message,j.hint].filter(Boolean).join(" — ")||raw;
+}
+
 // ── DB row converters (DB → App format) ────────────────────────────────────
 const dbToUser=r=>({id:r.id,username:r.username,password_hash:r.password_hash,passwordPlain:r.password_plain||"",role:r.role,name:r.name,
   projectAccess:r.project_access,stageAccess:r.stage_access,
@@ -444,6 +455,58 @@ const FALLBACK_USERS=[
 ];
 // Worker IDs that perform production stages (used to generate demo work logs / tasks).
 const DEMO_WORKER_IDS=["w1","w2","w3","w4","w5","w6","w7","w8","w9","w10","w11","w12"];
+
+// ── Demo user identity resolution ───────────────────────────────────────────
+// app_users.username is globally UNIQUE, while every upsert here resolves on the
+// primary key. So a row that already owns a demo username under a *different* id
+// is not merged — it is inserted, and the insert dies on app_users_username_key
+// (23505). That is exactly what earlier demo sets left behind: the same usernames
+// paired with other ids, which deleting the demo data never cleaned up.
+//
+// Rather than deleting somebody's account, work out up front which id each demo
+// user should actually be written under: adopt the id that already owns the
+// username in this company (which also keeps historical work logs pointing at the
+// same person), and never touch a row owned by another company.
+// Returns {idMap, skipped} — idMap rewrites every demo reference (user ids,
+// manager ids, department managers, work logs), skipped lists the demo logins
+// another company already owns and which therefore cannot be seeded here.
+async function resolveDemoUsers(users,cid){
+  const q=v=>`"${String(v).replace(/"/g,'""')}"`;
+  const names=[...new Set(users.map(u=>u.username).filter(Boolean))];
+  const ids=[...new Set(users.map(u=>u.id))];
+  // Look across all companies — the constraint we are working around is global.
+  const [byUsername,byId]=await Promise.all([
+    names.length?SB.get("app_users",`username=in.(${names.map(q).join(",")})`).catch(()=>[]):[],
+    ids.length?SB.get("app_users",`id=in.(${ids.map(q).join(",")})`).catch(()=>[]):[]
+  ]);
+  const rows=[...new Map([...byUsername,...byId].map(r=>[r.id,r])).values()];
+  const isOurs=r=>(r.company_id||DEFAULT_COMPANY_ID)===cid;
+  const owner=new Map(rows.filter(r=>r.username).map(r=>[r.username,r]));
+  const foreignIds=new Set(rows.filter(r=>!isOurs(r)).map(r=>r.id));
+  const idMap={},skipped=[],taken=new Set();
+  for(const u of users){
+    const row=owner.get(u.username);
+    if(row&&!isOurs(row)){skipped.push(u.username);continue}
+    // Keep the demo id unless it is spoken for — by an id we just adopted, or by
+    // another company's row that this seed must not overwrite.
+    let id=row?row.id:u.id;
+    for(let n=1;taken.has(id)||(!row&&foreignIds.has(id));n++)id=`${u.id}_d${n}`;
+    idMap[u.id]=id;taken.add(id);
+  }
+  return {idMap,skipped};
+}
+// Build the DB rows for the demo team under the resolved ids (manager links included).
+async function buildDemoUserRows(users,idMap,cid){
+  const out=[];
+  for(const fu of users){
+    if(!idMap[fu.id])continue;
+    const h=await sha256(fu.password);
+    // A manager that was skipped leaves no link rather than a dangling id.
+    out.push(userToDb({...fu,id:idMap[fu.id],managerId:idMap[fu.managerId]||"",
+      companyId:cid,password_hash:h,passwordPlain:fu.password,password:undefined}));
+  }
+  return out;
+}
 const DEF_PROJ=[{id:"p1",name:"פרויקט אלפא"},{id:"p2",name:"פרויקט בטא"},{id:"p3",name:"פרויקט גמא"}];
 const DEF_STAGES=[
   {id:"s1",name:"קליטה וקלט",order:1,color:"#3b82f6",price:0},
@@ -6808,14 +6871,15 @@ function App(){
       // Seed fallback users + their departments with hashed passwords if no users in DB
       if(!users?.length){
         try{
-          await SB.upsert("departments",DEF_DEPTS.map(d=>deptToDb({...d,companyId:_companyId}))).catch(()=>{});
-          const seeded=[];
-          for(const fu of FALLBACK_USERS){
-            const h=await sha256(fu.password);
-            seeded.push(userToDb({...fu,companyId:_companyId,password_hash:h,passwordPlain:fu.password,password:undefined}));
-          }
+          // This company has no users of its own, but the demo logins may still be
+          // taken elsewhere in app_users — resolve the ids the same way the demo
+          // loader does so the seed merges instead of failing on the unique index.
+          const cid=_companyId||DEFAULT_COMPANY_ID;
+          const {idMap}=await resolveDemoUsers(FALLBACK_USERS,cid);
+          await SB.upsert("departments",DEF_DEPTS.map(d=>deptToDb({...d,managerId:idMap[d.managerId]||"",companyId:cid}))).catch(()=>{});
+          const seeded=await buildDemoUserRows(FALLBACK_USERS,idMap,cid);
           await SB.upsert("app_users",seeded);
-          LS.set("users",FALLBACK_USERS.map(fu=>({...fu,password:undefined})));
+          LS.set("users",seeded.map(dbToUser));
         }catch(e){console.warn("Seed users error",e)}
       }
 
@@ -7321,8 +7385,14 @@ function App(){
     if(!confirm("זה יטען נתוני דמו לשנה שלמה. להמשיך?"))return;
     setSync("saving");
     try{
-      const W=Object.fromEntries(DEMO_WORKER_IDS.map(id=>[id,(FALLBACK_USERS.find(u=>u.id===id)||{}).name||id]));
-      const WIDS=DEMO_WORKER_IDS;
+      // Resolve who the demo team is written as before generating anything that
+      // points at them — see resolveDemoUsers for why the ids can shift.
+      const cid=_companyId||DEFAULT_COMPANY_ID;
+      const {idMap,skipped}=await resolveDemoUsers(FALLBACK_USERS,cid);
+      const rid=id=>idMap[id]||id;
+      const WIDS=DEMO_WORKER_IDS.filter(id=>idMap[id]).map(rid);
+      if(!WIDS.length)throw new Error("לא ניתן לטעון נתוני דמו — שמות המשתמשים של הדמו תפוסים בחברה אחרת");
+      const W=Object.fromEntries(DEMO_WORKER_IDS.filter(id=>idMap[id]).map(id=>[rid(id),(FALLBACK_USERS.find(u=>u.id===id)||{}).name||id]));
       const dProj=[{id:"p1",name:"פרויקט אלפא"},{id:"p2",name:"פרויקט בטא"},{id:"p3",name:"פרויקט גמא"},{id:"p4",name:"פרויקט דלתא"}];
       // minutes = the time sold for the stage per the price list (זמן מכירה)
       const dStages=[{id:"s1",name:"קליטה וקלט",stage_order:1,color:"#3b82f6",price:80,hourly_rate:160,minutes:30},{id:"s2",name:"הרכבה",stage_order:2,color:"#8b5cf6",price:150,hourly_rate:180,minutes:50},{id:"s3",name:"בדיקת חשמל",stage_order:3,color:"#06b6d4",price:120,hourly_rate:180,minutes:40},{id:"s4",name:"בדיקת מכנית",stage_order:4,color:"#f59e0b",price:100,hourly_rate:170,minutes:35},{id:"s5",name:"QC סופי",stage_order:5,color:"#10b981",price:90,hourly_rate:170,minutes:32},{id:"s6",name:"אריזה ומשלוח",stage_order:6,color:"#ec4899",price:60,hourly_rate:150,minutes:24}];
@@ -7331,8 +7401,9 @@ function App(){
       // faster than the price list) plus a little noise, and heavier מק"טים take
       // proportionally longer.
       const saleMin=Object.fromEntries(dStages.map(s2=>[s2.id,s2.minutes]));
-      const SKILL={w1:0.82,w2:0.9,w3:1.16,w4:1.28,w5:0.95,w6:1.05,w7:0.88,w8:1.0,w9:1.22,w10:0.93,w11:1.08,w12:1.34};
-      const SPREAD={w1:0.08,w2:0.12,w3:0.3,w4:0.34,w5:0.1,w6:0.16,w7:0.09,w8:0.14,w9:0.28,w10:0.11,w11:0.2,w12:0.36};
+      const rekey=o=>Object.fromEntries(Object.entries(o).map(([k,v])=>[rid(k),v]));
+      const SKILL=rekey({w1:0.82,w2:0.9,w3:1.16,w4:1.28,w5:0.95,w6:1.05,w7:0.88,w8:1.0,w9:1.22,w10:0.93,w11:1.08,w12:1.34});
+      const SPREAD=rekey({w1:0.08,w2:0.12,w3:0.3,w4:0.34,w5:0.1,w6:0.16,w7:0.09,w8:0.14,w9:0.28,w10:0.11,w11:0.2,w12:0.36});
       // How much longer a heavy מק"ט takes than the price list — the same factor
       // drives both its standard time and the times the floor reports.
       const pnFactorOf=pi=>0.85+((pi%5)*0.09);
@@ -7411,13 +7482,9 @@ function App(){
       const CHUNK=50;
       const chunked=(arr,n)=>Array.from({length:Math.ceil(arr.length/n)},(_,i)=>arr.slice(i*n,(i+1)*n));
       // Demo departments + full team hierarchy (manager → 2 team leads → ≥3 workers each)
-      const dDepts=DEF_DEPTS.map(d=>deptToDb({...d,companyId:_companyId}));
+      const dDepts=DEF_DEPTS.map(d=>deptToDb({...d,managerId:idMap[d.managerId]||"",companyId:_companyId}));
       // Seed demo users with hashed passwords (kept as plain text so managers can view them)
-      const demoUsers=[];
-      for(const fu of FALLBACK_USERS){
-        const h=await sha256(fu.password);
-        demoUsers.push(userToDb({...fu,companyId:_companyId,password_hash:h,passwordPlain:fu.password,password:undefined}));
-      }
+      const demoUsers=await buildDemoUserRows(FALLBACK_USERS,idMap,_companyId);
       await SB.upsert("app_users",demoUsers);
       await SB.upsert("departments",dDepts);
       await SB.upsert("projects",dProj);
@@ -7441,8 +7508,8 @@ function App(){
       if(data.pnStandards?.length){setPnStandards(data.pnStandards);LS.set("pnStandards",data.pnStandards)}
       if(freshUsers?.length){LS.set("users",freshUsers)}
       setSync("ok");
-      toast("נתוני דמו נטענו בהצלחה!","success");
-    }catch(e){console.error(e);setSync("error");toast("שגיאה: "+e.message,"error")}
+      toast(skipped.length?`נתוני דמו נטענו. ${skipped.length} משתמשי דמו דולגו — שם המשתמש תפוס בחברה אחרת (${skipped.join(", ")})`:"נתוני דמו נטענו בהצלחה!","success",skipped.length?7000:undefined);
+    }catch(e){console.error(e);setSync("error");toast("שגיאה: "+sbErrMsg(e),"error")}
   };
 
   const deleteDemoData=async()=>{
@@ -7467,11 +7534,11 @@ function App(){
       if(data.pnStandards){setPnStandards(data.pnStandards);LS.set("pnStandards",data.pnStandards)}
       setSync("ok");
       toast("נתוני דמו נמחקו!","success");
-    }catch(e){console.error(e);setSync("error");toast("שגיאה: "+e.message,"error")}
+    }catch(e){console.error(e);setSync("error");toast("שגיאה: "+sbErrMsg(e),"error")}
   };
   useEffect(()=>{const isi=window.matchMedia("(display-mode:standalone)").matches||window.navigator.standalone;if(isi){setIsStandalone(true);return;}const h=e=>{e.preventDefault();setInstallPrompt(e);setShowInstall(true)};window.addEventListener("beforeinstallprompt",h);window.addEventListener("appinstalled",()=>{setShowInstall(false);setInstallPrompt(null);setIsStandalone(true)});return()=>window.removeEventListener("beforeinstallprompt",h)},[]);
   // Service Worker
-  useEffect(()=>{if(!("serviceWorker" in navigator))return;navigator.serviceWorker.register("./sw.js?v=26").then(reg=>{swRegRef.current=reg;if(reg.waiting)setShowUpdate(true);reg.addEventListener("updatefound",()=>{const nw=reg.installing;if(!nw)return;nw.addEventListener("statechange",()=>{if(nw.state==="installed"&&navigator.serviceWorker.controller)setShowUpdate(true)})});setInterval(()=>reg.update(),30*60*1000)}).catch(()=>{});navigator.serviceWorker.addEventListener("controllerchange",()=>window.location.reload())},[]);
+  useEffect(()=>{if(!("serviceWorker" in navigator))return;navigator.serviceWorker.register("./sw.js?v=27").then(reg=>{swRegRef.current=reg;if(reg.waiting)setShowUpdate(true);reg.addEventListener("updatefound",()=>{const nw=reg.installing;if(!nw)return;nw.addEventListener("statechange",()=>{if(nw.state==="installed"&&navigator.serviceWorker.controller)setShowUpdate(true)})});setInterval(()=>reg.update(),30*60*1000)}).catch(()=>{});navigator.serviceWorker.addEventListener("controllerchange",()=>window.location.reload())},[]);
   // Network status
   useEffect(()=>{const on=()=>{setIsOffline(false);toast("החיבור חזר — מסנכרן נתונים...","success");refreshFromDB(true)};const off=()=>{setIsOffline(true)};window.addEventListener("online",on);window.addEventListener("offline",off);return()=>{window.removeEventListener("online",on);window.removeEventListener("offline",off)}},[]);
   // PWA Install
