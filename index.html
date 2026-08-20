@@ -562,13 +562,24 @@ function stageMinutesFor(order,stage,stageBlocks){
   return Number(stage.minutes||0);
 }
 // Estimated work minutes for a single unit of an order (sum across its stages).
+// ── The route of one פק"ע ──────────────────────────────────────────────────
+// A route belongs to the order, not to the company: one פק"ע may be a single
+// operation and the next twenty, and the same two operations can run in opposite
+// order on two different products. So the order of stageIds *is* the route — it
+// is filled from Priority's שלב בפק"ע (10, 20, 30 …) on import and kept in the
+// configured stage order when an order is built by hand — and nothing re-sorts it
+// against the global stage list.
+function orderRoute(order,stages){
+  const m=new Map((stages||[]).map(s=>[s.id,s]));
+  return (order?.stageIds||[]).map(id=>m.get(id)).filter(Boolean);
+}
 function orderPerUnitMin(order,stages,stageBlocks){
   return (order.stageIds||[]).reduce((s,sid)=>{const st=(stages||[]).find(x=>x.id===sid);return s+stageMinutesFor(order,st,stageBlocks)},0);
 }
 // Remaining estimated work minutes for an order — only stages not yet completed
 // per unit. Falls back to the full per-unit estimate × qty when there are no serials.
 function orderRemainingMin(order,stages,stageBlocks,workLogs){
-  const oStages=(order.stageIds||[]).map(sid=>(stages||[]).find(x=>x.id===sid)).filter(Boolean);
+  const oStages=orderRoute(order,stages);
   const serials=order.serials||[];
   if(serials.length===0)return oStages.reduce((s,st)=>s+stageMinutesFor(order,st,stageBlocks),0)*Number(order.qty||0);
   let total=0;
@@ -1372,7 +1383,7 @@ function Dashboard({orders,projects,stages,users,workLogs,departments,customTask
   // WIP: where unfinished units are currently waiting (their next stage)
   const wipByStage={};
   fOrders.forEach(o=>{
-    const ost=(o.stageIds||[]).map(sid=>stages.find(s=>s.id===sid)).filter(Boolean).sort((a,b)=>a.order-b.order);
+    const ost=orderRoute(o,stages);
     (o.serials||[]).forEach(sr=>{
       const next=ost.find(st=>!workLogs.some(w=>w.serialId===sr.id&&w.stageId===st.id&&w.completed));
       if(next)wipByStage[next.id]=(wipByStage[next.id]||0)+1;
@@ -1574,7 +1585,11 @@ function OrderForm({initial,projects,stages,stageBlocks,onSave,onClose}){
         serials.push({id:uid(),sn:`${prefix}-${String(snStart+i).padStart(4,"0")}`,createdAt:nowISO()});
       }
     }
-    onSave({...f,_serials:serials});
+    // The array order is the route, so an order built by ticking boxes is stored
+    // in the configured stage order rather than in the order they were ticked.
+    const rank=new Map(stages.map((st,i)=>[st.id,i]));
+    const stageIds=[...(f.stageIds||[])].sort((a,b)=>(rank.get(a)??0)-(rank.get(b)??0));
+    onSave({...f,stageIds,_serials:serials});
   };
   return(
     <div>
@@ -1677,7 +1692,7 @@ function SerialsManager({order,stages,onUpdate,workLogs,onSignOff}){
     if(onSignOff)onSignOff({id:uid(),userId:currentUser.id,userName:currentUser.name,serialId,serialSn:serial.sn,stageId,orderId:order.id,startTime:nowISO(),endTime:nowISO(),completed:true,durationMin:0,paused:false,pauseStart:null,totalPauseMin:0,pauseLog:[]});
   };
 
-  const oStages=(order.stageIds||[]).map(sid=>stages.find(s=>s.id===sid)).filter(Boolean).sort((a,b)=>a.order-b.order);
+  const oStages=orderRoute(order,stages);
 
   return(
     <div>
@@ -1852,7 +1867,7 @@ function OrderDetail({order,projects,stages,stageBlocks,onClose,onUpdate,workLog
   const isAdmin=currentUser?.role==="admin";
   const proj=projects.find(p=>p.id===order.projectId);
   const serials=order.serials||[];
-  const oStages=(order.stageIds||[]).map(sid=>stages.find(s=>s.id===sid)).filter(Boolean).sort((a,b)=>a.order-b.order);
+  const oStages=orderRoute(order,stages);
   const totalCompleted=serials.filter(s=>oStages.every(st=>workLogs.some(w=>w.serialId===s.id&&w.stageId===st.id&&w.completed))).length;
   const pct=serials.length?Math.round(totalCompleted/serials.length*100):0;
   const perUnitMin=orderPerUnitMin(order,stages,stageBlocks);
@@ -2004,7 +2019,7 @@ function Orders({orders,projects,stages,stageBlocks,updO,workLogs,onWorkLog,work
         {filtered.length===0&&<EmptyState icon="📋" title='אין פק"ע להצגה' subtitle="צור הזמנה חדשה כדי להתחיל"/>}
         {filtered.map(o=>{
           const serials=o.serials||[];
-          const oStages=(o.stageIds||[]).map(sid=>stages.find(s=>s.id===sid)).filter(Boolean);
+          const oStages=orderRoute(o,stages);
           const completed=serials.filter(s=>oStages.every(st=>workLogs.some(w=>w.serialId===s.id&&w.stageId===st.id&&w.completed))).length;
           const pct=serials.length?Math.round(completed/serials.length*100):0;
           const proj=projects.find(p=>p.id===o.projectId);
@@ -2363,7 +2378,7 @@ function MyWork({orders,stages,workLogs,onStartWork,onEndWork,onPauseWork,onResu
   const startBulk=(oId)=>{
     if(myActiveLog&&!myActiveLog.paused){toast("יש עבודה פעילה","warning");return}
     const order=orders.find(o=>o.id===oId);
-    const allStagesOrdered=(order?.stageIds||[]).map(sid=>stages.find(s2=>s2.id===sid)).filter(Boolean).sort((a,b)=>a.order-b.order);
+    const allStagesOrdered=orderRoute(order,stages);
     const groupId=uid();
     bulkSelected.forEach(sId=>{
       const serial=(order?.serials||[]).find(s=>s.id===sId);
@@ -2408,7 +2423,7 @@ function MyWork({orders,stages,workLogs,onStartWork,onEndWork,onPauseWork,onResu
   // plan my manager assigned me today. Planned units sort first — inside each
   // פק"ע and across פק"עים — so my own plan always sits at the top of the list.
   const orderQueues=accessible.map(o=>{
-    const allStagesOrdered=(o.stageIds||[]).map(sid=>stages.find(s=>s.id===sid)).filter(Boolean).sort((a,b)=>a.order-b.order);
+    const allStagesOrdered=orderRoute(o,stages);
     const units=(o.serials||[]).map(s=>{
       // The unit's true next stage (stages must run in order)
       const next=allStagesOrdered.find(st=>!workLogs.some(w=>w.serialId===s.id&&w.stageId===st.id&&w.completed));
@@ -2875,7 +2890,7 @@ function DailyPlanBoard({dailyPlans,workers,orders,stages,workLogs,onAddPlan,onD
   const [queue,setQueue]=useState([]); // pending assignment lines (פק"ע+שלב) before saving
   const canAssign=Array.isArray(workers)&&workers.length>0&&!!onAddPlan;
   const selOrder=(orders||[]).find(o=>o.id===pOrder);
-  const orderStages=selOrder?(selOrder.stageIds||[]).map(sid=>stages.find(s=>s.id===sid)).filter(Boolean).sort((a,b)=>a.order-b.order):[];
+  const orderStages=orderRoute(selOrder,stages);
   // ── Permissions of the currently-selected worker ──
   const allStageIds=stages.map(s=>s.id);
   const selWorker=workers.find(w=>w.id===pWorker);
@@ -5648,7 +5663,9 @@ const xlNum=v=>{const n=Number(String(v==null?"":v).replace(/[^\d.\-]/g,""));ret
 const xlBool=v=>/^(כן|נמסר|התקבל|בוצע|yes|y|true|1|v|✓)$/i.test(String(v==null?"":v).trim());
 function xlDate(v){
   if(v==null||v==="")return"";
-  if(v instanceof Date&&!isNaN(v))return isoOf(v);
+  // An empty date cell in an ERP export often arrives as a time-only value,
+  // which is Excel serial 0 — the last day of 1899, not a real date.
+  if(v instanceof Date)return(!isNaN(v)&&v.getFullYear()>1900)?isoOf(v):"";
   // Priority writes "no date" as a plain 0, and a bare "0" would otherwise be
   // parsed by Date() as the year 2000 — anything non-positive is simply empty.
   if(typeof v==="number")return(isFinite(v)&&v>0)?new Date(Date.UTC(1899,11,30)+Math.round(v)*864e5).toISOString().slice(0,10):"";
@@ -5679,7 +5696,9 @@ function xlPickSheet(wb,names){
 // This is the interim path until Priority is wired up through Engini; nothing
 // here writes back to the ERP.
 const PRI_H={wo:'מספר פק"ע',pn:'מק"ט',desc:'תיאור מוצר',branch:'סניף',project:'פרויקט',qty:'כמות',
-  price:"מחיר אלת'א בש'ח",release:'תאריך שחרור',endDate:'ת. סיום יצור',seq:'שלה בפק"ע',op:'פעולה',
+  price:"מחיר אלת'א בש'ח",release:'תאריך שחרור',endDate:'ת. סיום יצור',
+  // Priority spelled this header שלה before it was corrected to שלב; both are read.
+  seq:'שלב בפק"ע',seqAlt:'שלה בפק"ע',op:'פעולה',
   opDesc:'תאור פעולה',wc:'מרכז עבודה',reported:'כמות מדווחת',remain:'יתרה לבצוע',
   stdPn:"ז.תקן ליח' בדק' למקט",stdWo:"ז.תקן ליח' בדק' בפקע",status:'סטטוס פק"ע'};
 // Priority's own סטטוס פק"ע values, folded onto the four statuses the app knows.
@@ -5708,23 +5727,32 @@ function priStatus(raw){
 const priNum=v=>{const n=Number(String(v==null?"":v).replace(/[^\d.\-]/g,""));return isFinite(n)?n:0};
 // Priority writes a literal 0 into its code columns (סניף / פרויקט) for "none".
 const priTxt=v=>{const s=String(v==null?"":v).trim();return(s==="0"||s==="-")?"":s};
+// The second sheet of the export: the serial numbers Priority already issued,
+// one row per unit. Its headers use a geresh where the route sheet uses a
+// gershayim, which xlNorm strips either way.
+const PRI_S={wo:"פק'ע",pn:"מק'ט",sn:"SN",qty:"כ. הפק'ע",status:"סטטוס פק'ע"};
 const PRI_SKIP="__skip",PRI_NEW="__new",PRI_MAP_LS="priorityStageMap";
 
-// Is this a Priority route export? Judged on the header row alone, so a renamed
-// sheet or an extra column at the end still matches.
+// Is this a Priority export? Judged on the header rows alone, so a renamed sheet
+// or an extra column at the end still matches. Returns the route sheet and, when
+// the export carries one, the serials sheet beside it.
 function priDetect(wb){
+  const headOf=n=>(XLSX.utils.sheet_to_json(wb.Sheets[n],{header:1,defval:""})[0]||[]).map(xlNorm);
+  let routes=null,serials=null;
   for(const n of wb.SheetNames){
-    const head=(XLSX.utils.sheet_to_json(wb.Sheets[n],{header:1,defval:""})[0]||[]).map(xlNorm);
-    const has=k=>head.includes(xlNorm(k));
-    if(has(PRI_H.wo)&&has(PRI_H.opDesc)&&(has(PRI_H.wc)||has(PRI_H.op)))return wb.Sheets[n];
+    const head=headOf(n),has=k=>head.includes(xlNorm(k));
+    const wo=has(PRI_H.wo)||has(PRI_S.wo);
+    if(!wo)continue;
+    if(!routes&&has(PRI_H.opDesc)&&(has(PRI_H.wc)||has(PRI_H.op)))routes=wb.Sheets[n];
+    else if(!serials&&(has(PRI_S.sn)||has("S/N")))serials=wb.Sheets[n];
   }
-  return null;
+  return routes?{routes,serials}:null;
 }
 
 // Pass 1 — fold the operation rows into orders and collect the distinct
 // operations, without yet deciding which app stage each one becomes. That
 // decision belongs to the user, and changing it must not re-read the file.
-function priScan(rows){
+function priScan(rows,serialRows){
   const wos=new Map(),ops=new Map();
   let skipped=0;
   rows.forEach((r,i)=>{
@@ -5736,13 +5764,13 @@ function priScan(rows){
         project:priTxt(xlGet(r,PRI_H.project)),branch:priTxt(xlGet(r,PRI_H.branch)),
         qty:priNum(xlGet(r,PRI_H.qty)),price:priNum(xlGet(r,PRI_H.price)),
         release:xlDate(xlGet(r,PRI_H.release)),endDate:xlDate(xlGet(r,PRI_H.endDate)),
-        statusRaw:String(xlGet(r,PRI_H.status)||"").trim(),row:i+2,ops:[]};
+        statusRaw:String(xlGet(r,PRI_H.status)||"").trim(),row:i+2,ops:[],sns:[]};
       wos.set(wo,o);
     }
     const name=String(xlGet(r,PRI_H.opDesc)||"").trim();
     const code=String(xlGet(r,PRI_H.op)||"").trim();
     const wc=String(xlGet(r,PRI_H.wc)||"").trim();
-    const seq=priNum(xlGet(r,PRI_H.seq));
+    const seq=priNum(xlGet(r,PRI_H.seq,PRI_H.seqAlt));
     // The מק"ט-level standard is the one the app stores; the פק"ע-level column
     // only fills in where Priority has no standard for the part itself.
     const std=priNum(xlGet(r,PRI_H.stdPn))||priNum(xlGet(r,PRI_H.stdWo));
@@ -5756,6 +5784,23 @@ function priScan(rows){
     if(code)op.codes.add(code);
     if(wc)op.centers.add(wc);
   });
+  // Serial numbers come from the export's second sheet, matched to their פק"ע.
+  // Priority only reuses a serial across different פק"ע, never inside one, so the
+  // duplicate check is per order.
+  let snOrphan=0,snDup=0,snPn=0,snRows=0;
+  (serialRows||[]).forEach(r=>{
+    const wo=String(xlGet(r,PRI_S.wo,PRI_H.wo,"WO")||"").trim();
+    const sn=String(xlGet(r,PRI_S.sn,"S/N",'מס"ד',"סידורי")||"").trim();
+    if(!wo&&!sn)return;
+    snRows++;
+    const o=wos.get(wo);
+    if(!o||!sn){snOrphan++;return}
+    if(o.sns.some(x=>x.sn===sn)){snDup++;return}
+    const pn=String(xlGet(r,PRI_S.pn,PRI_H.pn)||"").trim();
+    if(pn&&o.pn&&pn!==o.pn)snPn++;
+    o.sns.push({sn});
+  });
+
   // A new stage's place in the route is the sequence number Priority gives that
   // operation most often — the median, so one odd route can't drag it out of line.
   const list=[...ops.values()].map(o=>{
@@ -5763,7 +5808,9 @@ function priScan(rows){
     return{key:o.key,name:o.name,count:o.count,codes:[...o.codes],centers:[...o.centers],
       seq:s.length?s[Math.floor(s.length/2)]:0};
   }).sort((a,b)=>b.count-a.count||a.name.localeCompare(b.name));
-  return{wos:[...wos.values()],ops:list,skipped,rows:rows.length};
+  return{wos:[...wos.values()],ops:list,skipped,rows:rows.length,
+    serials:{rows:snRows,orphan:snOrphan,dup:snDup,pnMismatch:snPn,
+      wos:[...wos.values()].filter(w=>w.sns.length).length}};
 }
 
 // The global running order for the operations in the file.
@@ -5820,7 +5867,7 @@ function priAutoMap(ops,stages,saved){
 // זמן תקן record per מק"ט built from the ז.תקן column.
 function priBuild(scan,ctx,map,opts){
   const {projects=[],stages=[],pnStandards=[]}=ctx||{};
-  const {onlyOpen=false,makeStages=true,makeProjects=true,importStd=true,makeSerials=false,serialMax=100}=opts||{};
+  const {onlyOpen=false,makeStages=true,makeProjects=true,importStd=true,fillSerials=false,serialMax=100}=opts||{};
   const issues=[],addIssue=(level,msg)=>{if(issues.length<300)issues.push({level,msg})};
 
   // ── stages ────────────────────────────────────────────────────────────
@@ -5836,9 +5883,6 @@ function priBuild(scan,ctx,map,opts){
     newStages.push(st);stageOf.set(k,st.id);
   });
   scan.ops.forEach(o=>{const c=map[o.key];if(c&&c!==PRI_NEW&&c!==PRI_SKIP)stageOf.set(o.key,c)});
-  const rank=new Map([...stages,...newStages]
-    .slice().sort((a,b)=>(Number(a.order)||0)-(Number(b.order)||0))
-    .map((s,i)=>[s.id,i]));
 
   // ── projects ──────────────────────────────────────────────────────────
   const projByName=new Map(projects.map(p=>[xlNorm(p.name),p.id]));
@@ -5854,25 +5898,34 @@ function priBuild(scan,ctx,map,opts){
   };
 
   // ── orders ────────────────────────────────────────────────────────────
-  const orders=[];let closedSkipped=0,noStage=0,guessed=0,serialTotal=0,serialCapped=0,noQty=0;
+  const orders=[];let closedSkipped=0,noStage=0,guessed=0,serialTotal=0,serialCapped=0,noQty=0,serialFilled=0,fromSheet=0;
   scan.wos.forEach(w=>{
     const s=priStatus(w.statusRaw);
     if(s.guessed)guessed++;
     if(onlyOpen&&s.st==="complete"){closedSkipped++;return}
+    // The route is this פק"ע's own, in its own order: the stages it actually has,
+    // sequenced by שלב בפק"ע. Not a subset of one company-wide route — two פק"ע
+    // can run the same two operations in opposite order, and both are right.
     const ids=[];
-    w.ops.forEach(op=>{const sid=stageOf.get(op.key);if(sid&&!ids.includes(sid))ids.push(sid)});
-    ids.sort((a,b)=>(rank.get(a)??0)-(rank.get(b)??0));
+    w.ops.slice().sort((a,b)=>(a.seq||0)-(b.seq||0))
+      .forEach(op=>{const sid=stageOf.get(op.key);if(sid&&!ids.includes(sid))ids.push(sid)});
     if(!ids.length)noStage++;
     if(!w.qty)noQty++;
+    // Ids are derived from the order's own id, so a bulk run can't collide.
     const oid=uid(),serials=[];
-    if(makeSerials&&w.qty>0){
+    if(w.sns.length){
+      // The real serial numbers Priority issued — used as they are.
+      w.sns.forEach((x,k)=>serials.push({id:`${oid}s${k+1}`,sn:x.sn,createdAt:nowISO()}));
+      fromSheet++;
+    }else if(fillSerials&&w.qty>0){
+      // Nothing issued for this פק"ע yet: stand-in serials so work can be logged.
       const cap=Number(serialMax)||0,n=cap>0?Math.min(w.qty,cap):w.qty;
       if(n<w.qty)serialCapped++;
       const prefix=w.pn||w.wo;
-      // Ids are derived from the order's own id so a bulk run can't collide.
       for(let k=1;k<=n;k++)serials.push({id:`${oid}s${k}`,sn:`${prefix}-${String(k).padStart(4,"0")}`,createdAt:nowISO()});
-      serialTotal+=n;
+      serialFilled++;
     }
+    serialTotal+=serials.length;
     orders.push({id:oid,woNumber:w.wo,pn:w.pn,description:w.desc,qty:w.qty,unitPrice:w.price,
       projectId:projectOf(w.project),receivedDate:w.release,targetDate:w.endDate,status:s.st,
       stageIds:ids,serials,shortages:[],defects:[],deliveredSerials:[],
@@ -5919,11 +5972,16 @@ function priBuild(scan,ctx,map,opts){
   if(guessed)addIssue("info",`${guessed} פק"ע עם סטטוס Priority שאינו ברשימה — שויך לפי הדמיון`);
   if(closedSkipped)addIssue("info",`${closedSkipped} פק"ע סגורות (COC / נסגרה) לא יובאו`);
   if(scan.skipped)addIssue("info",`${scan.skipped} שורות ללא מספר פק"ע — דולגו`);
-  if(serialCapped)addIssue("warn",`${serialCapped} פק"ע קיבלו פחות סידוריים מהכמות בגלל תקרת הסידוריים`);
+  if(serialCapped)addIssue("warn",`${serialCapped} פק"ע קיבלו פחות סידוריים מהכמות בגלל התקרה`);
+  const sn=scan.serials||{};
+  if(sn.orphan)addIssue("warn",`${sn.orphan} שורות בגיליון הסידוריים ללא פק"ע מתאימה — דולגו`);
+  if(sn.dup)addIssue("warn",`${sn.dup} סידוריים כפולים באותה פק"ע — דולגו`);
+  if(sn.pnMismatch)addIssue("info",`${sn.pnMismatch} סידוריים עם מק"ט שונה מזה שבגיליון הפעולות — נלקח המק"ט של הפק"ע`);
 
   return{mode:"priority",orders,newStages,newProjects,stds,issues,opStage:Object.fromEntries(stageOf),
     stats:{orders:orders.length,rows:scan.rows,ops:scan.ops.length,mapped:stageOf.size,
-      serials:serialTotal,defects:0,shortages:0,
+      serials:serialTotal,serialWos:fromSheet,serialFilled,sheetSerials:(scan.serials||{}).rows||0,
+      defects:0,shortages:0,
       newStages:newStages.length,newProjects:newProjects.length,stds:stds.length,closedSkipped}};
 }
 const XL_STAT_IN={"פתוחה":"open","פתוח":"open","open":"open","חלקית":"partial","חלקי":"partial","partial":"partial",
@@ -5938,9 +5996,9 @@ function doImport(file,ctx,cb){
     // A Priority route export is a different shape entirely (a row per operation,
     // not per order) and needs the user to say which stage each operation is, so
     // it is only scanned here — the orders are built later, from their answers.
-    const wsPri=priDetect(wb);
-    if(wsPri){cb({mode:"priority",scan:priScan(rowsOf(wsPri))},null);return}
-    let wsO=xlPickSheet(wb,["פקודות עבודה","פקעות",'פק"ע',"orders","work orders"]);
+    const pri=priDetect(wb);
+    if(pri){cb({mode:"priority",scan:priScan(rowsOf(pri.routes),rowsOf(pri.serials))},null);return}
+    let wsO=xlPickSheet(wb,["פקודות עבודה","פקעות עבודה","פקעות",'פק"ע',"orders","work orders"]);
     if(!wsO){
       // Any sheet carrying a WO column will do — older exports, renamed tabs.
       for(const n of wb.SheetNames){
@@ -6069,7 +6127,7 @@ function ExcelTab({orders,projects,stages,stageBlocks,workLogs,users,customTasks
   // different stage rebuilds the orders without touching the file again.
   const [pri,setPri]=useState(null);
   const [priMap,setPriMap]=useState({});
-  const [priOpts,setPriOpts]=useState({onlyOpen:true,makeStages:true,makeProjects:true,importStd:true,makeSerials:false,serialMax:100});
+  const [priOpts,setPriOpts]=useState({onlyOpen:true,makeStages:true,makeProjects:true,importStd:true,fillSerials:false,serialMax:100});
   const [showMap,setShowMap]=useState(false);const[mapQ,setMapQ]=useState("");
   const setOpt=(k,v)=>setPriOpts(p=>({...p,[k]:v}));
   const priRes=useMemo(()=>pri?priBuild(pri.scan,{projects,stages,pnStandards},priMap,priOpts):null,
@@ -6120,7 +6178,7 @@ function ExcelTab({orders,projects,stages,stageBlocks,workLogs,users,customTasks
     if(r.stds.length&&importPnStds)importPnStds(r.stds);
     addAuditEntry({userId:"admin",username:"admin",name:"מנהל",action:"ייבוא Priority",
       target:`${r.orders.length} פקעות`,
-      details:`${mode==="replace"?"החלפה":"הוספה"} | ${r.stats.newStages} שלבים חדשים | ${r.stats.newProjects} פרויקטים | ${r.stats.stds} זמני תקן | ${r.stats.serials} סידוריים`,canUndo:true});
+      details:`${mode==="replace"?"החלפה":"הוספה"} | ${r.stats.newStages} שלבים חדשים | ${r.stats.newProjects} פרויקטים | ${r.stats.stds} זמני תקן | ${r.stats.serials} סידוריים (${r.stats.serialWos} מהקובץ, ${r.stats.serialFilled} הושלמו)`,canUndo:true});
     setPri(null);toast(`יובאו ${r.orders.length} פק"ע מ-Priority`,"success");
   };
 
@@ -6181,7 +6239,9 @@ function ExcelTab({orders,projects,stages,stageBlocks,workLogs,users,customTasks
           <div style={{background:"#3b82f611",border:"1px solid #3b82f655",borderRadius:10,padding:"10px 13px",marginBottom:12}}>
             <div style={{fontWeight:700,color:"#60a5fa",marginBottom:4}}>🔗 זוהה דוח פק"ע מ-Priority</div>
             <div style={{fontSize:12,color:"var(--c-muted)",lineHeight:1.6}}>
-              {pri.scan.rows} שורות פעולה קופלו ל-{pri.scan.wos.length} פקודות עבודה. כל תאור פעולה הופך לשלב בפק"ע, וזמני התקן שבקובץ נשמרים כזמן תקן למק"ט.
+              {pri.scan.rows} שורות פעולה קופלו ל-{pri.scan.wos.length} פקודות עבודה.
+              כל פק"ע מקבלת רק את השלבים שלה, לפי הסדר של עמודת ״שלב בפק"ע״ (10, 20, 30 …) — יש פק"ע עם שלב אחד ויש עם עשרים.
+              זמני התקן שבקובץ נשמרים כזמן תקן למק"ט{pri.scan.serials.rows>0?`, ו-${pri.scan.serials.rows.toLocaleString()} הסידוריים מהגיליון השני נכנסים לפק"ע שלהם`:""}.
             </div>
           </div>
 
@@ -6191,7 +6251,7 @@ function ExcelTab({orders,projects,stages,stageBlocks,workLogs,users,customTasks
               [`${priRes.stats.newStages} שלבים חדשים`,priRes.stats.newStages?"#f59e0b":"#8b95a8"],
               [`${priRes.stats.newProjects} פרויקטים חדשים`,priRes.stats.newProjects?"#f59e0b":"#8b95a8"],
               [`${priRes.stats.stds} מק"טים עם זמן תקן`,"#10b981"],
-              [`${priRes.stats.serials} סידוריים`,priRes.stats.serials?"#3b82f6":"#8b95a8"]].map(([t,c])=>(
+              [`${priRes.stats.serials.toLocaleString()} סידוריים ב-${priRes.stats.serialWos+priRes.stats.serialFilled} פק"ע`,priRes.stats.serials?"#3b82f6":"#8b95a8"]].map(([t,c])=>(
               <span key={t} style={{background:c+"1a",color:c,border:`1px solid ${c}44`,borderRadius:14,padding:"3px 11px",fontWeight:600}}>{t}</span>
             ))}
           </div>
@@ -6206,13 +6266,16 @@ function ExcelTab({orders,projects,stages,stageBlocks,workLogs,users,customTasks
               hint="קוד הפרויקט מ-Priority נפתח כפרויקט באפליקציה"/>
             <ChkOpt checked={priOpts.importStd} onChange={v=>setOpt("importStd",v)} label='ייבא זמני תקן למק"טים'
               hint="עמודת ז.תקן ליח' בדק' — דקות ליחידה לכל שלב"/>
-            <ChkOpt checked={priOpts.makeSerials} onChange={v=>setOpt("makeSerials",v)} color="#f59e0b" label="צור מספרים סידוריים לפי הכמות"
-              hint={`ב-Priority אין סידוריים. בלי סידוריים אי אפשר לדווח עבודה על הפק"ע${priOpts.makeSerials?"":` — הכמות בקובץ היא ${priQty.toLocaleString()} יחידות`}`}/>
-            {priOpts.makeSerials&&(
+            <div style={{fontSize:12.5,padding:"5px 0",color:"var(--c-muted)"}}>
+              <span style={{color:"#10b981",fontWeight:700}}>✓ סידוריים מהקובץ</span> — {priRes.stats.serialWos} פק"ע קיבלו את {priRes.stats.serials.toLocaleString()} הסידוריים שלהן מגיליון ״סידוריים״
+            </div>
+            <ChkOpt checked={priOpts.fillSerials} onChange={v=>setOpt("fillSerials",v)} color="#f59e0b" label='השלם סידוריים לפק"ע שאינן בגיליון'
+              hint={`${Math.max(priRes.stats.orders-priRes.stats.serialWos,0)} פק"ע עדיין בלי סידוריים, ובלעדיהם אי אפשר לדווח עליהן עבודה. הסידוריים שייווצרו הם זמניים ולא מגיעים מ-Priority`}/>
+            {priOpts.fillSerials&&(
               <div style={{display:"flex",alignItems:"center",gap:8,fontSize:12,color:"var(--c-muted)",padding:"2px 0 6px 0",marginRight:24}}>
                 <span>עד</span>
                 <input type="number" min="0" value={priOpts.serialMax} onChange={e=>setOpt("serialMax",Number(e.target.value)||0)} style={{width:80}}/>
-                <span>סידוריים לפק"ע (0 = ללא הגבלה) · ייווצרו {priRes.stats.serials.toLocaleString()} סידוריים</span>
+                <span>סידוריים לפק"ע (0 = ללא הגבלה) · {priRes.stats.serialFilled} פק"ע יושלמו</span>
               </div>
             )}
           </div>
@@ -6272,7 +6335,7 @@ function ExcelTab({orders,projects,stages,stageBlocks,workLogs,users,customTasks
           )}
           <div style={{overflowX:"auto",marginBottom:10}}><table><thead><tr>
             <th>פק"ע</th><th>P/N</th><th>תיאור</th><th>פרויקט</th><th>כמות</th><th>שלבים</th>
-            {priRes?<><th>סטטוס</th><th>שחרור</th><th>יעד</th><th>יתרה</th></>:<><th>סידוריים</th><th>תקלות</th><th>חוסרים</th></>}
+            {priRes?<><th>מסלול</th><th>סידוריים</th><th>סטטוס</th><th>שחרור</th><th>יעד</th></>:<><th>סידוריים</th><th>תקלות</th><th>חוסרים</th></>}
           </tr></thead><tbody>
             {cur.orders.slice(0,12).map(o=>(<tr key={o.id}>
               <td style={{fontWeight:600}}>{o.woNumber}</td><td>{o.pn||"—"}</td><td>{o.description||"—"}</td>
@@ -6280,10 +6343,11 @@ function ExcelTab({orders,projects,stages,stageBlocks,workLogs,users,customTasks
               <td>{o.qty||"—"}</td>
               <td title={(o.stageIds||[]).map(stName).join(" ← ")}>{(o.stageIds||[]).length}</td>
               {priRes?(<>
+                <td style={{fontSize:11,color:"var(--c-muted)",maxWidth:280}}>{(o.stageIds||[]).map(stName).join(" ← ")||"—"}</td>
+                <td>{(o.serials||[]).length||"—"}</td>
                 <td><Badge status={o.status}/></td>
                 <td style={{whiteSpace:"nowrap"}}>{o.receivedDate?fmt(o.receivedDate):"—"}</td>
                 <td style={{whiteSpace:"nowrap"}}>{o.targetDate?fmt(o.targetDate):"—"}</td>
-                <td>{o._pri?.remain??"—"}</td>
               </>):(<>
                 <td>{(o.serials||[]).length}</td><td>{(o.defects||[]).length}</td><td>{(o.shortages||[]).length}</td>
               </>)}
