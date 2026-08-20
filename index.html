@@ -196,11 +196,14 @@ button{font-family:inherit;cursor:pointer}
 const {useState,useEffect,useCallback,useRef,useMemo}=React;
 
 // ── Config ─────────────────────────────────────────────────────────────────
-const APP_VERSION="4.4.0";const APP_DATE="2026-08-11";
+const APP_VERSION="4.5.0";const APP_DATE="2026-08-20";
 const SB_URL="https://lwiurzkiojctwzllpnmr.supabase.co";
 const SB_KEY="eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imx3aXVyemtpb2pjdHd6bGxwbm1yIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzQ2MjU4NTAsImV4cCI6MjA5MDIwMTg1MH0.jWOnAtsjbefoY18ofSd46WMdgY47Vv4k7LgcHdOrj6Q";
 const SB_H={"Content-Type":"application/json","apikey":SB_KEY,"Authorization":"Bearer "+SB_KEY};
 const DEFAULT_COMPANY_ID="00000000-0000-0000-0000-000000000001";
+// Declared here rather than beside the other UI constants: the company id below is
+// resolved from the saved session at module load, before anything else runs.
+const LS_PREFIX="pml_";
 const SESSION_TIMEOUT_MIN=60; // דקות חוסר פעילות לפני logout אוטומטי
 const MAX_LOGIN_ATTEMPTS=5;
 const LOCKOUT_MIN=15;
@@ -283,10 +286,25 @@ async function sha256(str){
 }
 
 // ── Supabase helpers ───────────────────────────────────────────────────────
-// Company ID is stored after login and sent as header for RLS
-let _companyId=DEFAULT_COMPANY_ID;
+// Which company this browser is working in. Every read filters on it and every
+// write carries it, so it has to be right *before* the first request goes out —
+// not after the session has been restored. Resolving it from the saved session
+// here, at module load, is what keeps a returning user of one company from
+// pulling down (and then saving over) another company's data.
+function savedSessionCompany(){
+  try{
+    const s=JSON.parse(localStorage.getItem(LS_PREFIX+"session")||"null");
+    return (s&&s.companyId)||DEFAULT_COMPANY_ID;
+  }catch{return DEFAULT_COMPANY_ID}
+}
+let _companyId=savedSessionCompany();
 function setCompanyId(id){_companyId=id||DEFAULT_COMPANY_ID}
+function getCompanyId(){return _companyId}
 function sbHeaders(){return{...SB_H,"x-company-id":_companyId}}
+// The company a row belongs to: the one it came from, or — for a row created in
+// this session — the one we are working in. Never a hard-coded default, which is
+// what used to funnel every company's writes into the first company.
+const rowCid=x=>(x&&x.companyId)||_companyId;
 // ── What the server is already known to hold ──────────────────────────────
 // Every save used to re-upload every row of every table. At a few dozen פק"ע that
 // is invisible; at 1,300 פק"ע and tens of thousands of progress records it is
@@ -315,7 +333,13 @@ const SB_CHUNK=200;
 // page by page. work_logs is the one that does: it holds a row per unit per stage,
 // so a plant with a thousand פק"ע passes ten thousand long before anything looks
 // unusual — and a truncated read would quietly drop half the progress on load.
-const SB_PAGE=5000;
+//
+// The size asked for is deliberately *not* the number of rows a page is assumed to
+// hold. PostgREST enforces its own ceiling (Supabase ships `max-rows` = 1000), and
+// asking for 5,000 simply returns 1,000 — which the old loop read as "fewer than a
+// page, therefore the end", stopping at the first thousand rows of every table.
+// 2,787 פק"ע came back as 1,000, and 56,000 progress records as 1,000.
+const SB_PAGE=1000;
 const SB={
   async get(table,params=""){
     const r=await fetch(`${SB_URL}/rest/v1/${table}?${params}`,{headers:{...sbHeaders(),"Range":"0-9999"}});
@@ -324,15 +348,24 @@ const SB={
   // Reads every row, a page at a time. Needs a total ordering in `params` or the
   // pages can overlap — every caller here orders by created_at with id as the
   // tiebreak, because a bulk import writes thousands of rows on the same timestamp.
+  //
+  // Paging advances by however many rows actually came back, so whatever ceiling
+  // the server applies is discovered rather than assumed. A page shorter than the
+  // longest one seen is the end of the data; a page of zero rows ends it too, so a
+  // table whose size is an exact multiple of the ceiling still terminates.
   async getAll(table,params="",cap=400000){
     const out=[];
-    for(let from=0;from<cap;from+=SB_PAGE){
+    let from=0,widest=0;
+    while(from<cap){
       const r=await fetch(`${SB_URL}/rest/v1/${table}?${params}`,
         {headers:{...sbHeaders(),"Range-Unit":"items","Range":`${from}-${from+SB_PAGE-1}`}});
       if(!r.ok)throw new Error(await r.text());
       const rows=await r.json();
+      if(!Array.isArray(rows)||!rows.length)break;
       for(const x of rows)out.push(x);
-      if(rows.length<SB_PAGE)break;
+      from+=rows.length;
+      if(rows.length<widest)break;
+      widest=Math.max(widest,rows.length);
     }
     return out;
   },
@@ -362,6 +395,15 @@ const SB={
       if(!r.ok)throw new Error(await r.text());
     }
     SYNC.forget(table,list);
+  },
+  // How many rows match, without reading them. PostgREST answers on the
+  // Content-Range header, which Supabase exposes to the browser.
+  async count(table,params=""){
+    const r=await fetch(`${SB_URL}/rest/v1/${table}?select=id&${params}`,
+      {method:"HEAD",headers:{...sbHeaders(),"Prefer":"count=exact","Range-Unit":"items","Range":"0-0"}});
+    if(!r.ok)throw new Error(await r.text());
+    const n=Number(String(r.headers.get("content-range")||"").split("/")[1]);
+    return isFinite(n)?n:0;
   },
   async del(table,match){
     const q=Object.entries(match).map(([k,v])=>`${k}=eq.${v}`).join("&");
@@ -397,84 +439,139 @@ const userToDb=u=>({id:u.id,username:u.username,password_hash:u.password_hash||u
   role:u.role,name:u.name,project_access:u.projectAccess,stage_access:u.stageAccess,
   can_edit:u.canEdit,can_view:u.canView,active:u.active!==false,hourly_rate:Number(u.hourlyRate||0),sale_rate:Number(u.saleRate||0),
   department_id:u.departmentId||null,manager_id:u.managerId||null,
-  company_id:u.companyId||DEFAULT_COMPANY_ID});
+  company_id:rowCid(u)});
 const dbToOrder=r=>({id:r.id,woNumber:r.wo_number,pn:r.pn,description:r.description,qty:r.qty,
   unitPrice:r.unit_price,projectId:r.project_id,receivedDate:r.received_date,targetDate:r.target_date,
   stageIds:r.stage_ids,blockId:r.block_id,serials:r.serials,shortages:r.shortages,
-  defects:r.defects,deliveredSerials:r.delivered_serials,status:r.status});
+  defects:r.defects,deliveredSerials:r.delivered_serials,status:r.status,companyId:r.company_id||DEFAULT_COMPANY_ID});
 const orderToDb=o=>({id:o.id,wo_number:o.woNumber,pn:o.pn||null,description:o.description||null,
   qty:Number(o.qty)||0,unit_price:Number(o.unitPrice)||0,project_id:o.projectId||null,
   received_date:o.receivedDate||null,target_date:o.targetDate||null,stage_ids:o.stageIds||[],
   block_id:o.blockId||null,serials:o.serials||[],shortages:o.shortages||[],
   defects:o.defects||[],delivered_serials:o.deliveredSerials||[],status:o.status||"open",
-  company_id:o.companyId||DEFAULT_COMPANY_ID,updated_at:new Date().toISOString()});
+  company_id:rowCid(o),updated_at:new Date().toISOString()});
 const dbToLog=r=>({id:r.id,userId:r.user_id,userName:r.user_name,serialId:r.serial_id,
   serialSn:r.serial_sn,stageId:r.stage_id,orderId:r.order_id,startTime:r.start_time,
   endTime:r.end_time,completed:r.completed,durationMin:r.duration_min,paused:r.paused,
   pauseStart:r.pause_start,totalPauseMin:r.total_pause_min,pauseLog:r.pause_log,
-  bulk:r.bulk,bulkGroupId:r.bulk_group_id,bulkCount:r.bulk_count});
+  bulk:r.bulk,bulkGroupId:r.bulk_group_id,bulkCount:r.bulk_count,companyId:r.company_id||DEFAULT_COMPANY_ID});
 const logToDb=w=>({id:w.id,user_id:w.userId,user_name:w.userName,serial_id:w.serialId||null,
   serial_sn:w.serialSn||null,stage_id:w.stageId||null,order_id:w.orderId||null,
   start_time:w.startTime||null,end_time:w.endTime||null,completed:w.completed||false,
   duration_min:Number(w.durationMin||0),paused:w.paused||false,pause_start:w.pauseStart||null,
   total_pause_min:Number(w.totalPauseMin||0),pause_log:w.pauseLog||[],
   bulk:w.bulk||false,bulk_group_id:w.bulkGroupId||null,bulk_count:w.bulkCount||null,
-  company_id:w.companyId||DEFAULT_COMPANY_ID});
+  company_id:rowCid(w)});
 const dbToTask=r=>({id:r.id,userId:r.user_id,userName:r.user_name,name:r.name,
   description:r.description,price:r.price,active:r.active,completed:r.completed,partial:r.partial,
   startTime:r.start_time,endTime:r.end_time,durationMin:r.duration_min,paused:r.paused,
   pauseStart:r.pause_start,totalPauseMin:r.total_pause_min,pauseLog:r.pause_log,
-  createdAt:r.created_at});
+  createdAt:r.created_at,companyId:r.company_id||DEFAULT_COMPANY_ID});
 const taskToDb=t=>({id:t.id,user_id:t.userId,user_name:t.userName,name:t.name,
   description:t.description||null,price:Number(t.price||0),active:t.active||false,
   completed:t.completed||false,partial:t.partial||false,start_time:t.startTime||null,
   end_time:t.endTime||null,duration_min:Number(t.durationMin||0),paused:t.paused||false,
   pause_start:t.pauseStart||null,total_pause_min:Number(t.totalPauseMin||0),
-  pause_log:t.pauseLog||[],company_id:t.companyId||DEFAULT_COMPANY_ID,updated_at:new Date().toISOString()});
-const dbToStage=r=>({id:r.id,name:r.name,order:r.stage_order,color:r.color,price:r.price,hourlyRate:r.hourly_rate||0,roleId:r.role_id||"",minutes:Number(r.minutes||0)});
-const stageToDb=s=>({id:s.id,name:s.name,stage_order:s.order||0,color:s.color||"#3b82f6",price:Number(s.price||0),hourly_rate:Number(s.hourlyRate||0),role_id:s.roleId||null,minutes:Number(s.minutes||0),company_id:s.companyId||DEFAULT_COMPANY_ID});
-const dbToBlock=r=>({id:r.id,name:r.name,stages:r.stages});
-const blockToDb=b=>({id:b.id,name:b.name,stages:b.stages||[],company_id:b.companyId||DEFAULT_COMPANY_ID});
-const dbToProject=r=>({id:r.id,name:r.name});
-const projectToDb=p=>({id:p.id,name:p.name,company_id:p.companyId||DEFAULT_COMPANY_ID});
-const dbToDept=r=>({id:r.id,name:r.name,color:r.color||"#3b82f6",managerId:r.manager_id||""});
-const deptToDb=d=>({id:d.id,name:d.name,color:d.color||"#3b82f6",manager_id:d.managerId||null,company_id:d.companyId||DEFAULT_COMPANY_ID});
+  pause_log:t.pauseLog||[],company_id:rowCid(t),updated_at:new Date().toISOString()});
+const dbToStage=r=>({id:r.id,name:r.name,order:r.stage_order,color:r.color,price:r.price,hourlyRate:r.hourly_rate||0,roleId:r.role_id||"",minutes:Number(r.minutes||0),companyId:r.company_id||DEFAULT_COMPANY_ID});
+const stageToDb=s=>({id:s.id,name:s.name,stage_order:s.order||0,color:s.color||"#3b82f6",price:Number(s.price||0),hourly_rate:Number(s.hourlyRate||0),role_id:s.roleId||null,minutes:Number(s.minutes||0),company_id:rowCid(s)});
+const dbToBlock=r=>({id:r.id,name:r.name,stages:r.stages,companyId:r.company_id||DEFAULT_COMPANY_ID});
+const blockToDb=b=>({id:b.id,name:b.name,stages:b.stages||[],company_id:rowCid(b)});
+const dbToProject=r=>({id:r.id,name:r.name,companyId:r.company_id||DEFAULT_COMPANY_ID});
+const projectToDb=p=>({id:p.id,name:p.name,company_id:rowCid(p)});
+const dbToDept=r=>({id:r.id,name:r.name,color:r.color||"#3b82f6",managerId:r.manager_id||"",companyId:r.company_id||DEFAULT_COMPANY_ID});
+const deptToDb=d=>({id:d.id,name:d.name,color:d.color||"#3b82f6",manager_id:d.managerId||null,company_id:rowCid(d)});
 // Daily work plans — a manager assigns a worker an order+stage to work on for a given day.
-const dbToPlan=r=>({id:r.id,userId:r.user_id,userName:r.user_name,date:r.plan_date,orderId:r.order_id||"",stageId:r.stage_id||"",targetQty:Number(r.target_qty||0),serialIds:Array.isArray(r.serial_ids)?r.serial_ids:[],note:r.note||"",done:r.done||false,createdBy:r.created_by||"",createdByName:r.created_by_name||"",createdAt:r.created_at});
-const planToDb=p=>({id:p.id,user_id:p.userId,user_name:p.userName||null,plan_date:p.date,order_id:p.orderId||null,stage_id:p.stageId||null,target_qty:Number(p.targetQty||0),serial_ids:Array.isArray(p.serialIds)?p.serialIds:[],note:p.note||null,done:p.done||false,created_by:p.createdBy||null,created_by_name:p.createdByName||null,company_id:p.companyId||DEFAULT_COMPANY_ID,updated_at:new Date().toISOString()});
+const dbToPlan=r=>({id:r.id,userId:r.user_id,userName:r.user_name,date:r.plan_date,orderId:r.order_id||"",stageId:r.stage_id||"",targetQty:Number(r.target_qty||0),serialIds:Array.isArray(r.serial_ids)?r.serial_ids:[],note:r.note||"",done:r.done||false,createdBy:r.created_by||"",createdByName:r.created_by_name||"",createdAt:r.created_at,companyId:r.company_id||DEFAULT_COMPANY_ID});
+const planToDb=p=>({id:p.id,user_id:p.userId,user_name:p.userName||null,plan_date:p.date,order_id:p.orderId||null,stage_id:p.stageId||null,target_qty:Number(p.targetQty||0),serial_ids:Array.isArray(p.serialIds)?p.serialIds:[],note:p.note||null,done:p.done||false,created_by:p.createdBy||null,created_by_name:p.createdByName||null,company_id:rowCid(p),updated_at:new Date().toISOString()});
 // זמן תקן — the target minutes defined up-front for a מק"ט, stage by stage.
 // Independent of what the floor actually measures (זמן בפועל, from the work logs)
 // and of what the price list sells (זמן מכירה).
 const dbToPnStd=r=>({id:r.id,pn:r.pn||"",stageMin:(r.stage_minutes&&typeof r.stage_minutes==="object")?r.stage_minutes:{},
-  total:Number(r.total_min||0),note:r.note||"",updatedBy:r.updated_by||"",updatedAt:r.updated_at||""});
+  total:Number(r.total_min||0),note:r.note||"",updatedBy:r.updated_by||"",updatedAt:r.updated_at||"",companyId:r.company_id||DEFAULT_COMPANY_ID});
 const pnStdToDb=p=>({id:p.id,pn:p.pn||"",stage_minutes:p.stageMin||{},total_min:Number(p.total||0),
-  note:p.note||null,updated_by:p.updatedBy||null,company_id:p.companyId||DEFAULT_COMPANY_ID,updated_at:new Date().toISOString()});
+  note:p.note||null,updated_by:p.updatedBy||null,company_id:rowCid(p),updated_at:new Date().toISOString()});
 
 // ── DB load all ────────────────────────────────────────────────────────────
 // A total ordering, so paging cannot overlap or skip: a bulk import writes
 // thousands of rows carrying the same created_at, and id breaks the tie.
-const ORDER_BY={orders:"order=created_at.asc,id.asc",work_logs:"order=created_at.asc,id.asc"};
-async function dbLoadAll(){
+// Every ordering here ends in id.asc: paging needs a *total* order or two pages
+// can return the same row (or skip one), and a bulk import stamps thousands of
+// rows with the same created_at / name / מק"ט.
+const ORDER_BY={
+  orders:"order=created_at.asc,id.asc",work_logs:"order=created_at.asc,id.asc",
+  projects:"order=name.asc,id.asc",stages:"order=stage_order.asc,id.asc",
+  stage_blocks:"order=created_at.asc,id.asc",custom_tasks:"order=created_at.asc,id.asc",
+  departments:"order=name.asc,id.asc",daily_plans:"order=created_at.asc,id.asc",
+  pn_standards:"order=pn.asc,id.asc",app_users:"order=name.asc,id.asc"
+};
+// ── The one table too big to re-read on a timer ───────────────────────────
+// A full read of work_logs is 56,000 rows — fifty-odd round trips, because
+// PostgREST caps a page at a thousand. Right on load; wrong every fifteen
+// seconds. What can actually change is a small, knowable set: work_logs has no
+// updated_at, but a row is created open and later completed in place, so the
+// mutable rows are the ones still open plus the ones created recently. Add the
+// ids that were open at the last sweep — a job finished since then is in
+// neither of the other two sets — and the sweep sees every change without
+// re-reading the finished history, which cannot move.
+//
+// What this does *not* catch is a finished row deleted on another device; the
+// periodic full sweep is what reconciles that.
+const HOT_LOG_DAYS=2;
+async function dbLoadHotLogs(cid,openIds){
+  const cf=`company_id=eq.${cid}&`;
+  const since=new Date(Date.now()-HOT_LOG_DAYS*86400000).toISOString();
+  const watched=[...new Set((openIds||[]).filter(Boolean))];
+  const byIdQueries=[];
+  for(let i=0;i<watched.length;i+=SB_CHUNK){
+    const q=watched.slice(i,i+SB_CHUNK).map(id=>`"${String(id).replace(/"/g,'""')}"`).join(",");
+    byIdQueries.push(SB.get("work_logs",cf+`id=in.(${q})`));
+  }
+  const parts=await Promise.all([
+    SB.getAll("work_logs",cf+"completed=is.false&"+ORDER_BY.work_logs),
+    SB.getAll("work_logs",cf+`created_at=gte.${encodeURIComponent(since)}&`+ORDER_BY.work_logs),
+    ...byIdQueries,
+  ]);
+  const rows=[...new Map(parts.flat().map(r=>[r.id,r])).values()];
+  const seen=new Set(rows.map(r=>r.id));
+  // A watched row that did not come back was deleted.
+  return{rows,gone:watched.filter(id=>!seen.has(id))};
+}
+// `hot` — when given, work_logs is refreshed from the slice above and merged
+// into `hot.prev` instead of being read whole. Everything else is always read
+// in full; those tables are small enough that a page or three is nothing.
+async function dbLoadAll(hot){
   const cid=_companyId||DEFAULT_COMPANY_ID;
   const cf=`company_id=eq.${cid}&`;
+  // Every table is read with paging. Which ones "can" outgrow a page is not a
+  // judgement worth making: pn_standards was assumed to be small and had 1,763
+  // rows, of which the app saw the first thousand.
   const [orders,projects,stages,blocks,logs,tasks,depts,plans,pnStds]=await Promise.all([
-    // orders and work_logs are the two that outgrow a single page.
     SB.getAll("orders",cf+ORDER_BY.orders),
-    SB.get("projects",cf+"order=name.asc"),
-    SB.get("stages",cf+"order=stage_order.asc"),
-    SB.get("stage_blocks",cf+"order=created_at.asc"),
-    SB.getAll("work_logs",cf+ORDER_BY.work_logs),
-    SB.get("custom_tasks",cf+"order=created_at.asc"),
-    SB.get("departments",cf+"order=name.asc").catch(()=>[]),
-    SB.get("daily_plans",cf+"order=created_at.asc").catch(()=>[]),
+    SB.getAll("projects",cf+ORDER_BY.projects),
+    SB.getAll("stages",cf+ORDER_BY.stages),
+    SB.getAll("stage_blocks",cf+ORDER_BY.stage_blocks),
+    hot?dbLoadHotLogs(cid,hot.openIds):SB.getAll("work_logs",cf+ORDER_BY.work_logs),
+    SB.getAll("custom_tasks",cf+ORDER_BY.custom_tasks),
+    SB.getAll("departments",cf+ORDER_BY.departments).catch(()=>[]),
+    SB.getAll("daily_plans",cf+ORDER_BY.daily_plans).catch(()=>[]),
     // null (not []) when the table is missing — the caller then keeps whatever
     // standards are cached locally instead of wiping them.
-    SB.get("pn_standards",cf+"order=pn.asc").catch(()=>null),
+    SB.getAll("pn_standards",cf+ORDER_BY.pn_standards).catch(()=>null),
   ]);
+  // In hot mode `logs` is {rows, gone} rather than the whole table.
+  const freshLogs=(hot?logs.rows:logs).map(dbToLog);
+  let workLogs=freshLogs;
+  if(hot){
+    const gone=new Set(logs.gone);
+    const byId=new Map((hot.prev||[]).filter(w=>!gone.has(w.id)).map(w=>[w.id,w]));
+    freshLogs.forEach(w=>byId.set(w.id,w));
+    workLogs=[...byId.values()];
+  }
   const out={
     orders:orders.map(dbToOrder),projects:projects.map(dbToProject),
     stages:stages.map(dbToStage),stageBlocks:blocks.map(dbToBlock),
-    workLogs:logs.map(dbToLog),customTasks:tasks.map(dbToTask),
+    workLogs,customTasks:tasks.map(dbToTask),
     departments:depts.map(dbToDept),dailyPlans:plans.map(dbToPlan),
     pnStandards:pnStds?pnStds.map(dbToPnStd):null
   };
@@ -484,7 +581,10 @@ async function dbLoadAll(){
   SYNC.prime("projects",out.projects,projectToDb);
   SYNC.prime("stages",out.stages,stageToDb);
   SYNC.prime("stage_blocks",out.stageBlocks,blockToDb);
-  SYNC.prime("work_logs",out.workLogs,logToDb);
+  // Only the rows actually read are known to match the server; fingerprinting
+  // the whole merged list every sweep is the cost this mode exists to avoid.
+  SYNC.prime("work_logs",freshLogs,logToDb);
+  if(hot)SYNC.forget("work_logs",logs.gone);
   SYNC.prime("custom_tasks",out.customTasks,taskToDb);
   SYNC.prime("departments",out.departments,deptToDb);
   SYNC.prime("daily_plans",out.dailyPlans,planToDb);
@@ -493,7 +593,7 @@ async function dbLoadAll(){
 }
 async function dbLoadUsers(){
   const cid=_companyId||DEFAULT_COMPANY_ID;
-  const rows=await SB.get("app_users",`company_id=eq.${cid}&order=name.asc`);
+  const rows=await SB.getAll("app_users",`company_id=eq.${cid}&`+ORDER_BY.app_users);
   return rows.map(dbToUser);
 }
 // Demo departments — each has one manager (dept_manager) + two team leads, every team lead has ≥3 workers.
@@ -606,7 +706,6 @@ const ST_ORDER=["open","partial","blocked","complete"];
 // How many units the serials grid draws before it asks whether you want more.
 const SN_PAGE=100;
 const COLORS=["#3b82f6","#10b981","#8b5cf6","#f59e0b","#ef4444","#06b6d4","#f97316","#ec4899","#84cc16","#a78bfa"];
-const LS_PREFIX="pml_";
 
 // ── Utilities ──────────────────────────────────────────────────────────────
 const uid=()=>Math.random().toString(36).slice(2,9);
@@ -683,6 +782,46 @@ function orderDoneCount(order,oStages,workLogs,doneIdx){
   const sers=order?.serials||[];
   if(!oStages.length)return 0;
   return sers.filter(sr=>oStages.every(st=>isDone(doneIdx,workLogs,sr.id,st.id))).length;
+}
+// How many *stage passes* a פק"ע has recorded, out of how many it needs. The
+// whole-unit count above only moves when a unit clears its entire route, so a
+// פק"ע that is genuinely half-built through six of eight stages still reads 0.
+function orderStagePasses(order,oStages,workLogs,doneIdx){
+  const sers=order?.serials||[];
+  if(!sers.length||!oStages.length)return{done:0,total:0};
+  let done=0;
+  sers.forEach(sr=>oStages.forEach(st=>{if(isDone(doneIdx,workLogs,sr.id,st.id))done++}));
+  return{done,total:sers.length*oStages.length};
+}
+// ── Status from the ERP vs. progress from the floor ───────────────────────
+// These are two different facts and the app holds both. `status` is whatever the
+// import carried over from Priority's סטטוס פק"ע; the progress bar counts units
+// that were actually reported through the route in *this* app. They disagree all
+// the time, and until now the screen showed only the disagreement's result —
+// "הושלמה · 0/0" — with nothing to say which half was missing.
+//
+//   nounits  the פק"ע has no serial numbers at all, so no unit can be reported
+//            and every counter for it is 0 by construction, whatever the status
+//   gap      the ERP calls it done or in progress, the floor reported less
+//   ahead    units were reported although the ERP still calls it open
+//   ok       the two agree
+const REPORT_STATE={
+  nounits:{icon:"🚫",label:"ללא יחידות לדיווח",color:"#8b95a8",
+    hint:'לפק"ע אין מספרים סידוריים, ולכן אי אפשר לדווח עליה עבודה והמונים שלה יישארו 0. הסטטוס הגיע מה-ERP בייבוא. אפשר להוסיף סידוריים בכרטיס הפק"ע, או לייבא מחדש עם גיליון ״סידוריים״ / ״השלם סידוריים״.'},
+  gap:{icon:"⚠️",label:"פער מול הסטטוס",color:"#f59e0b",
+    hint:'הסטטוס הגיע מה-ERP, אבל בדיווחי העבודה באפליקציה חסרות יחידות. זה תקין אם העבודה נעשתה לפני שהמערכת נכנסה לשימוש.'},
+  ahead:{icon:"▶️",label:"דווחה עבודה",color:"#3b82f6",
+    hint:'ה-ERP עדיין מסמן את הפק"ע כפתוחה, אבל כבר דווחה עליה עבודה באפליקציה.'},
+  ok:null
+};
+function orderReportState(order,oStages,workLogs,doneIdx){
+  const serials=order?.serials||[];
+  const st=order?.status||"open";
+  if(!serials.length)return"nounits";
+  const passes=orderStagePasses(order,oStages,workLogs,doneIdx);
+  if((st==="complete"||st==="partial")&&passes.done<passes.total)return"gap";
+  if(st==="open"&&passes.done>0)return"ahead";
+  return"ok";
 }
 function orderPerUnitMin(order,stages,stageBlocks){
   return (order.stageIds||[]).reduce((s,sid)=>{const st=(stages||[]).find(x=>x.id===sid);return s+stageMinutesFor(order,st,stageBlocks)},0);
@@ -822,20 +961,127 @@ const LS={
 function getUsers(){try{const u=localStorage.getItem(LS_PREFIX+"users");return u?JSON.parse(u):FALLBACK_USERS}catch{return FALLBACK_USERS}}
 async function saveUsers(users){
   LS.set("users",users);
-  try{await SB.upsert("app_users",users.map(userToDb))}catch(e){console.warn("saveUsers error",e)}
+  // Only this company's users — state can still be holding a list from a previous
+  // session, and re-writing those rows would hand them to the wrong company.
+  const here=getCompanyId();
+  try{await SB.upsert("app_users",users.map(userToDb).filter(r=>r.company_id===here))}
+  catch(e){console.warn("saveUsers error",e)}
 }
 function getAuditLog(){return LS.get("audit")||[]}
 function addAuditEntry(entry){
   try{
     const log=getAuditLog();
-    const e={...entry,id:uid(),timestamp:nowISO(),reverted:false};
+    const e={...entry,id:uid(),timestamp:nowISO(),reverted:false,companyId:getCompanyId()};
     log.unshift(e);LS.set("audit",log.slice(0,1000));
     // Save audit to DB asynchronously (non-blocking)
     SB.upsert("audit_log",{id:e.id,user_id:e.userId||null,username:e.username||null,
       name:e.name||null,action:e.action,target:e.target||null,details:e.details||null,
-      reverted:false,can_undo:e.canUndo||false}).catch(()=>{});
-  }catch{}
+      reverted:false,can_undo:e.canUndo||false,company_id:e.companyId}).catch(()=>{});
+    return e.id;
+  }catch{return null}
 }
+
+// ══════════════════════════════════════════════════════════════════════════
+// ═══ ACTION JOURNAL (אחזור) ═══════════════════════════════════════════════
+// ══════════════════════════════════════════════════════════════════════════
+// The audit log said *that* something happened. The journal also keeps what the
+// data looked like before it happened, which is the only thing that makes an
+// action reversible — deleting a user, editing a פק"ע, replacing the whole order
+// list with an import. An entry holds, per collection it touched, the rows as
+// they were (`before`) and the ids that exist after (`after`); reverting writes
+// the old rows back and deletes whatever the action created.
+//
+// Which collections can be restored, and where each one lives on the server.
+const UNDO_COLL={
+  orders:      {label:'פק"ע',          table:"orders"},
+  workLogs:    {label:"רישומי עבודה",  table:"work_logs"},
+  customTasks: {label:"משימות",        table:"custom_tasks"},
+  stages:      {label:"שלבים",         table:"stages"},
+  projects:    {label:"פרויקטים",      table:"projects"},
+  stageBlocks: {label:"בלוקים",        table:"stage_blocks"},
+  departments: {label:"מחלקות",        table:"departments"},
+  dailyPlans:  {label:"תוכניות עבודה", table:"daily_plans"},
+  pnStandards: {label:"זמני תקן",      table:"pn_standards"},
+  users:       {label:"משתמשים",       table:"app_users"},
+};
+// Entries kept. Deep enough to walk back a bad afternoon, shallow enough that the
+// snapshots stay in localStorage.
+const UNDO_MAX=60;
+// A single entry bigger than this is kept in memory only: an import snapshot runs
+// to megabytes, and writing it would blow the whole cache away rather than just
+// itself. Such an entry is still undoable — until the page is reloaded.
+const UNDO_LS_MAX=1500000;
+const UNDO=(()=>{
+  let mem=null;                       // journal for this tab, snapshots included
+  let apply=null;                     // set by the App — knows how to write state
+  const load=()=>{
+    if(mem)return mem;
+    const saved=LS.get("undoJournal");
+    mem=Array.isArray(saved)?saved:[];
+    return mem;
+  };
+  const save=()=>{
+    // Heavy entries are dropped from the persisted copy, not from `mem`.
+    const slim=mem.filter(e=>!e.heavy).slice(0,UNDO_MAX);
+    LS.set("undoJournal",slim);
+  };
+  return{
+    setApplier(fn){apply=fn},
+    ready(){return!!apply},
+    // Records the action *and* the audit entry, so callers have one thing to call.
+    // `changes` is [{coll, before:[...], after:[ids]}]; either side may be empty
+    // (a creation has no `before`, a deletion has no `after`).
+    record({user,action,target,details,changes}){
+      const list=load();
+      const clean=(changes||[]).filter(c=>c&&UNDO_COLL[c.coll]).map(c=>({
+        coll:c.coll,
+        before:(c.before||[]).map(r=>({...r})),
+        after:[...new Set((c.after||[]).map(r=>typeof r==="string"?r:r&&r.id).filter(Boolean))]
+      }));
+      const id=addAuditEntry({userId:user?.id,username:user?.username,name:user?.name,
+        action,target:target||"",details:details||"",canUndo:clean.length>0});
+      if(!clean.length)return id;
+      const e={id:id||uid(),timestamp:nowISO(),companyId:getCompanyId(),
+        userId:user?.id,username:user?.username,name:user?.name,
+        action,target:target||"",details:details||"",reverted:false,changes:clean};
+      let size=0;try{size=JSON.stringify(e.changes).length}catch{size=UNDO_LS_MAX+1}
+      e.heavy=size>UNDO_LS_MAX;
+      e.rows=clean.reduce((n,c)=>n+c.before.length+c.after.length,0);
+      list.unshift(e);
+      if(list.length>UNDO_MAX)list.length=UNDO_MAX;
+      save();
+      return e.id;
+    },
+    list(){return load().filter(e=>e.companyId===getCompanyId())},
+    get(id){return load().find(e=>e.id===id)||null},
+    // Reverts an entry. Returns a short description of what was put back, or
+    // throws with a reason a person can act on.
+    async revert(id){
+      const e=this.get(id);
+      if(!e)throw new Error("הפעולה כבר אינה זמינה לאחזור");
+      if(e.reverted)throw new Error("הפעולה כבר בוטלה");
+      if(e.companyId!==getCompanyId())throw new Error("הפעולה שייכת לחברה אחרת");
+      if(!apply)throw new Error("האחזור אינו זמין כרגע");
+      const parts=[];
+      for(const c of e.changes){
+        const beforeIds=new Set(c.before.map(r=>r.id));
+        const remove=c.after.filter(x=>!beforeIds.has(x));
+        await apply(c.coll,c.before,remove);
+        const bits=[];
+        if(c.before.length)bits.push(`${c.before.length} שוחזרו`);
+        if(remove.length)bits.push(`${remove.length} הוסרו`);
+        if(bits.length)parts.push(`${UNDO_COLL[c.coll].label}: ${bits.join(" · ")}`);
+      }
+      e.reverted=true;save();
+      SB.patch("audit_log",{id:e.id},{reverted:true}).catch(()=>{});
+      addAuditEntry({userId:e.userId,username:e.username,name:e.name,
+        action:"אחזור פעולה",target:e.target,details:`בוטל: ${e.action}${parts.length?" — "+parts.join(" | "):""}`});
+      return parts.join(" | ");
+    },
+    // A company that is being deleted takes its journal with it.
+    dropCompany(cid){mem=load().filter(e=>e.companyId!==cid);save()}
+  };
+})();
 
 // ── Auth Context ───────────────────────────────────────────────────────────
 const AuthCtx=React.createContext(null);
@@ -1593,6 +1839,10 @@ function Dashboard({orders,projects,stages,users,workLogs,departments,customTask
   const totalWorkCost=fLogs.reduce((s,w)=>{const u=users.find(u2=>u2.id===w.userId);return s+(w.durationMin||0)*(Number(u?.hourlyRate||0)/60)},0);
   const openDefects=fOrders.flatMap(o=>(o.defects||[]).filter(d=>d.status!=="closed")).length;
   const openOrders=fOrders.filter(o=>{const sers=o.serials||[];return sers.length===0||sers.some(s=>!isSerDone(o,s))}).length;
+  // A פק"ע with no serial numbers counts as "not finished" above because none of
+  // its units cleared the route — it has none. That is a data gap, not work in
+  // progress, so it is called out rather than folded silently into the number.
+  const noUnitOrders=fOrders.filter(o=>!(o.serials||[]).length).length;
   const openShortages=fOrders.flatMap(o=>(o.shortages||[]).filter(s2=>!s2.received)).length;
   const forecastRev=fOrders.reduce((s,o)=>{const remaining=Math.max(0,(o.serials||[]).length-(o.serials||[]).filter(sr=>isSerDone(o,sr)).length);return s+remaining*Number(o.unitPrice||0)},0);
 
@@ -1688,7 +1938,7 @@ function Dashboard({orders,projects,stages,users,workLogs,departments,customTask
 
       {/* KPIs */}
       <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(140px,1fr))",gap:9,marginBottom:14}}>
-        <KpiBox i="📋" v={openOrders} label='פק"ע פתוחות' c="#f59e0b"/>
+        <KpiBox i="📋" v={openOrders} label='פק"ע שטרם הסתיימו' c="#f59e0b" sub={noUnitOrders?`מתוכן ${noUnitOrders.toLocaleString()} ללא סידוריים לדיווח`:null}/>
         <KpiBox i="🔢" v={totalSerials.toLocaleString()} label='סה"כ יחידות' c="#60a5fa" sub={`${completedSerials.toLocaleString()} הושלמו`}/>
         <KpiBox i="🎯" v={onTimePct!=null?onTimePct+"%":"—"} label="עמידה בלוחות זמנים" c={onTimePct==null?"#8b95a8":onTimePct>=85?"#10b981":onTimePct>=60?"#f59e0b":"#ef4444"} sub={datedOrders.length?`${onTimeCount}/${datedOrders.length} פק"ע בזמן`:null}/>
         <KpiBox i="💰" v={fmtMoney(actualRev)} label="הכנסה ממומשת" c="#a78bfa"/>
@@ -1944,13 +2194,24 @@ function SerialsManager({order,stages,onUpdate,workLogs,onSignOff}){
   const [startNum,setStartNum]=useState((order.serials||[]).length+1);
   const serials=order.serials||[];
 
+  const makeSerials=(n,from)=>{
+    const out=[];
+    for(let i=0;i<n;i++)out.push({id:uid(),sn:`${prefix}-${String(from+i).padStart(4,"0")}`,createdAt:nowISO()});
+    return out;
+  };
   const addSerials=()=>{
-    const newSerials=[];
-    for(let i=0;i<addCount;i++){
-      newSerials.push({id:uid(),sn:`${prefix}-${String(startNum+i).padStart(4,"0")}`,createdAt:nowISO()});
-    }
-    onUpdate({...order,serials:[...serials,...newSerials]});
+    onUpdate({...order,serials:[...serials,...makeSerials(addCount,startNum)]});
     setStartNum(startNum+addCount);
+  };
+  // The common case behind every "הושלמה · 0/0" row: Priority sent the פק"ע
+  // without its serials sheet, so there is nothing to report work against. One
+  // click issues the units the פק"ע is actually for.
+  const fillFromQty=()=>{
+    const n=Number(order.qty)||0;
+    if(!(n>0))return;
+    if(!confirm(`ליצור ${n} סידוריים לפי הכמות בפק"ע?\nאלה מספרים מקומיים — ייבוא עתידי עם גיליון ״סידוריים״ מ-Priority יחליף אותם.`))return;
+    onUpdate({...order,serials:makeSerials(n,1)});
+    setStartNum(n+1);
   };
 
   const removeSn=id=>{
@@ -2020,6 +2281,14 @@ function SerialsManager({order,stages,onUpdate,workLogs,onSignOff}){
           </div>
         )}
       </div>
+      {canEdit&&serials.length===0&&Number(order.qty)>0&&(
+        <div style={{background:"#f59e0b12",border:"1px solid #f59e0b44",borderRadius:8,padding:"11px 13px",marginBottom:12,display:"flex",gap:10,flexWrap:"wrap",alignItems:"center",justifyContent:"space-between"}}>
+          <div style={{fontSize:12.5,color:"var(--c-muted)",lineHeight:1.6,flex:"1 1 240px"}}>
+            <b style={{color:"#f59e0b"}}>לפק"ע אין מספרים סידוריים.</b> בלעדיהם אי אפשר לדווח עליה עבודה, וההתקדמות תישאר 0 גם כשהסטטוס מה-ERP הוא ״הושלמה״.
+          </div>
+          <Btn color="#f59e0b" onClick={fillFromQty}>🔢 צור {Number(order.qty)} סידוריים לפי הכמות</Btn>
+        </div>
+      )}
       {canEdit&&(
         <div style={{background:"var(--c-deep)",borderRadius:8,padding:12,marginBottom:12,display:"flex",gap:10,flexWrap:"wrap",alignItems:"flex-end"}}>
           <Field label="קידומת" value={prefix} onChange={setPrefix} style={{minWidth:100}}/>
@@ -2200,6 +2469,8 @@ function OrderDetail({order,projects,stages,stageBlocks,onClose,onUpdate,workLog
   const doneIdx=useDoneIndex(workLogs);
   const totalCompleted=serials.filter(s=>oStages.every(st=>doneIdx.has(logKey(s.id,st.id)))).length;
   const pct=serials.length?Math.round(totalCompleted/serials.length*100):0;
+  const passes=orderStagePasses(order,oStages,workLogs,doneIdx);
+  const reportState=REPORT_STATE[orderReportState(order,oStages,workLogs,doneIdx)];
   const perUnitMin=orderPerUnitMin(order,stages,stageBlocks);
   const remainMin=orderRemainingMin(order,stages,stageBlocks,workLogs);
   // The standard defined for this מק"ט (זמן תקן) — the planning figure, next to
@@ -2233,17 +2504,34 @@ function OrderDetail({order,projects,stages,stageBlocks,onClose,onUpdate,workLog
             <div style={{marginTop:3,fontSize:13,color:proj?"#7eb8ff":"var(--c-dim)"}}>{proj?`📂 ${proj.name}`:"📂 ללא פרויקט"}</div>
           </div>
           <div style={{display:"flex",gap:8,alignItems:"center",flexWrap:"wrap"}}>
+            <span title={`סטטוס מה-ERP: ${SL[order.status||"open"]}`}><Badge status={order.status||"open"} large/></span>
             <span style={{fontSize:14,fontWeight:700,color:"#10b981"}}>{totalCompleted}/{serials.length} הושלמו</span>
           </div>
         </div>
+        {reportState&&(
+          <div style={{background:reportState.color+"12",border:`1px solid ${reportState.color}44`,borderRadius:9,padding:"9px 12px",marginBottom:12,fontSize:12.5,lineHeight:1.7}}>
+            <b style={{color:reportState.color}}>{reportState.icon} {reportState.label}</b>
+            <span style={{color:"var(--c-muted)"}}> — הסטטוס <b>{SL[order.status||"open"]}</b> הגיע מה-ERP; ההתקדמות נספרת מדיווחי עבודה באפליקציה בלבד.</span>
+            <div style={{color:"var(--c-dim)",marginTop:3}}>{reportState.hint}</div>
+          </div>
+        )}
         <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(110px,1fr))",gap:8,marginTop:10}}>
           {(()=>{const isW=currentUser?.role==="worker";const items=[["כמות",serials.length],["הושלמו",totalCompleted],["תאריך קבלה",fmt(order.receivedDate)],["יעד אספקה",fmt(order.targetDate)]];if(!isW){items.splice(2,0,["מחיר ליחידה",fmtMoney(order.unitPrice)],["הכנסה ממומשת",fmtMoney(totalCompleted*Number(order.unitPrice||0))]);} return items.map(([l,v])=>(
             <div key={l} style={{background:"var(--c-deep)",borderRadius:8,padding:"8px 10px"}}><div style={{fontSize:10,color:"var(--c-dim)",marginBottom:2}}>{l}</div><div style={{fontWeight:700,fontSize:12,wordBreak:"break-word"}}>{v}</div></div>
           ))})()}
         </div>
         <div style={{marginTop:12}}>
-          <div style={{display:"flex",justifyContent:"space-between",fontSize:13,color:"var(--c-muted)",marginBottom:3}}><span>התקדמות</span><span>{pct}%</span></div>
+          <div style={{display:"flex",justifyContent:"space-between",fontSize:13,color:"var(--c-muted)",marginBottom:3}}><span>יחידות שסיימו את כל המסלול</span><span>{pct}%</span></div>
           <PBar pct={pct} h={10}/>
+          {passes.total>0&&(
+            <div style={{marginTop:8}}>
+              <div style={{display:"flex",justifyContent:"space-between",fontSize:12,color:"var(--c-dim)",marginBottom:3}}>
+                <span title="כל שלב בכל יחידה שדווח כבוצע">דיווחי שלבים — {passes.done} מתוך {passes.total}</span>
+                <span>{Math.round(passes.done/passes.total*100)}%</span>
+              </div>
+              <PBar pct={Math.round(passes.done/passes.total*100)} h={6}/>
+            </div>
+          )}
         </div>
         {(perUnitMin>0||stdPerUnit>0||actPerUnit>0)&&(
           <div style={{display:"flex",gap:14,flexWrap:"wrap",marginTop:12,fontSize:12,color:"var(--c-muted)"}}>
@@ -2310,7 +2598,7 @@ function OrderDetail({order,projects,stages,stageBlocks,onClose,onUpdate,workLog
 }
 
 function Orders({orders,projects,stages,stageBlocks,updO,workLogs,onWorkLog,workdayHours=8,setWorkdayHours,pnStandards}){
-  const {canEdit}=useAuth();
+  const {canEdit,currentUser}=useAuth();
   const [showForm,setShowForm]=useState(false);
   const [editing,setEditing]=useState(null);
   const [detail,setDetail]=useState(null);
@@ -2326,7 +2614,12 @@ function Orders({orders,projects,stages,stageBlocks,updO,workLogs,onWorkLog,work
     const q=search.trim().toLowerCase();
     const list=orders.filter(o=>{
       if(filterProj!=="all"&&o.projectId!==filterProj)return false;
-      if(filterStat!=="all"&&(o.status||"open")!==filterStat)return false;
+      // "ללא יחידות" and "פער מול הסטטוס" cut across the four ERP statuses rather
+      // than sitting beside them — they answer "can this פק"ע be reported on at
+      // all", which is the question the status cannot.
+      if(filterStat==="nounits"||filterStat==="gap"){
+        if(orderReportState(o,orderRoute(o,stages),workLogs,doneIdx)!==filterStat)return false;
+      }else if(filterStat!=="all"&&(o.status||"open")!==filterStat)return false;
       if(q&&!o.woNumber?.toLowerCase().includes(q)&&!o.description?.toLowerCase().includes(q)&&!o.pn?.toLowerCase().includes(q))return false;
       return true;
     });
@@ -2339,21 +2632,33 @@ function Orders({orders,projects,stages,stageBlocks,updO,workLogs,onWorkLog,work
       qty:(a,b)=>(Number(b.qty)||0)-(Number(a.qty)||0)
     }[sort];
     return cmp?list.slice().sort(cmp):list;
-  },[orders,filterProj,filterStat,search,sort]);
+  },[orders,filterProj,filterStat,search,sort,stages,workLogs,doneIdx]);
 
   // How many פק"ע sit in each status, so the filter chips say what they will show
   // — and so a run of "everything is open" is visible before anyone goes looking.
   const statCount=useMemo(()=>{
-    const c={open:0,partial:0,complete:0,blocked:0};
-    orders.forEach(o=>{const k=o.status||"open";if(c[k]!==undefined)c[k]++});
+    const c={open:0,partial:0,complete:0,blocked:0,nounits:0,gap:0};
+    orders.forEach(o=>{
+      const k=o.status||"open";if(c[k]!==undefined)c[k]++;
+      const rs=orderReportState(o,orderRoute(o,stages),workLogs,doneIdx);
+      if(c[rs]!==undefined)c[rs]++;
+    });
     return c;
-  },[orders]);
+  },[orders,stages,workLogs,doneIdx]);
 
   // Looking a project up by id per row is a scan of the project list per row;
   // once into a Map it is a hash lookup.
   const projMap=useMemo(()=>new Map(projects.map(p=>[p.id,p])),[projects]);
 
-  const del=id=>{if(!confirm('למחוק פק"ע זו?'))return;updO(prev=>prev.filter(o=>o.id!==id));if(detail?.id===id)setDetail(null);SB.del("orders",{id}).catch(()=>{})};
+  const del=id=>{
+    const victim=orders.find(o=>o.id===id);
+    if(!confirm('למחוק פק"ע זו?\nאפשר יהיה לאחזר את המחיקה מיומן הפעילות.'))return;
+    updO(prev=>prev.filter(o=>o.id!==id));
+    if(detail?.id===id)setDetail(null);
+    SB.del("orders",{id}).catch(()=>{});
+    if(victim)UNDO.record({user:currentUser,action:'מחיקת פק"ע',target:victim.woNumber,
+      details:victim.description||"",changes:[{coll:"orders",before:[victim],after:[]}]});
+  };
   const handleUpd=(upd)=>{updO(prev=>prev.map(o=>o.id===upd.id?upd:o));setDetail(upd)};
 
   // Always get fresh order from state
@@ -2376,19 +2681,35 @@ function Orders({orders,projects,stages,stageBlocks,updO,workLogs,onWorkLog,work
         {setWorkdayHours&&<div style={{display:"flex",flexDirection:"column",gap:3}}><label style={{fontSize:11,color:"var(--c-dim)"}}>יום עבודה (שע' נטו)</label><input type="number" min="1" step="0.5" value={workdayHours} onChange={e=>setWorkdayHours(e.target.value)} style={{padding:"7px 8px",fontSize:12,width:90}} title="משמש לחישוב צפי הסיום"/></div>}
         <div style={{fontSize:12,color:"var(--c-dim)",paddingBottom:4}}>{filtered.length} פק"ע</div>
         <div style={{display:"flex",gap:6,flexWrap:"wrap",width:"100%"}}>
-          {[["all",'הכל',orders.length,"#8b95a8"],...ST_ORDER.map(k=>[k,SL[k],statCount[k],SC[k]])].map(([k,l,n,c])=>(
-            <button key={k} onClick={()=>setFilterStat(k)} style={{background:filterStat===k?c+"26":"var(--c-deep)",
+          {[["all",'הכל',orders.length,"#8b95a8",""],
+            ...ST_ORDER.map(k=>[k,SL[k],statCount[k],SC[k],"הסטטוס כפי שהגיע מה-ERP בייבוא"]),
+            ["nounits",`${REPORT_STATE.nounits.icon} ${REPORT_STATE.nounits.label}`,statCount.nounits,REPORT_STATE.nounits.color,REPORT_STATE.nounits.hint],
+            ["gap",`${REPORT_STATE.gap.icon} ${REPORT_STATE.gap.label}`,statCount.gap,REPORT_STATE.gap.color,REPORT_STATE.gap.hint],
+          ].map(([k,l,n,c,t])=>(
+            <button key={k} title={t} onClick={()=>setFilterStat(k)} style={{background:filterStat===k?c+"26":"var(--c-deep)",
               border:`1px solid ${filterStat===k?c+"88":"var(--c-border)"}`,color:filterStat===k?c:"var(--c-muted)",
               borderRadius:16,padding:"3px 11px",fontSize:11.5,fontWeight:600,fontFamily:"inherit",cursor:"pointer"}}>{l} · {n}</button>
           ))}
         </div>
+        {statCount.nounits>0&&(
+          <div style={{width:"100%",fontSize:11.5,color:"var(--c-dim)",background:"var(--c-deep)",border:"1px solid var(--c-border)",borderRadius:8,padding:"7px 10px",lineHeight:1.6}}>
+            🚫 ל-<b style={{color:"var(--c-text)"}}>{statCount.nounits}</b> מתוך {orders.length} פק"ע אין מספרים סידוריים, ולכן אי אפשר לדווח עליהן עבודה והן יופיעו כ-0/0 בכל מצב — גם כשהסטטוס שהגיע מה-ERP הוא ״הושלמה״.
+            הסטטוס מגיע מ-Priority; ההתקדמות נספרת רק מדיווחי עבודה באפליקציה. כדי לדווח, הוסף סידוריים בכרטיס הפק"ע או ייבא מחדש עם גיליון ״סידוריים״ / באפשרות ״השלם סידוריים״.
+          </div>
+        )}
       </Card>
       {filtered.length===0&&<EmptyState icon="📋" title='אין פק"ע להצגה' subtitle={orders.length?"אף פק\"ע לא עונה על הסינון הנוכחי":"צור הזמנה חדשה כדי להתחיל"}/>}
-      <VirtualList items={filtered} estimate={122} gap={7} renderRow={o=>{
+      <VirtualList items={filtered} estimate={128} gap={7} renderRow={o=>{
           const serials=o.serials||[];
           const oStages=orderRoute(o,stages);
           const completed=orderDoneCount(o,oStages,workLogs,doneIdx);
           const pct=serials.length?Math.round(completed/serials.length*100):0;
+          // Whole units finished the route; stage passes are how far the units got
+          // through it. Shown together so a פק"ע that is genuinely part-built stops
+          // looking identical to one nobody has touched.
+          const passes=orderStagePasses(o,oStages,workLogs,doneIdx);
+          const passPct=passes.total?Math.round(passes.done/passes.total*100):0;
+          const rs=REPORT_STATE[orderReportState(o,oStages,workLogs,doneIdx)];
           const proj=projMap.get(o.projectId);
           const openDef=(o.defects||[]).filter(d=>d.status!=="closed").length;
           const remainMin=orderRemainingMin(o,stages,stageBlocks,workLogs,doneIdx);
@@ -2401,24 +2722,28 @@ function Orders({orders,projects,stages,stageBlocks,updO,workLogs,onWorkLog,work
               <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:4}}>
                 <div style={{display:"flex",alignItems:"center",gap:6,flexWrap:"wrap"}}>
                   <span style={{fontWeight:700,fontSize:15}}>{o.woNumber}</span>
-                  <Badge status={o.status||"open"}/>
+                  <span title={`סטטוס מה-ERP: ${SL[o.status||"open"]}`}><Badge status={o.status||"open"}/></span>
+                  {rs&&<span title={rs.hint} style={{fontSize:11,background:rs.color+"1f",color:rs.color,border:`1px solid ${rs.color}44`,padding:"2px 7px",borderRadius:20,whiteSpace:"nowrap"}}>{rs.icon} {rs.label}</span>}
                   {o.pn&&<span style={{fontSize:11,color:"#a78bfa"}}>P/N: {o.pn}</span>}
                   {proj?<span style={{fontSize:11,background:"var(--c-tag-blue-bg)",color:"var(--c-tag-blue)",padding:"2px 7px",borderRadius:20}}>{proj.name}</span>:<span style={{fontSize:11,background:"var(--c-border)",color:"var(--c-dim)",padding:"2px 7px",borderRadius:20}}>ללא פרויקט</span>}
                   {openDef>0&&<span style={{fontSize:11,background:"#450a0a",color:"#fca5a5",padding:"2px 7px",borderRadius:20}}>🔧 {openDef}</span>}
                 </div>
                 <div style={{display:"flex",gap:4,alignItems:"center"}}>
-                  <span style={{fontSize:12,fontWeight:700,color:pct>=100?"#10b981":"var(--c-muted)"}}>{completed}/{serials.length}</span>
+                  <span title='יחידות שסיימו את כל מסלול הפק"ע' style={{fontSize:12,fontWeight:700,color:pct>=100?"#10b981":"var(--c-muted)"}}>{completed}/{serials.length}</span>
                   {canEdit&&<><IBtn onClick={e=>{e.stopPropagation();setEditing(o);setShowForm(true)}}>✏️</IBtn><IBtn onClick={e=>{e.stopPropagation();del(o.id)}}>🗑️</IBtn></>}
                 </div>
               </div>
               {o.description&&<div style={{fontSize:13,color:"var(--c-muted)",marginBottom:4}}>{o.description}</div>}
               <div style={{display:"flex",gap:10,fontSize:12,color:"var(--c-dim)",marginBottom:5,flexWrap:"wrap"}}>
-                <span>יחידות: <b style={{color:"var(--c-text)"}}>{serials.length}</b></span>
+                <span>יחידות: <b style={{color:serials.length?"var(--c-text)":"#f59e0b"}}>{serials.length||"—"}</b>{!serials.length&&<b style={{color:"#f59e0b"}}> (כמות בפק"ע: {Number(o.qty)||0})</b>}</span>
                 {canEdit&&<span>מחיר: <b style={{color:"#a78bfa"}}>{fmtMoney(o.unitPrice)}</b></span>}
                 <span>שלבים: <b>{(o.stageIds||[]).length}</b></span>
+                {passes.total>0&&<span title="דיווחי שלב שבוצעו מתוך כלל השלבים × היחידות">דיווחי שלבים: <b style={{color:passes.done?"#3b82f6":"var(--c-dim)"}}>{passes.done}/{passes.total}</b></span>}
                 {remainMin>0&&pct<100&&<span>⏳ צפי לסיום: <b style={{color:"#06b6d4"}}>{fmtWorkEstimate(remainMin,workdayHours)}</b></span>}
               </div>
-              <PBar pct={pct}/>
+              {serials.length
+                ?<PBar pct={pct>0?pct:passPct}/>
+                :<div style={{fontSize:11,color:"#f59e0b",background:"#f59e0b12",border:"1px dashed #f59e0b55",borderRadius:6,padding:"4px 8px"}}>אין סידוריים — לא ניתן לדווח עבודה על הפק"ע הזו</div>}
             </div>
           );
         }}/>
@@ -2426,8 +2751,13 @@ function Orders({orders,projects,stages,stageBlocks,updO,workLogs,onWorkLog,work
         const{_serials,...rest}=data;
         if(editing){
           updO(prev=>prev.map(o=>o.id===editing.id?{...editing,...rest}:o));
+          UNDO.record({user:currentUser,action:'עריכת פק"ע',target:editing.woNumber,
+            changes:[{coll:"orders",before:[editing],after:[editing.id]}]});
         }else{
-          updO(prev=>[...prev,{...rest,id:uid(),serials:_serials||[],shortages:[],defects:[]}]);
+          const created={...rest,id:uid(),serials:_serials||[],shortages:[],defects:[]};
+          updO(prev=>[...prev,created]);
+          UNDO.record({user:currentUser,action:'יצירת פק"ע',target:created.woNumber,
+            details:created.description||"",changes:[{coll:"orders",before:[],after:[created.id]}]});
         }
         setShowForm(false);
       }} onClose={()=>setShowForm(false)}/></Modal>)}
@@ -3568,6 +3898,7 @@ function TeamDashboard({users,workLogs,orders,stages,customTasks,departments,onA
 // ══════════════════════════════════════════════════════════════════════════
 function StagesManagement({stages,setStages,stageBlocks,setStageBlocks,persist}){
   const {toast}=useToast();
+  const {currentUser}=useAuth();
   const [showForm,setShowForm]=useState(false);
   const [name,setName]=useState("");
   const [color,setColor]=useState("#3b82f6");
@@ -3591,12 +3922,21 @@ function StagesManagement({stages,setStages,stageBlocks,setStageBlocks,persist})
   const add=()=>{
     if(!name.trim())return;
     const maxOrder=stages.reduce((m,s)=>Math.max(m,s.order||0),0);
-    const ns=[...stages,{id:uid(),name:name.trim(),order:maxOrder+1,color,price:Number(price)||0,hourlyRate:Number(hourly)||0,roleId:roleId||"",minutes:Number(minutes)||0}];
+    const created={id:uid(),name:name.trim(),order:maxOrder+1,color,price:Number(price)||0,hourlyRate:Number(hourly)||0,roleId:roleId||"",minutes:Number(minutes)||0};
+    const ns=[...stages,created];
     setStages(ns);persist(null,null,ns);setName("");setPrice(0);setHourly(0);setRoleId("");setMinutes(0);setShowForm(false);
+    UNDO.record({user:currentUser,action:"הוספת שלב",target:created.name,
+      changes:[{coll:"stages",before:[],after:[created.id]}]});
   };
-  const del=id=>{if(!confirm("למחוק?"))return;const ns=stages.filter(s=>s.id!==id);setStages(ns);persist(null,null,ns);SB.del("stages",{id}).catch(()=>{})};
-  const move=(id,dir)=>{const idx=stages.findIndex(s=>s.id===id);if((dir===-1&&idx===0)||(dir===1&&idx===stages.length-1))return;const arr=[...stages];[arr[idx],arr[idx+dir]]=[arr[idx+dir],arr[idx]];arr.forEach((s,i)=>s.order=i+1);setStages(arr);persist(null,null,arr)};
-  const saveStage=(id)=>{const ns=stages.map(s=>s.id===id?{...s,name:editStageName.trim()||s.name,color:editStageColor,price:Number(editPrice)||0,hourlyRate:Number(editHourly)||0,roleId:editRoleId||"",minutes:Number(editMinutes)||0}:s);setStages(ns);persist(null,null,ns);setEditId(null)};
+  const del=id=>{
+    const victim=stages.find(s=>s.id===id);
+    if(!confirm("למחוק?"))return;
+    const ns=stages.filter(s=>s.id!==id);setStages(ns);persist(null,null,ns);SB.del("stages",{id}).catch(()=>{});
+    if(victim)UNDO.record({user:currentUser,action:"מחיקת שלב",target:victim.name,
+      changes:[{coll:"stages",before:[victim],after:[]}]});
+  };
+  const move=(id,dir)=>{const idx=stages.findIndex(s=>s.id===id);if((dir===-1&&idx===0)||(dir===1&&idx===stages.length-1))return;const before=stages.map(s=>({...s}));const arr=[...stages];[arr[idx],arr[idx+dir]]=[arr[idx+dir],arr[idx]];arr.forEach((s,i)=>s.order=i+1);setStages(arr);persist(null,null,arr);UNDO.record({user:currentUser,action:"שינוי סדר שלבים",target:stages[idx]?.name||"",changes:[{coll:"stages",before,after:arr.map(s=>s.id)}]})};
+  const saveStage=(id)=>{const before=stages.find(s=>s.id===id);const ns=stages.map(s=>s.id===id?{...s,name:editStageName.trim()||s.name,color:editStageColor,price:Number(editPrice)||0,hourlyRate:Number(editHourly)||0,roleId:editRoleId||"",minutes:Number(editMinutes)||0}:s);setStages(ns);persist(null,null,ns);setEditId(null);if(before)UNDO.record({user:currentUser,action:"עריכת שלב",target:before.name,changes:[{coll:"stages",before:[before],after:[id]}]})};
 
   // Block functions
   const addBlock=()=>{
@@ -3609,9 +3949,16 @@ function StagesManagement({stages,setStages,stageBlocks,setStageBlocks,persist})
       nb=[...(stageBlocks||[]),block];
     }
     setStageBlocks(nb);LS.set("stageBlocks",nb);persist(null,null,null,null,null,nb);
+    UNDO.record({user:currentUser,action:editBlockId?"עריכת בלוק":"הוספת בלוק",target:blockName.trim(),
+      changes:[{coll:"stageBlocks",before:stageBlocks||[],after:nb.map(b=>b.id)}]});
     setBlockName("");setBlockStages([]);setShowBlockForm(false);setEditBlockId(null);
   };
-  const delBlock=id=>{const nb=(stageBlocks||[]).filter(b=>b.id!==id);setStageBlocks(nb);LS.set("stageBlocks",nb);persist(null,null,null,null,null,nb);SB.del("stage_blocks",{id}).catch(()=>{})};
+  const delBlock=id=>{
+    const victim=(stageBlocks||[]).find(b=>b.id===id);
+    const nb=(stageBlocks||[]).filter(b=>b.id!==id);setStageBlocks(nb);LS.set("stageBlocks",nb);persist(null,null,null,null,null,nb);SB.del("stage_blocks",{id}).catch(()=>{});
+    if(victim)UNDO.record({user:currentUser,action:"מחיקת בלוק",target:victim.name,
+      changes:[{coll:"stageBlocks",before:[victim],after:[]}]});
+  };
   const addStageToBlock=stageId=>{
     const st=stages.find(s=>s.id===stageId);if(!st)return;
     if(blockStages.some(bs=>bs.sourceId===stageId))return;
@@ -3794,11 +4141,11 @@ function StagesManagement({stages,setStages,stageBlocks,setStageBlocks,persist})
 function Projects({projects,orders,updP,stages,workLogs}){
   const doneIdx=useDoneIndex(workLogs);
   const {toast}=useToast();
-  const {canEdit}=useAuth();
+  const {canEdit,currentUser}=useAuth();
   const [showForm,setShowForm]=useState(false);
   const [name,setName]=useState("");
-  const add=()=>{if(!name.trim())return;updP(prev=>[...prev,{id:uid(),name:name.trim()}]);setName("");setShowForm(false)};
-  const del=id=>{if(orders.some(o=>o.projectId===id))return toast('לא ניתן למחוק פרויקט עם פק"ע',"warning");updP(prev=>prev.filter(p=>p.id!==id));SB.del("projects",{id}).catch(()=>{})};
+  const add=()=>{if(!name.trim())return;const created={id:uid(),name:name.trim()};updP(prev=>[...prev,created]);setName("");setShowForm(false);UNDO.record({user:currentUser,action:"הוספת פרויקט",target:created.name,changes:[{coll:"projects",before:[],after:[created.id]}]})};
+  const del=id=>{if(orders.some(o=>o.projectId===id))return toast('לא ניתן למחוק פרויקט עם פק"ע',"warning");const victim=projects.find(p=>p.id===id);updP(prev=>prev.filter(p=>p.id!==id));SB.del("projects",{id}).catch(()=>{});if(victim)UNDO.record({user:currentUser,action:"מחיקת פרויקט",target:victim.name,changes:[{coll:"projects",before:[victim],after:[]}]})};
   return(
     <div className="fade-in">
       <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:14}}>
@@ -3838,14 +4185,178 @@ function Projects({projects,orders,updP,stages,workLogs}){
 }
 
 // ══════════════════════════════════════════════════════════════════════════
+// ═══ COMPANIES ══════════════════════════════════════════════════════════
+// ══════════════════════════════════════════════════════════════════════════
+// Every row in every table carries a company_id, so a company is exactly the set
+// of rows that name it. Deleting one therefore means clearing it out table by
+// table and only then removing the company itself — the foreign keys point *at*
+// companies, so the row cannot go first.
+//
+// Ordered so that if a delete fails halfway the company still exists and can be
+// retried, rather than leaving orphan rows behind an already-deleted company.
+const COMPANY_TABLES=[
+  ["work_logs","רישומי עבודה"],["orders",'פק"ע'],["custom_tasks","משימות"],
+  ["daily_plans","תוכניות עבודה"],["pn_standards","זמני תקן"],["stage_blocks","בלוקים"],
+  ["stages","שלבים"],["projects","פרויקטים"],["departments","מחלקות"],
+  ["audit_log","יומן פעילות"],["app_users","משתמשים"],["subscriptions","מנוי"],
+];
+// Shown per company in the list — the tables worth knowing the size of before
+// pressing delete.
+const COMPANY_COUNTS=[["orders",'פק"ע'],["work_logs","דיווחים"],["app_users","משתמשים"],["stages","שלבים"],["projects","פרויקטים"]];
+
+function CompaniesTab({lightMode,currentUser}){
+  const {toast}=useToast();
+  const [rows,setRows]=useState(null);
+  const [err,setErr]=useState("");
+  const [busy,setBusy]=useState("");
+  const [confirmId,setConfirmId]=useState("");
+  const [typed,setTyped]=useState("");
+  const [progress,setProgress]=useState("");
+  const lm=lightMode;
+  const card=lm?"#f7f8fa":"#0d1120";
+  const border=lm?"#dde1e8":"#1e2a42";
+  const muted=lm?"#5a6478":"#8b95a8";
+  const here=getCompanyId();
+
+  const load=useCallback(async()=>{
+    setErr("");setRows(null);
+    try{
+      const list=await SB.get("companies","order=created_at.asc");
+      const withCounts=await Promise.all(list.map(async c=>{
+        const counts={};
+        await Promise.all(COMPANY_COUNTS.map(async([t])=>{
+          counts[t]=await SB.count(t,`company_id=eq.${c.id}`).catch(()=>null);
+        }));
+        return{...c,counts};
+      }));
+      setRows(withCounts);
+    }catch(e){setErr(sbErrMsg(e))}
+  },[]);
+  useEffect(()=>{load()},[load]);
+
+  const doDelete=async(c)=>{
+    setBusy(c.id);setProgress("");
+    let removed=0;
+    try{
+      for(const [table,label] of COMPANY_TABLES){
+        setProgress(`מוחק ${label}…`);
+        // A company with no rows in a table is the normal case, and a table that
+        // does not exist in this project must not abort the whole delete.
+        try{await SB.del(table,{company_id:c.id})}
+        catch(e){
+          const msg=sbErrMsg(e);
+          if(/does not exist|could not find the table/i.test(msg))continue;
+          throw new Error(`${label}: ${msg}`);
+        }
+        removed++;
+      }
+      setProgress("מוחק את החברה…");
+      await SB.del("companies",{id:c.id});
+      UNDO.dropCompany(c.id);
+      addAuditEntry({userId:currentUser?.id,username:currentUser?.username,name:currentUser?.name,
+        action:"מחיקת חברה",target:c.name,details:`${removed} טבלאות נוקו · פעולה בלתי הפיכה`});
+      toast(`החברה "${c.name}" נמחקה על כל נתוניה`,"success",6000);
+      setConfirmId("");setTyped("");
+      load();
+    }catch(e){
+      toast("המחיקה נכשלה — "+(e.message||e),"error",8000);
+      load();
+    }
+    setBusy("");setProgress("");
+  };
+
+  if(err)return(
+    <div>
+      <div style={{color:"#ef4444",fontSize:13,marginBottom:10}}>שגיאה בטעינת החברות: {err}</div>
+      <Btn small onClick={load}>נסה שוב</Btn>
+    </div>
+  );
+  if(!rows)return<div style={{textAlign:"center",padding:30,color:muted}}>⏳ טוען חברות…</div>;
+
+  return(
+    <div>
+      <div style={{fontWeight:700,marginBottom:4}}>🏭 חברות במערכת ({rows.length})</div>
+      <div style={{fontSize:11.5,color:muted,marginBottom:12}}>
+        כל חברה היא מרחב נתונים נפרד — פק"ע, עובדים, שלבים ודיווחים. אתה מחובר כרגע ל<b>{rows.find(c=>c.id===here)?.name||"חברה לא מזוהה"}</b>, ורואה רק את הנתונים שלה.
+      </div>
+      <div style={{display:"flex",flexDirection:"column",gap:8}}>
+        {rows.map(c=>{
+          const mine=c.id===here;
+          const total=COMPANY_COUNTS.reduce((n,[t])=>n+(c.counts[t]||0),0);
+          return(
+            <div key={c.id} style={{background:card,border:`1px solid ${mine?"var(--c-accent)":border}`,borderRadius:10,padding:"11px 13px"}}>
+              <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",gap:8,flexWrap:"wrap"}}>
+                <div style={{display:"flex",alignItems:"center",gap:8,flexWrap:"wrap"}}>
+                  <b style={{fontSize:14}}>{c.name}</b>
+                  {mine&&<span style={{fontSize:11,background:"var(--c-tag-blue-bg)",color:"var(--c-tag-blue)",padding:"2px 8px",borderRadius:12}}>החברה שלך</span>}
+                  {c.id===DEFAULT_COMPANY_ID&&<span style={{fontSize:11,background:"#8b5cf622",color:"#a78bfa",padding:"2px 8px",borderRadius:12}}>ברירת מחדל</span>}
+                </div>
+                {mine||c.id===DEFAULT_COMPANY_ID
+                  ?<span style={{fontSize:11,color:muted}} title={mine?"אי אפשר למחוק את החברה שאיתה אתה מחובר":"החברה הראשית אינה ניתנת למחיקה"}>🔒 מוגנת</span>
+                  :<button onClick={()=>{setConfirmId(confirmId===c.id?"":c.id);setTyped("")}} disabled={!!busy} style={{background:"#ef444422",border:"1px solid #ef444455",color:"#ef4444",borderRadius:7,padding:"4px 12px",fontSize:12,fontWeight:700,fontFamily:"inherit",cursor:"pointer"}}>🗑️ מחק חברה</button>}
+              </div>
+              <div style={{display:"flex",gap:10,flexWrap:"wrap",marginTop:6,fontSize:11.5,color:muted}}>
+                {COMPANY_COUNTS.map(([t,l])=><span key={t}>{l}: <b style={{color:c.counts[t]?"var(--c-text)":muted}}>{c.counts[t]==null?"?":c.counts[t].toLocaleString("he-IL")}</b></span>)}
+                {c.created_at&&<span>נוצרה: {new Date(c.created_at).toLocaleDateString("he-IL")}</span>}
+              </div>
+              {confirmId===c.id&&(
+                <div style={{marginTop:10,background:"#ef44440f",border:"1px solid #ef444455",borderRadius:8,padding:"10px 12px"}}>
+                  <div style={{fontSize:12.5,color:"#ef4444",fontWeight:700,marginBottom:4}}>⚠️ מחיקה בלתי הפיכה</div>
+                  <div style={{fontSize:12,color:muted,marginBottom:8}}>
+                    יימחקו {total.toLocaleString("he-IL")} רשומות מכל הטבלאות של החברה, וגם החברה עצמה. לא ניתן לאחזר את זה מיומן הפעילות.
+                    <br/>להמשך, הקלד את שם החברה: <b style={{color:"var(--c-text)"}}>{c.name}</b>
+                  </div>
+                  <div style={{display:"flex",gap:8,flexWrap:"wrap",alignItems:"center"}}>
+                    <input value={typed} onChange={e=>setTyped(e.target.value)} placeholder="שם החברה" style={{flex:"1 1 180px",minWidth:150,padding:"6px 10px",fontSize:13}}/>
+                    <Btn small color="#ef4444" disabled={typed.trim()!==c.name||!!busy} onClick={()=>typed.trim()===c.name&&doDelete(c)}>{busy===c.id?(progress||"מוחק…"):"מחק לצמיתות"}</Btn>
+                    <Btn small onClick={()=>{setConfirmId("");setTyped("")}}>ביטול</Btn>
+                  </div>
+                </div>
+              )}
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+// ══════════════════════════════════════════════════════════════════════════
 // ═══ ADMIN PANEL ════════════════════════════════════════════════════════
 // ══════════════════════════════════════════════════════════════════════════
-function AdminPanel({projects,stages,onClose,lightMode,updO,departments,updD}){
+function AdminPanel({projects,stages,onClose,lightMode,departments,updD}){
   const {toast}=useToast();
   const {currentUser}=useAuth();
   const [users,setUsersLocal]=useState(getUsers());
   const [tab,setTab]=useState("users");
   const [auditLog]=useState(getAuditLog());
+  // The reversible half of the log — kept in its own state so a revert re-renders.
+  const [journal,setJournal]=useState(()=>UNDO.list());
+  const [reverting,setReverting]=useState("");
+  // Another panel restoring users has to reach this list too.
+  useEffect(()=>{
+    const h=()=>setUsersLocal(getUsers());
+    window.addEventListener("pml:users",h);
+    return()=>window.removeEventListener("pml:users",h);
+  },[]);
+  const undoScope=e=>(e.changes||[]).map(c=>{
+    const bits=[];
+    if(c.before.length)bits.push(`${c.before.length} לשחזור`);
+    const created=c.after.filter(id=>!c.before.some(r=>r.id===id)).length;
+    if(created)bits.push(`${created} להסרה`);
+    return `${UNDO_COLL[c.coll]?.label||c.coll} (${bits.join(" · ")||"—"})`;
+  }).join(" · ");
+  const revertEntry=async(e)=>{
+    if(!confirm(`לאחזר את המצב שלפני "${e.action}"${e.target?` — ${e.target}`:""}?\n${undoScope(e)}`))return;
+    setReverting(e.id);
+    try{
+      const what=await UNDO.revert(e.id);
+      setJournal(UNDO.list());
+      setUsersLocal(getUsers());
+      toast(`אוחזר: ${what||e.action}`,"success",5000);
+    }catch(err){toast(err.message||String(err),"error",6000)}
+    setReverting("");
+  };
   const [editUser,setEditUser]=useState(null);
   const [addMode,setAddMode]=useState(false);
   const [revealPw,setRevealPw]=useState({}); // userId -> bool (show password in list)
@@ -3859,8 +4370,10 @@ function AdminPanel({projects,stages,onClose,lightMode,updO,departments,updD}){
   const leadOptions=users.filter(u=>u.active!==false&&(isLeadRole(u.role)||u.role==="admin"));
   const addDept=()=>{
     if(!deptName.trim())return toast("יש להזין שם מחלקה","warning");
-    updD(prev=>[...prev,{id:uid(),name:deptName.trim(),color:deptColor,managerId:deptManager}]);
-    addAuditEntry({userId:currentUser.id,username:currentUser.username,name:currentUser.name,action:"הוספת מחלקה",target:deptName.trim(),details:""});
+    const d={id:uid(),name:deptName.trim(),color:deptColor,managerId:deptManager};
+    updD(prev=>[...prev,d]);
+    UNDO.record({user:currentUser,action:"הוספת מחלקה",target:d.name,
+      changes:[{coll:"departments",before:[],after:[d.id]}]});
     setDeptName("");setDeptManager("");
   };
   const delDept=(d)=>{
@@ -3869,13 +4382,22 @@ function AdminPanel({projects,stages,onClose,lightMode,updO,departments,updD}){
     if(!confirm(`למחוק את מחלקת "${d.name}"?`))return;
     updD(prev=>prev.filter(x=>x.id!==d.id));
     SB.del("departments",{id:d.id}).catch(()=>{});
-    addAuditEntry({userId:currentUser.id,username:currentUser.username,name:currentUser.name,action:"מחיקת מחלקה",target:d.name,details:""});
+    UNDO.record({user:currentUser,action:"מחיקת מחלקה",target:d.name,
+      changes:[{coll:"departments",before:[d],after:[]}]});
   };
-  const setDeptMgr=(deptId,mgrId)=>{updD(prev=>prev.map(d=>d.id===deptId?{...d,managerId:mgrId}:d))};
+  const setDeptMgr=(deptId,mgrId)=>{
+    const before=departments.find(d=>d.id===deptId);
+    updD(prev=>prev.map(d=>d.id===deptId?{...d,managerId:mgrId}:d));
+    if(before)UNDO.record({user:currentUser,action:"שינוי מנהל מחלקה",target:before.name,
+      details:users.find(u=>u.id===mgrId)?.name||"ללא מנהל",
+      changes:[{coll:"departments",before:[before],after:[deptId]}]});
+  };
   const saveDept=()=>{
     if(!editDept||!editDept.name.trim())return toast("יש להזין שם מחלקה","warning");
+    const before=departments.find(d=>d.id===editDept.id);
     updD(prev=>prev.map(d=>d.id===editDept.id?{...d,name:editDept.name.trim(),color:editDept.color}:d));
-    addAuditEntry({userId:currentUser.id,username:currentUser.username,name:currentUser.name,action:"עריכת מחלקה",target:editDept.name.trim(),details:""});
+    UNDO.record({user:currentUser,action:"עריכת מחלקה",target:editDept.name.trim(),
+      changes:before?[{coll:"departments",before:[before],after:[before.id]}]:[]});
     setEditDept(null);
   };
   const lm=lightMode;
@@ -3895,7 +4417,8 @@ function AdminPanel({projects,stages,onClose,lightMode,updO,departments,updD}){
     delete u.password;
     const updated=[...users,u];
     saveUsers(updated);setUsersLocal(updated);
-    addAuditEntry({userId:currentUser.id,username:currentUser.username,name:currentUser.name,action:"הוספת משתמש",target:newUser.username,details:newUser.name});
+    UNDO.record({user:currentUser,action:"הוספת משתמש",target:newUser.username,details:newUser.name,
+      changes:[{coll:"users",before:[],after:[u.id]}]});
     setNewUser({username:"",password:"",name:"",role:"worker",projectAccess:"all",stageAccess:"all",canEdit:false,canView:true,active:true,hourlyRate:0,saleRate:0,departmentId:"",managerId:""});
     setAddMode(false);
   };
@@ -3908,28 +4431,34 @@ function AdminPanel({projects,stages,onClose,lightMode,updO,departments,updD}){
       u.passwordPlain=u.password;
       delete u.password;
     }
+    const before=users.find(usr=>usr.id===u.id);
     const updated=users.map(usr=>usr.id===u.id?u:usr);
     saveUsers(updated);setUsersLocal(updated);
-    addAuditEntry({userId:currentUser.id,username:currentUser.username,name:currentUser.name,action:"עדכון משתמש",target:editUser.username,details:editUser.name});
+    UNDO.record({user:currentUser,action:"עדכון משתמש",target:editUser.username,details:editUser.name,
+      changes:before?[{coll:"users",before:[before],after:[u.id]}]:[]});
     setEditUser(null);
   };
   const toggleActive=id=>{
+    const before=users.find(u=>u.id===id);
     const updated=users.map(u=>u.id===id?{...u,active:!u.active}:u);
     saveUsers(updated);setUsersLocal(updated);
+    if(before)UNDO.record({user:currentUser,action:before.active===false?"הפעלת משתמש":"השבתת משתמש",
+      target:before.name||before.username,
+      changes:[{coll:"users",before:[before],after:[id]}]});
   };
-  const deleteUser=id=>{
-    if(!confirm("למחוק משתמש לצמיתות?"))return;
+  const deleteUser=async(id)=>{
+    const victim=users.find(u=>u.id===id);
+    if(!victim)return;
+    if(victim.id===currentUser?.id)return toast("אי אפשר למחוק את המשתמש שאיתו אתה מחובר","warning");
+    if(!confirm(`למחוק את "${victim.name||victim.username}" לצמיתות?\nאפשר יהיה לאחזר את המחיקה מיומן הפעילות.`))return;
     const updated=users.filter(u=>u.id!==id);
     saveUsers(updated);setUsersLocal(updated);
-    addAuditEntry({userId:currentUser.id,username:currentUser.username,name:currentUser.name,action:"מחיקת משתמש",target:users.find(u=>u.id===id)?.name||"",details:""});
-  };
-  const undoImport=()=>{
-    const snapshot=LS.get("importSnapshot");
-    if(!snapshot)return toast("אין גיבוי לשחזור","warning");
-    if(!confirm(`לשחזר ${snapshot.length} פקעות מלפני הייבוא?`))return;
-    updO(snapshot);
-    LS.set("importSnapshot",null);
-    addAuditEntry({userId:currentUser.id,username:currentUser.username,name:currentUser.name,action:"ביטול ייבוא",target:`שוחזרו ${snapshot.length} פקעות`,details:""});
+    // saveUsers only writes the users that are left — without this the row stays
+    // on the server and walks back in on the next load.
+    try{await SB.delIds("app_users",[id])}catch(e){toast("המחיקה לא הגיעה לשרת: "+sbErrMsg(e),"error",6000)}
+    UNDO.record({user:currentUser,action:"מחיקת משתמש",target:victim.name||victim.username,
+      details:roleLabel(victim.role),
+      changes:[{coll:"users",before:[victim],after:[]}]});
   };
 
   return(
@@ -3941,7 +4470,7 @@ function AdminPanel({projects,stages,onClose,lightMode,updO,departments,updD}){
         </div>
         <div style={{padding:"0 24px 24px"}}>
           <div style={{display:"flex",gap:6,margin:"14px 0",flexWrap:"wrap"}}>
-            {[["users","👥 משתמשים"],["departments","🏢 מחלקות"],["audit","📋 יומן"]].map(([k,l])=>(
+            {[["users","👥 משתמשים"],["departments","🏢 מחלקות"],["audit","↩️ יומן ואחזור"],["companies","🏭 חברות"]].map(([k,l])=>(
               <button key={k} onClick={()=>setTab(k)} style={{background:tab===k?"var(--c-accent)":"transparent",border:`1px solid ${tab===k?"var(--c-accent)":border}`,color:tab===k?"#fff":muted,borderRadius:8,padding:"7px 14px",fontSize:13,fontWeight:600,fontFamily:"inherit"}}>{l}</button>
             ))}
           </div>
@@ -4096,17 +4625,35 @@ function AdminPanel({projects,stages,onClose,lightMode,updO,departments,updD}){
 
           {tab==="audit"&&(
             <div>
+              <div style={{fontWeight:700,marginBottom:4,color:text}}>↩️ פעולות הניתנות לאחזור ({journal.length})</div>
+              <div style={{fontSize:11.5,color:muted,marginBottom:10}}>כל פעולה של מנהל נשמרת עם המצב שקדם לה, כך שאפשר להחזיר אותה — כולל מחיקת משתמשים, מחלקות, פק"ע וייבוא.</div>
+              {journal.length===0?<EmptyState icon="📝" title="אין פעולות לאחזור" subtitle="פעולות ניהול יתועדו כאן עם אפשרות להחזיר אותן"/>:(
+                <div style={{display:"flex",flexDirection:"column",gap:4,marginBottom:18}}>
+                  {journal.map(e=>(
+                    <div key={e.id} style={{background:lm?"#f7f8fa":"#0d1120",borderRadius:6,padding:"8px 10px",fontSize:12,border:`1px solid ${e.reverted?"#ef444444":lm?"#f59e0b66":"#f59e0b44"}`,opacity:e.reverted?.55:1}}>
+                      <div style={{display:"flex",justifyContent:"space-between",flexWrap:"wrap",gap:6}}>
+                        <span><b style={{color:"#60a5fa"}}>{e.name||e.username}</b> — {e.action}{e.target?` — ${e.target}`:""}{e.reverted&&<span style={{color:"#ef4444",marginRight:6}}> (אוחזר)</span>}</span>
+                        <div style={{display:"flex",gap:6,alignItems:"center"}}>
+                          {!e.reverted&&<button onClick={()=>revertEntry(e)} disabled={reverting===e.id} style={{background:"#f59e0b",color:"#fff",border:"none",borderRadius:6,padding:"3px 10px",fontSize:11,fontWeight:700,fontFamily:"inherit",cursor:"pointer",opacity:reverting===e.id?.6:1}}>{reverting===e.id?"…":"↩️ אחזר"}</button>}
+                          <span style={{color:muted,fontSize:11}}>{e.timestamp?new Date(e.timestamp).toLocaleString("he-IL",{day:"2-digit",month:"2-digit",hour:"2-digit",minute:"2-digit"}):""}</span>
+                        </div>
+                      </div>
+                      <div style={{color:muted,marginTop:2}}>
+                        {e.details?e.details+" · ":""}{undoScope(e)}
+                        {e.heavy&&<span style={{color:"#f59e0b"}}> · זמין עד לרענון הדף</span>}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
               <div style={{fontWeight:700,marginBottom:10,color:text}}>📋 יומן פעילות ({auditLog.length})</div>
               {auditLog.length===0?<EmptyState icon="📝" title="אין פעילות" subtitle="פעולות רגישות יתועדו כאן"/>:(
                 <div style={{display:"flex",flexDirection:"column",gap:4}}>
                   {auditLog.slice(0,50).map(e=>(
-                    <div key={e.id} style={{background:lm?"#f7f8fa":"#0d1120",borderRadius:6,padding:"8px 10px",fontSize:12,border:`1px solid ${e.canUndo?lm?"#f59e0b":"#f59e0b44":border}`}}>
+                    <div key={e.id} style={{background:lm?"#f7f8fa":"#0d1120",borderRadius:6,padding:"8px 10px",fontSize:12,border:`1px solid ${border}`}}>
                       <div style={{display:"flex",justifyContent:"space-between",flexWrap:"wrap",gap:6}}>
                         <span><b style={{color:"#60a5fa"}}>{e.name||e.username}</b> — {e.action}{e.target?` — ${e.target}`:""}</span>
-                        <div style={{display:"flex",gap:6,alignItems:"center"}}>
-                          {e.canUndo&&<button onClick={undoImport} style={{background:"#f59e0b",color:"#fff",border:"none",borderRadius:6,padding:"3px 10px",fontSize:11,fontWeight:700,fontFamily:"inherit",cursor:"pointer"}}>↩️ בטל ייבוא</button>}
-                          <span style={{color:muted,fontSize:11}}>{e.timestamp?new Date(e.timestamp).toLocaleString("he-IL",{day:"2-digit",month:"2-digit",hour:"2-digit",minute:"2-digit"}):""}</span>
-                        </div>
+                        <span style={{color:muted,fontSize:11}}>{e.timestamp?new Date(e.timestamp).toLocaleString("he-IL",{day:"2-digit",month:"2-digit",hour:"2-digit",minute:"2-digit"}):""}</span>
                       </div>
                       {e.details&&<div style={{color:muted,marginTop:2}}>{e.details}</div>}
                     </div>
@@ -4115,6 +4662,8 @@ function AdminPanel({projects,stages,onClose,lightMode,updO,departments,updD}){
               )}
             </div>
           )}
+
+          {tab==="companies"&&<CompaniesTab lightMode={lm} currentUser={currentUser}/>}
         </div>
       </div>
 
@@ -6622,6 +7171,7 @@ const ChkOpt=({checked,onChange,label,hint,color="#10b981"})=>(
 
 function ExcelTab({orders,projects,stages,stageBlocks,workLogs,users,customTasks,dailyPlans,departments,pnStandards,updO,updP,updS,importPnStds,importWorkLogs,canImport}){
   const {toast}=useToast();
+  const {currentUser}=useAuth();
   const [res,setRes]=useState(null);const[mode,setMode]=useState("replace");const[drag,setDrag]=useState(false);
   const [showIssues,setShowIssues]=useState(false);
   // ── Priority route export ──
@@ -6668,6 +7218,24 @@ function ExcelTab({orders,projects,stages,stageBlocks,workLogs,users,customTasks
     return gone;
   };
 
+  // One journal entry for the whole import, so ↩️ puts the company back exactly
+  // as it was: the פק"ע that were replaced, the progress that was deleted along
+  // with them, and the stages/projects the file introduced.
+  const recordImport=({action,target,details,list,gone,newLogs,newStages,newProjects})=>{
+    const goneSet=new Set(gone||[]);
+    const changes=[
+      {coll:"orders",before:orders,after:(mode==="replace"?list:[...orders,...list]).map(o=>o.id)},
+    ];
+    const lostLogs=(workLogs||[]).filter(w=>goneSet.has(w.orderId));
+    if(lostLogs.length||(newLogs||[]).length)
+      changes.push({coll:"workLogs",before:lostLogs,after:(newLogs||[]).map(l=>l.id)});
+    if((newStages||[]).length)
+      changes.push({coll:"stages",before:stages,after:[...stages,...newStages].map(x=>x.id)});
+    if((newProjects||[]).length)
+      changes.push({coll:"projects",before:projects,after:[...projects,...newProjects].map(x=>x.id)});
+    UNDO.record({user:currentUser,action,target,details,changes});
+  };
+
   const applyPri=()=>{
     const r=priRes;if(!r||!r.orders.length)return;
     // Remember how each operation was mapped — including the stages this import
@@ -6687,9 +7255,9 @@ function ExcelTab({orders,projects,stages,stageBlocks,workLogs,users,customTasks
     // sync pulls back progress for units that no longer exist.
     if(importWorkLogs&&(r.logs.length||gone.length))importWorkLogs(r.logs,gone);
     if(r.stds.length&&importPnStds)importPnStds(r.stds);
-    addAuditEntry({userId:"admin",username:"admin",name:"מנהל",action:"ייבוא Priority",
-      target:`${r.orders.length} פקעות`,
-      details:`${mode==="replace"?"החלפה":"הוספה"} | ${r.stats.newStages} שלבים חדשים | ${r.stats.newProjects} פרויקטים | ${r.stats.stds} זמני תקן | ${r.stats.serials} סידוריים (${r.stats.serialWos} מהקובץ, ${r.stats.serialFilled} הושלמו) | ${r.stats.logs} רישומי התקדמות ב-${r.stats.progWos} פק"ע`,canUndo:true});
+    recordImport({action:"ייבוא Priority",target:`${r.orders.length} פקעות`,
+      details:`${mode==="replace"?"החלפה":"הוספה"} | ${r.stats.newStages} שלבים חדשים | ${r.stats.newProjects} פרויקטים | ${r.stats.stds} זמני תקן | ${r.stats.serials} סידוריים (${r.stats.serialWos} מהקובץ, ${r.stats.serialFilled} הושלמו) | ${r.stats.logs} רישומי התקדמות ב-${r.stats.progWos} פק"ע`,
+      list:r.orders,gone,newLogs:r.logs,newStages:r.newStages,newProjects:r.newProjects});
     setPri(null);toast(`יובאו ${r.orders.length} פק"ע מ-Priority · ${r.stats.logs.toLocaleString()} רישומי התקדמות`,"success");
   };
 
@@ -6899,7 +7467,9 @@ function ExcelTab({orders,projects,stages,stageBlocks,workLogs,users,customTasks
               if(priRes){applyPri();return}
               const gone=commitOrders(res.orders);
               if(importWorkLogs&&((res.logs||[]).length||gone.length))importWorkLogs(res.logs||[],gone);
-              addAuditEntry({userId:"admin",username:"admin",name:"מנהל",action:"ייבוא Excel",target:`${res.orders.length} פקעות`,details:`${mode==="replace"?"החלפה":"הוספה"} | ${res.stats.serials} סידוריים | ${res.stats.defects} תקלות | ${res.stats.shortages} חוסרים | ${res.stats.logs} רישומי התקדמות`,canUndo:true});
+              recordImport({action:"ייבוא Excel",target:`${res.orders.length} פקעות`,
+                details:`${mode==="replace"?"החלפה":"הוספה"} | ${res.stats.serials} סידוריים | ${res.stats.defects} תקלות | ${res.stats.shortages} חוסרים | ${res.stats.logs} רישומי התקדמות`,
+                list:res.orders,gone,newLogs:res.logs||[]});
               setRes(null);toast(`הנתונים יובאו בהצלחה${res.stats.logs?` · ${res.stats.logs} רישומי התקדמות`:""}`,"success")}}>✅ אשר ייבוא ({cur.orders.length})</Btn>
             <Btn onClick={clearAll}>ביטול</Btn>
             {priRes&&cur.orders.length>500&&<span style={{fontSize:11.5,color:"var(--c-dim)"}}>ייבוא גדול — השמירה לענן עשויה לקחת מספר שניות</span>}
@@ -7689,12 +8259,18 @@ ${Object.values(workerStats).sort((a,b)=>b.min-a.min).map(w=>`<tr><td>${w.name}<
 // ═══ HISTORY PANEL ════════════════════════════════════════════════════
 // ══════════════════════════════════════════════════════════════════════════
 function HistoryPanel({onClose,orders,updO,workLogs,onDeleteLog,onUndoWorkLog,customTasks,onUndoTask,onDeleteTask}){
+  const {toast}=useToast();
   const [auditLog,setAuditLog]=useState([]);
   const [loading,setLoading]=useState(true);
   const [filter,setFilter]=useState("all");
 
+  // Journal entries carry the before-state, so they are what the ↩️ button acts on.
+  const [journal,setJournal]=useState(()=>UNDO.list());
+  const [reverting,setReverting]=useState("");
+  const journalById=useMemo(()=>new Map(journal.map(e=>[e.id,e])),[journal]);
   useEffect(()=>{
-    SB.get("audit_log","order=created_at.desc&limit=200").then(rows=>{
+    // Scoped to this company — the log used to show every company's activity.
+    SB.get("audit_log",`company_id=eq.${getCompanyId()}&order=created_at.desc&limit=200`).then(rows=>{
       setAuditLog(rows.map(r=>({
         id:r.id,userId:r.user_id,username:r.username,name:r.name,
         action:r.action,target:r.target,details:r.details,
@@ -7702,16 +8278,39 @@ function HistoryPanel({onClose,orders,updO,workLogs,onDeleteLog,onUndoWorkLog,cu
       })));
       setLoading(false);
     }).catch(()=>{
-      setAuditLog(getAuditLog());
+      setAuditLog(getAuditLog().filter(e=>!e.companyId||e.companyId===getCompanyId()));
       setLoading(false);
     });
   },[]);
 
-  const filtered=auditLog.filter(e=>{
+  // A journal entry that never reached the server (offline, or the row was
+  // trimmed) still belongs in the list, so the two sources are merged by id.
+  const merged=useMemo(()=>{
+    const seen=new Set(auditLog.map(e=>e.id));
+    const extra=journal.filter(e=>!seen.has(e.id)).map(e=>({
+      id:e.id,userId:e.userId,username:e.username,name:e.name,action:e.action,
+      target:e.target,details:e.details,reverted:e.reverted,canUndo:true,timestamp:e.timestamp
+    }));
+    return[...auditLog,...extra].sort((a,b)=>String(b.timestamp||"").localeCompare(String(a.timestamp||"")));
+  },[auditLog,journal]);
+
+  // Declared before `filtered`, which calls it while rendering.
+  const canUndo=(entry)=>{
+    if(entry.reverted)return false;
+    const je=journalById.get(entry.id);
+    if(je)return!je.reverted;
+    if(entry.action.includes("סיום עבודה")||entry.action.includes("חתימת מנהל"))return true;
+    if(entry.action.includes("התחלת עבודה"))return true;
+    if(entry.canUndo&&entry.action.includes("ייבוא"))return true;
+    return false;
+  };
+
+  const filtered=merged.filter(e=>{
+    if(filter==="undo")return canUndo(e);
     if(filter==="all")return true;
     if(filter==="login")return e.action.includes("התחבר");
     if(filter==="work")return e.action.includes("עבוד")||e.action.includes("סיום")||e.action.includes("הפסקה")||e.action.includes("חתימ");
-    if(filter==="admin")return e.action.includes("משתמש")||e.action.includes("ייבוא")||e.action.includes("מחיקה");
+    if(filter==="admin")return e.action.includes("משתמש")||e.action.includes("ייבוא")||e.action.includes("מחיקה")||e.action.includes("מחלקה")||e.action.includes("חברה");
     return true;
   });
 
@@ -7724,8 +8323,25 @@ function HistoryPanel({onClose,orders,updO,workLogs,onDeleteLog,onUndoWorkLog,cu
     return"#8b95a8";
   };
 
-  // Undo: find and revert a work log by serialSn & stage
-  const undoEntry=(entry)=>{
+  // Undo. An entry the journal knows is restored from its own snapshot — that
+  // covers every manager action. The work-log cases below predate the journal and
+  // stay for entries recorded before it existed.
+  const undoEntry=async(entry)=>{
+    const je=journalById.get(entry.id);
+    if(je&&!je.reverted){
+      const scope=(je.changes||[]).map(c=>`${UNDO_COLL[c.coll]?.label||c.coll}: ${c.before.length} לשחזור${c.after.filter(id=>!c.before.some(r=>r.id===id)).length?` · ${c.after.filter(id=>!c.before.some(r=>r.id===id)).length} להסרה`:""}`).join(" | ");
+      if(!confirm(`לאחזר את המצב שלפני "${entry.action}"${entry.target?` — ${entry.target}`:""}?\n${scope}`))return;
+      setReverting(entry.id);
+      try{
+        const what=await UNDO.revert(entry.id);
+        setJournal(UNDO.list());
+        setAuditLog(prev=>prev.map(e=>e.id===entry.id?{...e,reverted:true}:e));
+        toast(`אוחזר: ${what||entry.action}`,"success",5000);
+      }catch(err){toast(err.message||String(err),"error",6000)}
+      setReverting("");
+      return;
+    }
+
     if(!confirm(`לבטל פעולה: ${entry.action} — ${entry.target||""}?`))return;
 
     if(entry.action.includes("סיום עבודה")||entry.action.includes("חתימת מנהל")){
@@ -7756,17 +8372,11 @@ function HistoryPanel({onClose,orders,updO,workLogs,onDeleteLog,onUndoWorkLog,cu
       updO(snapshot);
       LS.set("importSnapshot",null);
       setAuditLog(prev=>prev.map(e=>e.id===entry.id?{...e,reverted:true}:e));
+    }else{
+      toast("לפעולה זו לא נשמר מצב קודם — היא בוצעה לפני שהאחזור הופעל","warning",6000);
     }
   };
 
-  // Check if an entry can be undone
-  const canUndo=(entry)=>{
-    if(entry.reverted)return false;
-    if(entry.action.includes("סיום עבודה")||entry.action.includes("חתימת מנהל"))return true;
-    if(entry.action.includes("התחלת עבודה"))return true;
-    if(entry.canUndo&&entry.action.includes("ייבוא"))return true;
-    return false;
-  };
 
   // Access stages from global scope
   const stages=window.__pml_stages||[];
@@ -7778,7 +8388,7 @@ function HistoryPanel({onClose,orders,updO,workLogs,onDeleteLog,onUndoWorkLog,cu
         <IBtn onClick={onClose}>✕</IBtn>
       </div>
       <div style={{display:"flex",gap:6,marginBottom:14,flexWrap:"wrap"}}>
-        {[["all","הכל"],["login","התחברויות"],["work","עבודה"],["admin","ניהול"]].map(([v,l])=>(
+        {[["all","הכל"],["undo","↩️ ניתן לאחזור"],["login","התחברויות"],["work","עבודה"],["admin","ניהול"]].map(([v,l])=>(
           <button key={v} onClick={()=>setFilter(v)} style={{background:filter===v?"var(--c-accent)":"var(--c-deep)",border:`1px solid ${filter===v?"var(--c-accent)":"var(--c-border)"}`,color:filter===v?"#fff":"var(--c-muted)",borderRadius:8,padding:"5px 12px",fontSize:12,fontFamily:"inherit",cursor:"pointer"}}>{l}</button>
         ))}
         <span style={{fontSize:12,color:"var(--c-dim)",padding:"5px 0",marginRight:"auto"}}>{filtered.length} רשומות</span>
@@ -7792,7 +8402,7 @@ function HistoryPanel({onClose,orders,updO,workLogs,onDeleteLog,onUndoWorkLog,cu
                 <div style={{display:"flex",justifyContent:"space-between",flexWrap:"wrap",gap:4}}>
                   <span><b style={{color:"#60a5fa"}}>{e.name||e.username||"מערכת"}</b><span style={{color:"var(--c-muted)",marginRight:6}}>{e.action}</span>{e.target&&<span style={{color:"var(--c-dim)",fontSize:12}}> — {e.target}</span>}{e.reverted&&<span style={{fontSize:11,color:"#ef4444",marginRight:6}}> (בוטל)</span>}</span>
                   <div style={{display:"flex",gap:6,alignItems:"center"}}>
-                    {canUndo(e)&&<button onClick={()=>undoEntry(e)} style={{background:"#f59e0b22",border:"1px solid #f59e0b44",color:"#f59e0b",borderRadius:6,padding:"2px 10px",fontSize:11,fontWeight:700,fontFamily:"inherit",cursor:"pointer",whiteSpace:"nowrap"}}>↩️ בטל</button>}
+                    {canUndo(e)&&<button onClick={()=>undoEntry(e)} disabled={reverting===e.id} style={{background:"#f59e0b22",border:"1px solid #f59e0b44",color:"#f59e0b",borderRadius:6,padding:"2px 10px",fontSize:11,fontWeight:700,fontFamily:"inherit",cursor:"pointer",whiteSpace:"nowrap",opacity:reverting===e.id?.6:1}}>{reverting===e.id?"…":"↩️ אחזר"}</button>}
                     <span style={{fontSize:11,color:"var(--c-dim)",whiteSpace:"nowrap"}}>{e.timestamp?new Date(e.timestamp).toLocaleString("he-IL",{day:"2-digit",month:"2-digit",hour:"2-digit",minute:"2-digit"}):""}</span>
                   </div>
                 </div>
@@ -7834,6 +8444,9 @@ function App(){
   const [departments,setDepartments]=useState([]);
   const [dailyPlans,setDailyPlans]=useState([]);
   const [pnStandards,setPnStandards]=useState([]);
+  // The user list lives in localStorage rather than in state; this counter is how
+  // a change to it (a restore from the journal, say) reaches the render.
+  const [usersTick,setUsersTick]=useState(0);
   const [workdayHours,setWorkdayHours]=useState(()=>{const v=Number(LS.get(WORKDAY_LS_KEY));return v>0?v:8});
   const [loading,setLoading]=useState(true);
   const [sync,setSync]=useState("ok");
@@ -7912,6 +8525,8 @@ function App(){
         // null = the pn_standards table isn't there yet — keep the local copy
         if(data.pnStandards){setPnStandards(data.pnStandards);LS.set("pnStandards",data.pnStandards)}
         LS.set("session_company",_companyId);
+        // This was a full read; the sweeps that follow can go incremental.
+        lastFullSweepRef.current=Date.now();
       }
       if(users?.length){LS.set("users",users)}
 
@@ -7944,7 +8559,30 @@ function App(){
           const s3=JSON.parse(saved);
           const freshUsers=users?.length?users:getUsers();
           const found=freshUsers.find(u=>u.id===s3.id&&u.username===s3.username&&u.active!==false);
-          if(found){setCurrentUser(found);setCompanyId(found.companyId||s3.companyId||DEFAULT_COMPANY_ID)}else{localStorage.removeItem(LS_PREFIX+"session");setCurrentUser(null)}
+          if(found){
+            const realCid=found.companyId||s3.companyId||DEFAULT_COMPANY_ID;
+            setCurrentUser(found);
+            // The load above already ran against the company saved in the session.
+            // If the user has since been moved, that data belongs to someone else:
+            // switch companies and read again rather than showing it.
+            if(realCid!==_companyId){
+              setCompanyId(realCid);
+              try{localStorage.setItem(LS_PREFIX+"session",JSON.stringify({id:found.id,username:found.username,companyId:realCid}))}catch{}
+              SYNC.reset();
+              const [d2,u2]=await Promise.all([dbLoadAll(),dbLoadUsers()]);
+              setOrders(d2.orders||[]);LS.set("orders",d2.orders||[]);
+              setProjects(d2.projects?.length?d2.projects:DEF_PROJ);LS.set("projects",d2.projects?.length?d2.projects:DEF_PROJ);
+              setStages(d2.stages?.length?d2.stages:DEF_STAGES);LS.set("stages",d2.stages?.length?d2.stages:DEF_STAGES);
+              setWorkLogs(d2.workLogs||[]);LS.set("workLogs",d2.workLogs||[]);
+              setCustomTasks(d2.customTasks||[]);LS.set("customTasks",d2.customTasks||[]);
+              setStageBlocks(d2.stageBlocks||[]);LS.set("stageBlocks",d2.stageBlocks||[]);
+              setDepartments(d2.departments||[]);LS.set("departments",d2.departments||[]);
+              setDailyPlans(d2.dailyPlans||[]);LS.set("dailyPlans",d2.dailyPlans||[]);
+              if(d2.pnStandards){setPnStandards(d2.pnStandards);LS.set("pnStandards",d2.pnStandards)}
+              if(u2?.length)LS.set("users",u2);
+              LS.set("session_company",realCid);
+            }
+          }else{localStorage.removeItem(LS_PREFIX+"session");setCurrentUser(null)}
         }
       }catch{}
       setLoading(false);
@@ -7962,6 +8600,10 @@ function App(){
 
   // ── Refresh from Supabase ──────────────────────────────────────
   const lastPersistRef=useRef(0);
+  // When the whole of work_logs was last read. Between full sweeps the refresh
+  // only reads the rows that can have changed — see dbLoadHotLogs.
+  const FULL_SWEEP_MS=5*60*1000;
+  const lastFullSweepRef=useRef(0);
   const pendingSaveRef=useRef(false); // local changes not yet confirmed saved to Supabase
   const saveRunningRef=useRef(false); // an upsert batch is currently in flight
   const doSaveRef=useRef(null);
@@ -7979,6 +8621,7 @@ function App(){
       if(pendingSaveRef.current){clearTimeout(saveTimer);await doSaveRef.current?.()}
       if(pendingSaveRef.current||saveRunningRef.current)throw new Error("unsaved local changes");
       const [data,users]=await Promise.all([dbLoadAll(),dbLoadUsers()]);
+      lastFullSweepRef.current=Date.now();
       if(data){
         if(data.orders){setOrders(data.orders);LS.set("orders",data.orders)}
         if(data.projects){setProjects(data.projects);LS.set("projects",data.projects)}
@@ -8023,13 +8666,23 @@ function App(){
     const arm=ms=>{if(dead)return;clearTimeout(pollTimer);pollTimer=setTimeout(poll,ms)};
     const pollSoon=()=>{sweepSoon=true;arm(POLL_BLOCKED)};
 
+    // How the sweep asks for work_logs: the hot slice normally, the whole table
+    // every FULL_SWEEP_MS so a row deleted elsewhere eventually disappears here
+    // too. See dbLoadHotLogs.
+    const hotArg=()=>{
+      if(Date.now()-lastFullSweepRef.current>FULL_SWEEP_MS)return null;
+      const prev=wRef.current||[];
+      return{prev,openIds:prev.filter(w=>!w.completed).map(w=>w.id)};
+    };
     const poll=async()=>{
       if(dead)return;
       // Skip while a local change is unsaved / just saved (avoid overwriting it)
       if(remoteApplyBlocked()){arm(POLL_BLOCKED);return}
       try{
         sweepSoon=false;
-        const data=await dbLoadAll();
+        const hot=hotArg();
+        const data=await dbLoadAll(hot);
+        if(!hot)lastFullSweepRef.current=Date.now();
         if(dead)return;
         // Re-check — the user may have clicked an action while the fetch was in flight,
         // in which case this data is stale and applying it would undo the click.
@@ -8112,13 +8765,33 @@ function App(){
             // apply() re-checks the guard — a click may have happened during the fetch
             const apply=(setter,lsKey,rows)=>{if(remoteApplyBlocked()){pollSoon();return}setter(rows);LS.set(lsKey,rows)};
             if(["orders"].includes(tbl)){const rows=(await SB.getAll("orders",cf+ORDER_BY.orders)).map(dbToOrder);SYNC.prime("orders",rows,orderToDb);apply(setOrders,"orders",rows)}
-            if(["work_logs"].includes(tbl)){const rows=(await SB.getAll("work_logs",cf+ORDER_BY.work_logs)).map(dbToLog);SYNC.prime("work_logs",rows,logToDb);apply(setWorkLogs,"workLogs",rows)}
-            if(["custom_tasks"].includes(tbl)){const rows=(await SB.get("custom_tasks",cf+"order=created_at.asc")).map(dbToTask);apply(setCustomTasks,"customTasks",rows)}
-            if(["stages"].includes(tbl)){const rows=(await SB.get("stages",cf+"order=stage_order.asc")).map(dbToStage);apply(setStages,"stages",rows)}
-            if(["projects"].includes(tbl)){const rows=(await SB.get("projects",cf+"order=name.asc")).map(dbToProject);apply(setProjects,"projects",rows)}
-            if(["stage_blocks"].includes(tbl)){const rows=(await SB.get("stage_blocks",cf+"order=created_at.asc")).map(dbToBlock);apply(setStageBlocks,"stageBlocks",rows)}
-            if(["departments"].includes(tbl)){const rows=(await SB.get("departments",cf+"order=name.asc")).map(dbToDept);apply(setDepartments,"departments",rows)}
-            if(["daily_plans"].includes(tbl)){const rows=(await SB.get("daily_plans",cf+"order=created_at.asc")).map(dbToPlan);apply(setDailyPlans,"dailyPlans",rows)}
+            if(["work_logs"].includes(tbl)){
+              // Same reasoning as the sweep: read the rows that can have moved,
+              // not the whole progress history, on every stage a worker closes.
+              const prev=wRef.current||[];
+              const full=Date.now()-lastFullSweepRef.current>FULL_SWEEP_MS;
+              let rows;
+              if(full){
+                rows=(await SB.getAll("work_logs",cf+ORDER_BY.work_logs)).map(dbToLog);
+                SYNC.prime("work_logs",rows,logToDb);
+                lastFullSweepRef.current=Date.now();
+              }else{
+                const {rows:hotRows,gone}=await dbLoadHotLogs(_companyId,prev.filter(w=>!w.completed).map(w=>w.id));
+                const fresh=hotRows.map(dbToLog);
+                SYNC.prime("work_logs",fresh,logToDb);SYNC.forget("work_logs",gone);
+                const goneSet=new Set(gone);
+                const byId=new Map(prev.filter(w=>!goneSet.has(w.id)).map(w=>[w.id,w]));
+                fresh.forEach(w=>byId.set(w.id,w));
+                rows=[...byId.values()];
+              }
+              apply(setWorkLogs,"workLogs",rows);
+            }
+            if(["custom_tasks"].includes(tbl)){const rows=(await SB.getAll("custom_tasks",cf+ORDER_BY.custom_tasks)).map(dbToTask);apply(setCustomTasks,"customTasks",rows)}
+            if(["stages"].includes(tbl)){const rows=(await SB.getAll("stages",cf+ORDER_BY.stages)).map(dbToStage);apply(setStages,"stages",rows)}
+            if(["projects"].includes(tbl)){const rows=(await SB.getAll("projects",cf+ORDER_BY.projects)).map(dbToProject);apply(setProjects,"projects",rows)}
+            if(["stage_blocks"].includes(tbl)){const rows=(await SB.getAll("stage_blocks",cf+ORDER_BY.stage_blocks)).map(dbToBlock);apply(setStageBlocks,"stageBlocks",rows)}
+            if(["departments"].includes(tbl)){const rows=(await SB.getAll("departments",cf+ORDER_BY.departments)).map(dbToDept);apply(setDepartments,"departments",rows)}
+            if(["daily_plans"].includes(tbl)){const rows=(await SB.getAll("daily_plans",cf+ORDER_BY.daily_plans)).map(dbToPlan);apply(setDailyPlans,"dailyPlans",rows)}
           }catch(err){console.warn("Realtime msg error",err)}
         };
         ws.onclose=()=>{
@@ -8155,18 +8828,24 @@ function App(){
     try{
       // Only rows whose content actually changed go out — see SYNC. On an ordinary
       // click that is a single row; right after an import it is everything, once.
+      //
+      // mine() is the last line of defence against cross-company writes: whatever
+      // is still sitting in state from a previous session, only rows belonging to
+      // the company we are logged into are ever sent.
+      const here=getCompanyId();
+      const mine=rows=>rows.filter(r=>r&&r.company_id===here);
       await Promise.all([
-        SB.upsertChanged("orders",oRef.current.map(orderToDb)),
-        SB.upsertChanged("projects",pRef.current.map(projectToDb)),
-        SB.upsertChanged("stages",sRef.current.map(stageToDb)),
-        SB.upsertChanged("stage_blocks",sbRef.current.map(blockToDb)),
-        SB.upsertChanged("work_logs",wRef.current.map(logToDb)),
-        SB.upsertChanged("custom_tasks",ctRef.current.map(taskToDb)),
-        SB.upsertChanged("departments",dpRef.current.map(deptToDb)),
-        SB.upsertChanged("daily_plans",plRef.current.map(planToDb)),
+        SB.upsertChanged("orders",mine(oRef.current.map(orderToDb))),
+        SB.upsertChanged("projects",mine(pRef.current.map(projectToDb))),
+        SB.upsertChanged("stages",mine(sRef.current.map(stageToDb))),
+        SB.upsertChanged("stage_blocks",mine(sbRef.current.map(blockToDb))),
+        SB.upsertChanged("work_logs",mine(wRef.current.map(logToDb))),
+        SB.upsertChanged("custom_tasks",mine(ctRef.current.map(taskToDb))),
+        SB.upsertChanged("departments",mine(dpRef.current.map(deptToDb))),
+        SB.upsertChanged("daily_plans",mine(plRef.current.map(planToDb))),
         // Standard times live in their own (newer) table — if it hasn't been created
         // yet the rest of the save must still succeed; the local cache keeps them.
-        SB.upsertChanged("pn_standards",psRef.current.map(pnStdToDb)).catch(e=>console.warn("pn_standards save skipped",e)),
+        SB.upsertChanged("pn_standards",mine(psRef.current.map(pnStdToDb))).catch(e=>console.warn("pn_standards save skipped",e)),
       ]);
       lastPersistRef.current=Date.now();
       setSync("ok");
@@ -8202,6 +8881,42 @@ function App(){
     saveTimer=setTimeout(doSave,800);
   };
 
+  // ── Undo applier ─────────────────────────────────────────────────────────
+  // The journal knows *what* to put back; this is the only place that knows how.
+  // Each collection is merged by id — restored rows overwrite, created rows are
+  // dropped — then written to state, the local cache and Supabase in one go.
+  // persist() takes its collections positionally, hence the slot numbers.
+  const undoSlot={orders:0,projects:1,stages:2,workLogs:3,customTasks:4,
+    stageBlocks:5,departments:6,dailyPlans:7,pnStandards:8};
+  const undoSetter={orders:setOrders,projects:setProjects,stages:setStages,
+    workLogs:setWorkLogs,customTasks:setCustomTasks,stageBlocks:setStageBlocks,
+    departments:setDepartments,dailyPlans:setDailyPlans,pnStandards:setPnStandards};
+  const undoApply=useCallback(async(coll,restore,removeIds)=>{
+    const spec=UNDO_COLL[coll];
+    if(!spec)throw new Error("אוסף לא מוכר לאחזור: "+coll);
+    const merge=prev=>{
+      const byId=new Map((prev||[]).map(r=>[r.id,r]));
+      (removeIds||[]).forEach(id=>byId.delete(id));
+      (restore||[]).forEach(r=>byId.set(r.id,{...r}));
+      return[...byId.values()];
+    };
+    // Restored rows must go out again even if their fingerprint matches what the
+    // server was last known to hold — the row may have been deleted since.
+    SYNC.forget(spec.table,(restore||[]).map(r=>r.id));
+    if(coll==="users"){
+      const next=merge(getUsers());
+      await saveUsers(next);
+      setUsersTick(t=>t+1);
+      window.dispatchEvent(new CustomEvent("pml:users"));
+    }else{
+      const setter=undoSetter[coll];
+      const args=[null,null,null,null,null,null,null,null,null];
+      setter(prev=>{const next=merge(prev);args[undoSlot[coll]]=next;persist(...args);return next});
+    }
+    if((removeIds||[]).length)await SB.delIds(spec.table,removeIds).catch(e=>console.warn("undo delete",e));
+  },[]);
+  useEffect(()=>{UNDO.setApplier(undoApply)},[undoApply]);
+
   const handleLogin=u=>{
     const cid=u.companyId||DEFAULT_COMPANY_ID;
     const prevCid=_companyId;
@@ -8213,6 +8928,7 @@ function App(){
       ["orders","projects","stages","workLogs","customTasks","stageBlocks","departments","dailyPlans","pnStandards"].forEach(k=>{try{localStorage.removeItem(LS_PREFIX+k)}catch{}});
     }
     setCurrentUser(u);
+    LS.set("session_company",cid);
     try{localStorage.setItem(LS_PREFIX+"session",JSON.stringify({id:u.id,username:u.username,companyId:cid}))}catch{}
     SB.get("subscriptions",`company_id=eq.${cid}&status=eq.active`).then(rows=>{
       if(rows&&rows.length>0)setCompanyPlan(rows[0].plan||"free");
@@ -8228,7 +8944,7 @@ function App(){
   // ── Role-based data visibility ──────────────────────────────────────────
   // Only admins, department managers and team leads see beyond their own work.
   const isDeptMgr=currentUser?.role==="dept_manager";
-  const allUsers=getUsers();
+  const allUsers=useMemo(()=>getUsers(),[usersTick,currentUser]);
   const allStageIds=stages.map(s=>s.id);
   const scopeIds=overseeingUserIds(currentUser,allUsers,departments);
   const scopeIdSet=scopeIds==null?null:new Set(scopeIds);
@@ -8292,9 +9008,10 @@ function App(){
       const next=drop===mine?others:[...others,rec];
       persist(null,null,null,null,null,null,null,null,next);
       drop.forEach(r=>SB.del("pn_standards",{id:r.id}).catch(()=>{}));
+      UNDO.record({user:currentUser,action:"עדכון זמן תקן",target:k,
+        changes:[{coll:"pnStandards",before:mine,after:next.map(r=>r.id)}]});
       return next;
     });
-    addAuditEntry({userId:currentUser?.id,username:currentUser?.username,name:currentUser?.name,action:"עדכון זמן תקן",target:k,details:""});
   },[currentUser]);
   // Bulk import of standard times (an ERP export brings hundreds at once): each
   // record replaces the one for its מק"ט, and every other מק"ט is left alone.
@@ -8308,10 +9025,11 @@ function App(){
       const next=[...kept,...list];
       persist(null,null,null,null,null,null,null,null,next);
       stale.forEach(r=>SB.del("pn_standards",{id:r.id}).catch(()=>{}));
+      UNDO.record({user:currentUser,action:"ייבוא זמני תקן",target:`${list.length} מק"טים`,
+        details:"ייבוא מ-Excel",
+        changes:[{coll:"pnStandards",before:prev,after:next.map(r=>r.id)}]});
       return next;
     });
-    addAuditEntry({userId:currentUser?.id,username:currentUser?.username,name:currentUser?.name,
-      action:"ייבוא זמני תקן",target:`${list.length} מק"טים`,details:"ייבוא מ-Excel"});
   },[currentUser]);
   // Bulk import of progress: the completed work logs an ERP export implies, one
   // per unit per stage. `dropOrderIds` is the list of orders a "replace all"
@@ -8338,9 +9056,10 @@ function App(){
       const next=prev.filter(r=>pnKey(r.pn)!==k);
       persist(null,null,null,null,null,null,null,null,next);
       gone.forEach(r=>SB.del("pn_standards",{id:r.id}).catch(()=>{}));
+      UNDO.record({user:currentUser,action:"מחיקת זמן תקן",target:k,
+        changes:[{coll:"pnStandards",before:gone,after:[]}]});
       return next;
     });
-    addAuditEntry({userId:currentUser?.id,username:currentUser?.username,name:currentUser?.name,action:"מחיקת זמן תקן",target:k,details:""});
   },[currentUser]);
 
   // Auto-delivery: per serial — when a serial finishes all stages, mark it as delivered
@@ -8410,24 +9129,44 @@ function App(){
   const handleEndTask=(taskId)=>{setCustomTasks(prev=>{const next=prev.map(t=>{if(t.id!==taskId)return t;const dur=t.startTime?Math.round((Date.now()-new Date(t.startTime).getTime())/60000)-(t.totalPauseMin||0):0;return{...t,active:false,completed:true,endTime:nowISO(),durationMin:Math.max(0,dur)}});persist(null,null,null,null,next);return next})};
   const handlePauseTask=(taskId)=>{setCustomTasks(prev=>{const next=prev.map(t=>t.id===taskId?{...t,paused:true,pauseStart:nowISO(),pauseLog:[...(t.pauseLog||[]),{start:nowISO()}]}:t);persist(null,null,null,null,next);return next})};
   const handleResumeTask=(taskId)=>{setCustomTasks(prev=>{const next=prev.map(t=>{if(t.id!==taskId)return t;const pMin=t.pauseStart?Math.round((Date.now()-new Date(t.pauseStart).getTime())/60000):0;const pl=[...(t.pauseLog||[])];if(pl.length>0&&!pl[pl.length-1].end)pl[pl.length-1].end=nowISO();return{...t,paused:false,pauseStart:null,totalPauseMin:(t.totalPauseMin||0)+pMin,pauseLog:pl}});persist(null,null,null,null,next);return next})};
-  const handleDeleteTask=(taskId)=>{setCustomTasks(prev=>{const next=prev.filter(t=>t.id!==taskId);persist(null,null,null,null,next);return next});SB.del("custom_tasks",{id:taskId}).catch(()=>{})};
+  const handleDeleteTask=(taskId)=>{setCustomTasks(prev=>{
+    const victim=prev.find(t=>t.id===taskId);
+    const next=prev.filter(t=>t.id!==taskId);persist(null,null,null,null,next);
+    if(victim)UNDO.record({user:currentUser,action:"מחיקת משימה",target:victim.name,
+      details:victim.userName||"",changes:[{coll:"customTasks",before:[victim],after:[]}]});
+    return next});SB.del("custom_tasks",{id:taskId}).catch(()=>{})};
   const handleMarkPartialTask=(taskId)=>{setCustomTasks(prev=>{const next=prev.map(t=>t.id===taskId?{...t,partial:!t.partial}:t);persist(null,null,null,null,next);return next})};
   const handleMarkDoneTask=(taskId)=>{setCustomTasks(prev=>{const next=prev.map(t=>t.id===taskId?{...t,completed:true,partial:false,endTime:t.endTime||nowISO()}:t);persist(null,null,null,null,next);return next})};
   const handleUpdateTask=(taskId,updates)=>{setCustomTasks(prev=>{const next=prev.map(t=>t.id===taskId?{...t,...updates}:t);persist(null,null,null,null,next);return next})};
   // Daily work plans — managers assign, workers see them and work the assigned units
   const handleAddPlan=(plan)=>{setDailyPlans(prev=>{const next=[...prev,plan];persist(null,null,null,null,null,null,null,next);return next});if(plan.userName)PushNotify.send("📅 תוכנית עבודה חדשה",`${plan.userName}, הוקצתה לך עבודה ליום ${fmt(plan.date)}`,`plan_${plan.id}`)};
-  const handleDeletePlan=(planId)=>{setDailyPlans(prev=>{const next=prev.filter(p=>p.id!==planId);persist(null,null,null,null,null,null,null,next);return next});SB.del("daily_plans",{id:planId}).catch(()=>{})};
+  const handleDeletePlan=(planId)=>{setDailyPlans(prev=>{
+    const victim=prev.find(p=>p.id===planId);
+    const next=prev.filter(p=>p.id!==planId);persist(null,null,null,null,null,null,null,next);
+    if(victim)UNDO.record({user:currentUser,action:"מחיקת תוכנית עבודה",target:victim.userName||"",
+      details:fmt(victim.date),changes:[{coll:"dailyPlans",before:[victim],after:[]}]});
+    return next});SB.del("daily_plans",{id:planId}).catch(()=>{})};
   const handleTogglePlanDone=(planId)=>{setDailyPlans(prev=>{const next=prev.map(p=>p.id===planId?{...p,done:!p.done}:p);persist(null,null,null,null,null,null,null,next);return next})};
   // Auto sign-off: mark a plan done once all its units in the stage are completed.
   const handleMarkPlanDone=(planId)=>{setDailyPlans(prev=>{if(!prev.some(p=>p.id===planId&&!p.done))return prev;const next=prev.map(p=>p.id===planId?{...p,done:true,autoDone:true}:p);persist(null,null,null,null,null,null,null,next);return next})};
-  const handleDeleteLog=(ids)=>{setWorkLogs(prev=>{const next=prev.filter(w=>!ids.includes(w.id));persist(null,null,null,next);return next});ids.forEach(id=>SB.del("work_logs",{id}).catch(()=>{}))};
+  const handleDeleteLog=(ids)=>{setWorkLogs(prev=>{
+    const victims=prev.filter(w=>ids.includes(w.id));
+    const next=prev.filter(w=>!ids.includes(w.id));persist(null,null,null,next);
+    if(victims.length)UNDO.record({user:currentUser,action:"מחיקת רישומי עבודה",
+      target:victims.length===1?(victims[0].serialSn||victims[0].userName||""):`${victims.length} רישומים`,
+      details:victims.length===1?(victims[0].userName||""):"",
+      changes:[{coll:"workLogs",before:victims,after:[]}]});
+    return next});ids.forEach(id=>SB.del("work_logs",{id}).catch(()=>{}))};
   // Undo a completed work log — revert to uncompleted state (effectively delete it)
   const handleUndoWorkLog=(logId)=>{
     setWorkLogs(prev=>{
+      const victim=prev.find(w=>w.id===logId);
       const next=prev.filter(w=>w.id!==logId);
       persist(null,null,null,next);
       // Also delete from Supabase
       SB.del("work_logs",{id:logId}).catch(()=>{});
+      if(victim)UNDO.record({user:currentUser,action:"ביטול רישום עבודה",target:victim.serialSn||"",
+        details:victim.userName||"",changes:[{coll:"workLogs",before:[victim],after:[]}]});
       return next;
     });
   };
@@ -8730,7 +9469,7 @@ function App(){
       </main>
       <FastScroll/>
       {showInstall&&<InstallBanner onInstall={handleInstall} onDismiss={()=>setShowInstall(false)} lm={lm}/>}
-      {showAdmin&&isAdmin&&<AdminPanel projects={projects} stages={stages} onClose={()=>setShowAdmin(false)} lightMode={lightMode} updO={updO} departments={departments} updD={updD}/>}
+      {showAdmin&&isAdmin&&<AdminPanel projects={projects} stages={stages} onClose={()=>setShowAdmin(false)} lightMode={lightMode} departments={departments} updD={updD}/>}
       {showAlerts&&<AlertsPanel orders={filteredOrders} stages={stages} workLogs={filteredWorkLogs} users={visibleUsers} onClose={()=>setShowAlerts(false)} dismissedAlerts={dismissedAlerts} onDismissAll={ids=>setDismissedAlerts(prev=>[...new Set([...prev,...ids])])}/>}
       {showLiveBoard&&(isAdmin||isDeptMgr)&&(canUseFeature("live_board")?<LiveFactoryBoard orders={filteredOrders} workLogs={filteredWorkLogs} stages={stages} customTasks={customTasks} users={visibleUsers} departments={visibleDepartments} onClose={()=>setShowLiveBoard(false)} lightMode={lightMode}/>:<Modal onClose={()=>setShowLiveBoard(false)}><UpgradePrompt feature="לוח חי"/></Modal>)}
       {showReport&&(isAdmin||isDeptMgr)&&(canUseFeature("pdf_reports")?<MonthlyReportModal orders={filteredOrders} workLogs={filteredWorkLogs} stages={stages} projects={filteredProjects} users={visibleUsers} onClose={()=>setShowReport(false)}/>:<Modal onClose={()=>setShowReport(false)}><UpgradePrompt feature="דוחות PDF"/></Modal>)}
