@@ -287,22 +287,72 @@ async function sha256(str){
 let _companyId=DEFAULT_COMPANY_ID;
 function setCompanyId(id){_companyId=id||DEFAULT_COMPANY_ID}
 function sbHeaders(){return{...SB_H,"x-company-id":_companyId}}
+// ── What the server is already known to hold ──────────────────────────────
+// Every save used to re-upload every row of every table. At a few dozen פק"ע that
+// is invisible; at 1,300 פק"ע and tens of thousands of progress records it is
+// hundreds of requests every time a worker closes a single stage. So each row is
+// fingerprinted as it goes out — and as it comes in — and a save sends only the
+// rows whose fingerprint changed, which is normally the one that was just edited.
+//
+// The fingerprint deliberately ignores updated_at: that column is stamped fresh on
+// every conversion, and including it would mark every row as changed forever.
+const SYNC=(()=>{
+  const seen=new Map();
+  const of=t=>{let m=seen.get(t);if(!m){m=new Map();seen.set(t,m)}return m};
+  const fp=r=>{const{updated_at,...rest}=r||{};return JSON.stringify(rest)};
+  return{
+    pending(table,rows){const m=of(table);return (rows||[]).filter(r=>r&&m.get(r.id)!==fp(r))},
+    mark(table,rows){const m=of(table);(rows||[]).forEach(r=>{if(r&&r.id!=null)m.set(r.id,fp(r))})},
+    // A deleted row must be re-sent if it ever comes back, so drop what we knew.
+    forget(table,ids){const m=of(table);(ids||[]).forEach(id=>m.delete(id))},
+    // Rows just read from the server *are* the server's state.
+    prime(table,appRows,toDb){this.mark(table,(appRows||[]).map(toDb))},
+    reset(){seen.clear()}
+  };
+})();
 const SB_CHUNK=200;
+// One response is capped, so a table that can outgrow a single page has to be read
+// page by page. work_logs is the one that does: it holds a row per unit per stage,
+// so a plant with a thousand פק"ע passes ten thousand long before anything looks
+// unusual — and a truncated read would quietly drop half the progress on load.
+const SB_PAGE=5000;
 const SB={
   async get(table,params=""){
     const r=await fetch(`${SB_URL}/rest/v1/${table}?${params}`,{headers:{...sbHeaders(),"Range":"0-9999"}});
     if(!r.ok)throw new Error(await r.text());return r.json();
   },
+  // Reads every row, a page at a time. Needs a total ordering in `params` or the
+  // pages can overlap — every caller here orders by created_at with id as the
+  // tiebreak, because a bulk import writes thousands of rows on the same timestamp.
+  async getAll(table,params="",cap=400000){
+    const out=[];
+    for(let from=0;from<cap;from+=SB_PAGE){
+      const r=await fetch(`${SB_URL}/rest/v1/${table}?${params}`,
+        {headers:{...sbHeaders(),"Range-Unit":"items","Range":`${from}-${from+SB_PAGE-1}`}});
+      if(!r.ok)throw new Error(await r.text());
+      const rows=await r.json();
+      for(const x of rows)out.push(x);
+      if(rows.length<SB_PAGE)break;
+    }
+    return out;
+  },
   // Sent in chunks: an Excel import can hand over a couple of thousand orders at
   // once, and one request that size is refused long before the data is at fault.
+  // A batch is recorded as sent only once the server has taken it, so a failure
+  // leaves it pending and the next save retries it.
   async upsert(table,data){
     const arr=Array.isArray(data)?data:[data];
     if(arr.length===0)return; // Skip empty upserts
     for(let i=0;i<arr.length;i+=SB_CHUNK){
-      const r=await fetch(`${SB_URL}/rest/v1/${table}`,{method:"POST",headers:{...sbHeaders(),"Prefer":"resolution=merge-duplicates,return=minimal"},body:JSON.stringify(arr.slice(i,i+SB_CHUNK))});
+      const batch=arr.slice(i,i+SB_CHUNK);
+      const r=await fetch(`${SB_URL}/rest/v1/${table}`,{method:"POST",headers:{...sbHeaders(),"Prefer":"resolution=merge-duplicates,return=minimal"},body:JSON.stringify(batch)});
       if(!r.ok)throw new Error(await r.text());
+      SYNC.mark(table,batch);
     }
   },
+  // Sends only the rows that differ from what the server is known to hold. This is
+  // what keeps a save proportional to the edit rather than to the database.
+  async upsertChanged(table,rows){return SB.upsert(table,SYNC.pending(table,rows))},
   // Deletes by id in batches — used when an import replaces the whole order list.
   async delIds(table,ids){
     const list=[...new Set((ids||[]).filter(Boolean))];
@@ -311,11 +361,13 @@ const SB={
       const r=await fetch(`${SB_URL}/rest/v1/${table}?id=in.(${q})`,{method:"DELETE",headers:sbHeaders()});
       if(!r.ok)throw new Error(await r.text());
     }
+    SYNC.forget(table,list);
   },
   async del(table,match){
     const q=Object.entries(match).map(([k,v])=>`${k}=eq.${v}`).join("&");
     const r=await fetch(`${SB_URL}/rest/v1/${table}?${q}`,{method:"DELETE",headers:sbHeaders()});
     if(!r.ok)throw new Error(await r.text());
+    if(match.id)SYNC.forget(table,[match.id]);
   },
   async patch(table,match,data){
     const q=Object.entries(match).map(([k,v])=>`${k}=eq.${v}`).join("&");
@@ -399,15 +451,19 @@ const pnStdToDb=p=>({id:p.id,pn:p.pn||"",stage_minutes:p.stageMin||{},total_min:
   note:p.note||null,updated_by:p.updatedBy||null,company_id:p.companyId||DEFAULT_COMPANY_ID,updated_at:new Date().toISOString()});
 
 // ── DB load all ────────────────────────────────────────────────────────────
+// A total ordering, so paging cannot overlap or skip: a bulk import writes
+// thousands of rows carrying the same created_at, and id breaks the tie.
+const ORDER_BY={orders:"order=created_at.asc,id.asc",work_logs:"order=created_at.asc,id.asc"};
 async function dbLoadAll(){
   const cid=_companyId||DEFAULT_COMPANY_ID;
   const cf=`company_id=eq.${cid}&`;
   const [orders,projects,stages,blocks,logs,tasks,depts,plans,pnStds]=await Promise.all([
-    SB.get("orders",cf+"order=created_at.asc"),
+    // orders and work_logs are the two that outgrow a single page.
+    SB.getAll("orders",cf+ORDER_BY.orders),
     SB.get("projects",cf+"order=name.asc"),
     SB.get("stages",cf+"order=stage_order.asc"),
     SB.get("stage_blocks",cf+"order=created_at.asc"),
-    SB.get("work_logs",cf+"order=created_at.asc"),
+    SB.getAll("work_logs",cf+ORDER_BY.work_logs),
     SB.get("custom_tasks",cf+"order=created_at.asc"),
     SB.get("departments",cf+"order=name.asc").catch(()=>[]),
     SB.get("daily_plans",cf+"order=created_at.asc").catch(()=>[]),
@@ -415,13 +471,25 @@ async function dbLoadAll(){
     // standards are cached locally instead of wiping them.
     SB.get("pn_standards",cf+"order=pn.asc").catch(()=>null),
   ]);
-  return{
+  const out={
     orders:orders.map(dbToOrder),projects:projects.map(dbToProject),
     stages:stages.map(dbToStage),stageBlocks:blocks.map(dbToBlock),
     workLogs:logs.map(dbToLog),customTasks:tasks.map(dbToTask),
     departments:depts.map(dbToDept),dailyPlans:plans.map(dbToPlan),
     pnStandards:pnStds?pnStds.map(dbToPnStd):null
   };
+  // Everything just read is, by definition, what the server holds — so the first
+  // save after a load sends the one row that changed, not the whole database.
+  SYNC.prime("orders",out.orders,orderToDb);
+  SYNC.prime("projects",out.projects,projectToDb);
+  SYNC.prime("stages",out.stages,stageToDb);
+  SYNC.prime("stage_blocks",out.stageBlocks,blockToDb);
+  SYNC.prime("work_logs",out.workLogs,logToDb);
+  SYNC.prime("custom_tasks",out.customTasks,taskToDb);
+  SYNC.prime("departments",out.departments,deptToDb);
+  SYNC.prime("daily_plans",out.dailyPlans,planToDb);
+  if(out.pnStandards)SYNC.prime("pn_standards",out.pnStandards,pnStdToDb);
+  return out;
 }
 async function dbLoadUsers(){
   const cid=_companyId||DEFAULT_COMPANY_ID;
@@ -532,6 +600,11 @@ const DEF_STAGES=[
 ];
 const SC={open:"#f59e0b",partial:"#3b82f6",complete:"#10b981",blocked:"#ef4444"};
 const SL={open:"פתוחה",partial:"חלקית",complete:"הושלמה",blocked:"תקועה"};
+// The order a floor manager reads them in: what hasn't started, what is running,
+// what is stuck, what is done. Used for the status filter and for sorting by it.
+const ST_ORDER=["open","partial","blocked","complete"];
+// How many units the serials grid draws before it asks whether you want more.
+const SN_PAGE=100;
 const COLORS=["#3b82f6","#10b981","#8b5cf6","#f59e0b","#ef4444","#06b6d4","#f97316","#ec4899","#84cc16","#a78bfa"];
 const LS_PREFIX="pml_";
 
@@ -573,18 +646,50 @@ function orderRoute(order,stages){
   const m=new Map((stages||[]).map(s=>[s.id,s]));
   return (order?.stageIds||[]).map(id=>m.get(id)).filter(Boolean);
 }
+// ── "Has this unit finished this stage?" ──────────────────────────────────
+// The answer lives in the work logs, and every progress bar, count and estimate
+// in the app asks it — once per unit per stage. Asked with .some() over the whole
+// log array it is O(units × stages × logs), which is what makes a few thousand
+// פק"ע crawl. Asked against a Set built once per render it is a hash lookup, and
+// the list scrolls at the same speed whether it holds fifty rows or fifty
+// thousand. Callers that don't have an index still work — they fall back to the
+// scan — so this is a speed-up, never a behaviour change.
+const logKey=(serialId,stageId)=>`${serialId}|${stageId}`;
+// done    — this unit cleared this stage
+// running — this unit has an open (unfinished) log on this stage
+// busy    — this unit has an open log on *some* stage
+function buildLogIndex(workLogs){
+  const done=new Set(),running=new Set(),busy=new Set();
+  (workLogs||[]).forEach(w=>{
+    if(!w.serialId)return;
+    if(w.completed){if(w.stageId)done.add(logKey(w.serialId,w.stageId))}
+    else{busy.add(w.serialId);if(w.stageId)running.add(logKey(w.serialId,w.stageId))}
+  });
+  return{done,running,busy};
+}
+const buildDoneIndex=workLogs=>buildLogIndex(workLogs).done;
+const useLogIndex=workLogs=>useMemo(()=>buildLogIndex(workLogs),[workLogs]);
+const useDoneIndex=workLogs=>useMemo(()=>buildLogIndex(workLogs).done,[workLogs]);
+const isDone=(idx,workLogs,serialId,stageId)=>idx?idx.has(logKey(serialId,stageId))
+  :(workLogs||[]).some(w=>w.serialId===serialId&&w.stageId===stageId&&w.completed);
+// How many of an order's units cleared its whole route.
+function orderDoneCount(order,oStages,workLogs,doneIdx){
+  const sers=order?.serials||[];
+  if(!oStages.length)return 0;
+  return sers.filter(sr=>oStages.every(st=>isDone(doneIdx,workLogs,sr.id,st.id))).length;
+}
 function orderPerUnitMin(order,stages,stageBlocks){
   return (order.stageIds||[]).reduce((s,sid)=>{const st=(stages||[]).find(x=>x.id===sid);return s+stageMinutesFor(order,st,stageBlocks)},0);
 }
 // Remaining estimated work minutes for an order — only stages not yet completed
 // per unit. Falls back to the full per-unit estimate × qty when there are no serials.
-function orderRemainingMin(order,stages,stageBlocks,workLogs){
+function orderRemainingMin(order,stages,stageBlocks,workLogs,doneIdx){
   const oStages=orderRoute(order,stages);
   const serials=order.serials||[];
   if(serials.length===0)return oStages.reduce((s,st)=>s+stageMinutesFor(order,st,stageBlocks),0)*Number(order.qty||0);
   let total=0;
   serials.forEach(sr=>oStages.forEach(st=>{
-    if(!(workLogs||[]).some(w=>w.serialId===sr.id&&w.stageId===st.id&&w.completed))total+=stageMinutesFor(order,st,stageBlocks);
+    if(!isDone(doneIdx,workLogs,sr.id,st.id))total+=stageMinutesFor(order,st,stageBlocks);
   }));
   return total;
 }
@@ -692,7 +797,21 @@ const gapColor=g=>g<=-0.5?"#10b981":g<0.5?"#3b82f6":"#f59e0b";
 // ── LocalStorage cache (גיבוי מקומי לעבודה offline) ──────────────────────
 const LS={
   get:k=>{try{const v=localStorage.getItem(LS_PREFIX+k);return v?JSON.parse(v):null}catch{return null}},
-  set:(k,v)=>{try{localStorage.setItem(LS_PREFIX+k,JSON.stringify(v))}catch{}}
+  // A cache write that does not fit is remembered rather than retried. Tens of
+  // thousands of progress records serialise to megabytes, and re-stringifying that
+  // on every click only to be refused again costs far more than the cache is worth.
+  // Supabase stays the source of truth; what is lost is the offline copy of that one
+  // key, and whatever last fitted is left in place rather than deleted.
+  set:(k,v)=>{
+    if(LS._full.has(k))return false;
+    try{localStorage.setItem(LS_PREFIX+k,JSON.stringify(v));return true}
+    catch(e){
+      LS._full.add(k);
+      console.warn(`אחסון מקומי מלא — ״${k}״ לא נשמר במכשיר לגיבוי לא־מקוון. הנתונים ממשיכים להישמר בענן כרגיל.`,e&&e.name);
+      return false;
+    }
+  },
+  _full:new Set()
 };
 function getUsers(){try{const u=localStorage.getItem(LS_PREFIX+"users");return u?JSON.parse(u):FALLBACK_USERS}catch{return FALLBACK_USERS}}
 async function saveUsers(users){
@@ -922,6 +1041,162 @@ const SegBtn=({options,value,onChange})=>(
     ))}
   </div>
 );
+
+// ── Virtualised list ───────────────────────────────────────────────────────
+// Only the rows near the viewport are mounted; everything above and below them
+// is one spacer of the right height. The page keeps exactly one scrollbar (the
+// window's) and dragging it to the middle still lands in the middle — the list
+// just stops building ten thousand DOM nodes to get there.
+//
+// Row heights are not known up front (a פק"ע that carries a description is
+// taller than one that doesn't), so every mounted row measures itself and
+// replaces the estimate for its own key. Rows never mounted stand in at the
+// average of the ones that were — which is what makes the scrollbar the right
+// length within the first screenful instead of only once the list has been
+// scrolled to the end.
+//
+// Short lists are handed straight through: below `threshold` rows there is
+// nothing to gain, and a plain flex column avoids the measure-then-settle
+// flicker entirely.
+function VirtualList({items,renderRow,estimate=100,gap=7,overscan=6,threshold=40,style}){
+  const hostRef=useRef(null);
+  const heights=useRef(new Map());
+  const sum=useRef(0);                       // Σ of the measured heights, for the running average
+  const pending=useRef(false);
+  const [version,setVersion]=useState(0);
+  const [range,setRange]=useState({from:0,to:24});
+  const on=items.length>threshold;
+  const keyOf=(it,i)=>(it&&it.id!=null)?it.id:i;
+  const guess=heights.current.size?sum.current/heights.current.size:estimate;
+
+  // Offsets are a prefix sum over the (measured or estimated) row heights. It is
+  // arithmetic over an array, not DOM work, so redoing it whenever the data or a
+  // measurement changes costs nothing worth saving.
+  const {offsets,total}=useMemo(()=>{
+    const off=new Array(items.length+1);let acc=0;
+    for(let i=0;i<items.length;i++){off[i]=acc;acc+=(heights.current.get(keyOf(items[i],i))||guess)+gap}
+    off[items.length]=acc;
+    return{offsets:off,total:Math.max(0,acc-gap)};
+  },[items,guess,gap,version]);
+
+  // Which rows the viewport covers right now — found by binary search, so the
+  // cost of a scroll frame does not grow with the length of the list.
+  const recalc=useCallback(()=>{
+    const host=hostRef.current;if(!host||!items.length)return;
+    const top=host.getBoundingClientRect().top+window.scrollY;
+    const start=window.scrollY-top,end=start+window.innerHeight;
+    const find=y=>{let lo=0,hi=items.length-1,r=0;
+      while(lo<=hi){const m=(lo+hi)>>1;if(offsets[m]<=y){r=m;lo=m+1}else hi=m-1}
+      return r};
+    const from=Math.max(0,find(start)-overscan);
+    const to=Math.min(items.length,find(end)+1+overscan);
+    setRange(p=>(p.from===from&&p.to===to)?p:{from,to});
+  },[items.length,offsets,overscan]);
+
+  useEffect(()=>{
+    if(!on)return;
+    recalc();
+    let raf=0;
+    const onScroll=()=>{if(raf)return;raf=requestAnimationFrame(()=>{raf=0;recalc()})};
+    window.addEventListener("scroll",onScroll,{passive:true});
+    window.addEventListener("resize",onScroll);
+    return()=>{if(raf)cancelAnimationFrame(raf);window.removeEventListener("scroll",onScroll);window.removeEventListener("resize",onScroll)};
+  },[on,recalc]);
+
+  // A row that turned out taller or shorter than the estimate replaces it, and a
+  // frame later the spacers and the scrollbar agree with what is on screen. The
+  // bump is batched so a screenful of rows costs one extra render, not thirty.
+  const measure=useCallback((key,el)=>{
+    if(!el)return;
+    const h=el.offsetHeight;
+    const prev=heights.current.get(key);
+    if(!h||(prev!==undefined&&Math.abs(prev-h)<1))return;
+    heights.current.set(key,h);
+    sum.current+=h-(prev||0);
+    if(pending.current)return;
+    pending.current=true;
+    requestAnimationFrame(()=>{pending.current=false;setVersion(v=>v+1)});
+  },[]);
+
+  if(!on)return<div style={{display:"flex",flexDirection:"column",gap,...style}}>{items.map((it,i)=><div key={keyOf(it,i)}>{renderRow(it,i)}</div>)}</div>;
+
+  const from=Math.max(0,Math.min(range.from,items.length-1));
+  const to=Math.min(range.to,items.length);
+  return(
+    <div ref={hostRef} style={{position:"relative",height:total,...style}}>
+      {items.slice(from,to).map((it,i)=>{
+        const idx=from+i,key=keyOf(it,idx);
+        return(
+          <div key={key} ref={el=>measure(key,el)} style={{position:"absolute",top:offsets[idx],left:0,right:0}}>
+            {renderRow(it,idx)}
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+// ── Fast scroll rail ───────────────────────────────────────────────────────
+// Past a few thousand rows the browser's scrollbar is a hairline and the wheel
+// is hopeless. This is the shortcut: top, bottom, and — by dragging the rail —
+// anywhere in between in one gesture. It rides the window scroller, so it works
+// on every screen of the app, and it hides itself whenever the page is short
+// enough not to need it.
+function FastScroll(){
+  const [show,setShow]=useState(false);
+  const [pct,setPct]=useState(0);
+  const [drag,setDrag]=useState(false);
+  const railRef=useRef(null);
+  const maxScroll=()=>Math.max(0,document.documentElement.scrollHeight-window.innerHeight);
+
+  useEffect(()=>{
+    let raf=0;
+    const upd=()=>{raf=0;const max=maxScroll();
+      setShow(max>window.innerHeight*1.2);
+      setPct(max>0?Math.min(1,Math.max(0,window.scrollY/max)):0)};
+    const tick=()=>{if(!raf)raf=requestAnimationFrame(upd)};
+    upd();
+    window.addEventListener("scroll",tick,{passive:true});
+    window.addEventListener("resize",tick);
+    // The page grows as virtualised rows mount and filters change; watching the
+    // body keeps the rail honest without polling.
+    let ro=null;
+    if(typeof ResizeObserver!=="undefined"){ro=new ResizeObserver(tick);ro.observe(document.body)}
+    return()=>{if(raf)cancelAnimationFrame(raf);if(ro)ro.disconnect();
+      window.removeEventListener("scroll",tick);window.removeEventListener("resize",tick)};
+  },[]);
+
+  const seek=e=>{
+    const r=railRef.current?.getBoundingClientRect();if(!r||!r.height)return;
+    const f=Math.min(1,Math.max(0,(e.clientY-r.top)/r.height));
+    window.scrollTo({top:f*maxScroll()});
+  };
+  const go=top=>window.scrollTo({top,behavior:"smooth"});
+  if(!show)return null;
+  const btn={width:26,height:22,borderRadius:6,border:"1px solid var(--c-border2)",background:"var(--c-card)",
+    color:"var(--c-muted)",fontSize:11,lineHeight:1,padding:0,cursor:"pointer",fontFamily:"inherit",display:"flex",
+    alignItems:"center",justifyContent:"center"};
+  return(
+    <div style={{position:"fixed",left:6,top:"50%",transform:"translateY(-50%)",zIndex:60,
+      display:"flex",flexDirection:"column",alignItems:"center",gap:5,opacity:drag?1:.55,transition:"opacity .2s"}}
+      onMouseEnter={e=>e.currentTarget.style.opacity="1"}
+      onMouseLeave={e=>{if(!drag)e.currentTarget.style.opacity=".55"}}>
+      <button style={btn} title="לתחילת הרשימה" aria-label="לתחילת הרשימה" onClick={()=>go(0)}>▲</button>
+      <div ref={railRef} title="גרור לגלילה מהירה"
+        onPointerDown={e=>{e.currentTarget.setPointerCapture(e.pointerId);setDrag(true);seek(e)}}
+        onPointerMove={e=>{if(drag)seek(e)}}
+        onPointerUp={e=>{e.currentTarget.releasePointerCapture(e.pointerId);setDrag(false)}}
+        onPointerCancel={()=>setDrag(false)}
+        style={{width:26,height:"min(46vh,320px)",borderRadius:13,border:"1px solid var(--c-border2)",
+          background:"var(--c-card)",position:"relative",cursor:"grab",touchAction:"none",overflow:"hidden"}}>
+        <div style={{position:"absolute",left:0,right:0,top:`calc(${pct*100}% - 13px)`,height:26,borderRadius:13,
+          background:"var(--c-accent)",opacity:drag?1:.8,display:"flex",alignItems:"center",justifyContent:"center",
+          color:"#fff",fontSize:9,fontWeight:700}}>{Math.round(pct*100)}</div>
+      </div>
+      <button style={btn} title="לסוף הרשימה" aria-label="לסוף הרשימה" onClick={()=>go(maxScroll())}>▼</button>
+    </div>
+  );
+}
 
 // ── Simple Bar Chart (SVG) ─────────────────────────────────────────────────
 function BarChart({data,color,formatVal,height=130}){
@@ -1301,7 +1576,8 @@ function Dashboard({orders,projects,stages,users,workLogs,departments,customTask
   const fLogs=useMemo(()=>workLogs.filter(w=>{if(!w.completed||!w.endTime)return false;if(selYear!=="all"&&yK(w.endTime)!==selYear)return false;return true}),[workLogs,selYear]);
 
   // Helper: is serial done
-  const isSerDone=(o,s)=>{const st=o.stageIds||[];return st.length>0&&st.every(sid=>workLogs.some(w=>w.serialId===s.id&&w.stageId===sid&&w.completed))};
+  const doneIdx=useDoneIndex(workLogs);
+  const isSerDone=(o,s)=>{const st=o.stageIds||[];return st.length>0&&st.every(sid=>doneIdx.has(logKey(s.id,sid)))};
 
   // KPIs
   const totalSerials=fOrders.reduce((s,o)=>s+(o.serials||[]).length,0);
@@ -1385,7 +1661,7 @@ function Dashboard({orders,projects,stages,users,workLogs,departments,customTask
   fOrders.forEach(o=>{
     const ost=orderRoute(o,stages);
     (o.serials||[]).forEach(sr=>{
-      const next=ost.find(st=>!workLogs.some(w=>w.serialId===sr.id&&w.stageId===st.id&&w.completed));
+      const next=ost.find(st=>!doneIdx.has(logKey(sr.id,st.id)));
       if(next)wipByStage[next.id]=(wipByStage[next.id]||0)+1;
     });
   });
@@ -1676,10 +1952,24 @@ function SerialsManager({order,stages,onUpdate,workLogs,onSignOff}){
     onUpdate({...order,serials:serials.filter(s=>s.id!==id)});
   };
 
+  // The grid asks for one cell per unit per stage — a hundred units on a
+  // twenty-stage route is two thousand questions per render, and each of them
+  // used to walk the whole log list twice. One pass up front answers all of them.
+  const cellLogs=useMemo(()=>{
+    const done=new Map(),active=new Map();
+    (workLogs||[]).forEach(w=>{
+      if(!w.serialId||!w.stageId)return;
+      const k=logKey(w.serialId,w.stageId);
+      if(w.completed){if(!done.has(k))done.set(k,w)}
+      else if(!active.has(k))active.set(k,w);
+    });
+    return{done,active};
+  },[workLogs]);
   const getStageStatus=(serialId,stageId)=>{
-    const log=workLogs.find(w=>w.serialId===serialId&&w.stageId===stageId&&w.completed);
+    const k=logKey(serialId,stageId);
+    const log=cellLogs.done.get(k);
     if(log)return{done:true,user:log.userName,time:log.endTime,duration:log.durationMin};
-    const active=workLogs.find(w=>w.serialId===serialId&&w.stageId===stageId&&!w.completed);
+    const active=cellLogs.active.get(k);
     if(active)return{active:true,user:active.userName,startTime:active.startTime};
     return{pending:true};
   };
@@ -1694,10 +1984,35 @@ function SerialsManager({order,stages,onUpdate,workLogs,onSignOff}){
 
   const oStages=orderRoute(order,stages);
 
+  // A פק"ע of five hundred units on a twenty-stage route is ten thousand table
+  // cells. Rather than build them all and then let the browser struggle, the grid
+  // shows a screenful at a time and grows on demand — with a search and a status
+  // filter so the unit you actually want is one step away, not a scroll away.
+  const unitState=s=>{
+    if(oStages.every(st=>getStageStatus(s.id,st.id).done))return"done";
+    if(oStages.some(st=>getStageStatus(s.id,st.id).active))return"active";
+    return"pending";
+  };
+  const [snQ,setSnQ]=useState("");
+  const [snFilter,setSnFilter]=useState("all");
+  const [shown,setShown]=useState(SN_PAGE);
+  const visSerials=useMemo(()=>{
+    const q=snQ.trim().toLowerCase();
+    return serials.filter(s=>(!q||String(s.sn||"").toLowerCase().includes(q))&&(snFilter==="all"||unitState(s)===snFilter));
+  },[serials,snQ,snFilter,cellLogs,oStages]);
+  useEffect(()=>{setShown(SN_PAGE)},[snQ,snFilter,order.id]);
+  const page=visSerials.slice(0,shown);
+
   return(
     <div>
-      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:12}}>
+      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:12,gap:10,flexWrap:"wrap"}}>
         <h3 style={{margin:0,fontSize:15}}>🔢 מספרים סידוריים ({serials.length})</h3>
+        {serials.length>SN_PAGE&&(
+          <div style={{display:"flex",gap:8,alignItems:"center",flexWrap:"wrap"}}>
+            <input value={snQ} onChange={e=>setSnQ(e.target.value)} placeholder="חיפוש S/N..." style={{padding:"6px 8px",fontSize:12,width:150}}/>
+            <SegBtn options={[["all","הכל"],["pending","ממתין"],["active","בתהליך"],["done","סופק"]]} value={snFilter} onChange={setSnFilter}/>
+          </div>
+        )}
       </div>
       {canEdit&&(
         <div style={{background:"var(--c-deep)",borderRadius:8,padding:12,marginBottom:12,display:"flex",gap:10,flexWrap:"wrap",alignItems:"flex-end"}}>
@@ -1712,7 +2027,7 @@ function SerialsManager({order,stages,onUpdate,workLogs,onSignOff}){
           <table>
             <thead><tr><th>S/N</th>{oStages.map(st=><th key={st.id} style={{color:st.color}}>{st.name}</th>)}<th>סטטוס</th>{canEdit&&<th></th>}</tr></thead>
             <tbody>
-              {serials.map(s=>{
+              {page.map(s=>{
                 const allDone=oStages.every(st=>getStageStatus(s.id,st.id).done);
                 const anyActive=oStages.some(st=>getStageStatus(s.id,st.id).active);
                 return(
@@ -1731,6 +2046,14 @@ function SerialsManager({order,stages,onUpdate,workLogs,onSignOff}){
               })}
             </tbody>
           </table>
+          {shown<visSerials.length&&(
+            <div style={{display:"flex",gap:8,alignItems:"center",justifyContent:"center",padding:"12px 0 2px"}}>
+              <Btn small onClick={()=>setShown(n=>n+SN_PAGE)}>הצג {Math.min(SN_PAGE,visSerials.length-shown)} נוספים</Btn>
+              <Btn small color="var(--c-accent)" onClick={()=>setShown(visSerials.length)}>הצג את כל {visSerials.length}</Btn>
+              <span style={{fontSize:11.5,color:"var(--c-dim)"}}>מוצגות {page.length} מתוך {visSerials.length}</span>
+            </div>
+          )}
+          {!visSerials.length&&<div style={{color:"var(--c-dim)",textAlign:"center",padding:16,fontSize:12.5}}>אין יחידה שעונה על הסינון</div>}
         </div>
       )}
     </div>
@@ -1868,7 +2191,8 @@ function OrderDetail({order,projects,stages,stageBlocks,onClose,onUpdate,workLog
   const proj=projects.find(p=>p.id===order.projectId);
   const serials=order.serials||[];
   const oStages=orderRoute(order,stages);
-  const totalCompleted=serials.filter(s=>oStages.every(st=>workLogs.some(w=>w.serialId===s.id&&w.stageId===st.id&&w.completed))).length;
+  const doneIdx=useDoneIndex(workLogs);
+  const totalCompleted=serials.filter(s=>oStages.every(st=>doneIdx.has(logKey(s.id,st.id)))).length;
   const pct=serials.length?Math.round(totalCompleted/serials.length*100):0;
   const perUnitMin=orderPerUnitMin(order,stages,stageBlocks);
   const remainMin=orderRemainingMin(order,stages,stageBlocks,workLogs);
@@ -1986,14 +2310,42 @@ function Orders({orders,projects,stages,stageBlocks,updO,workLogs,onWorkLog,work
   const [detail,setDetail]=useState(null);
   const [search,setSearch]=useState("");
   const [filterProj,setFilterProj]=useState("all");
+  const [filterStat,setFilterStat]=useState("all");
+  const [sort,setSort]=useState("wo");
+  // One lookup table for "did this unit finish this stage", shared by every row
+  // below — see buildDoneIndex.
+  const doneIdx=useDoneIndex(workLogs);
 
   const filtered=useMemo(()=>{
-    return orders.filter(o=>{
+    const q=search.trim().toLowerCase();
+    const list=orders.filter(o=>{
       if(filterProj!=="all"&&o.projectId!==filterProj)return false;
-      if(search&&!o.woNumber?.toLowerCase().includes(search.toLowerCase())&&!o.description?.toLowerCase().includes(search.toLowerCase())&&!o.pn?.toLowerCase().includes(search.toLowerCase()))return false;
+      if(filterStat!=="all"&&(o.status||"open")!==filterStat)return false;
+      if(q&&!o.woNumber?.toLowerCase().includes(q)&&!o.description?.toLowerCase().includes(q)&&!o.pn?.toLowerCase().includes(q))return false;
       return true;
     });
-  },[orders,filterProj,search]);
+    // Sorting a few thousand rows is one pass here, against a re-sort on every
+    // scroll frame if it were done inside the row loop.
+    const cmp={
+      wo:(a,b)=>String(a.woNumber||"").localeCompare(String(b.woNumber||""),"he",{numeric:true}),
+      target:(a,b)=>String(a.targetDate||"9999").localeCompare(String(b.targetDate||"9999")),
+      status:(a,b)=>ST_ORDER.indexOf(a.status||"open")-ST_ORDER.indexOf(b.status||"open"),
+      qty:(a,b)=>(Number(b.qty)||0)-(Number(a.qty)||0)
+    }[sort];
+    return cmp?list.slice().sort(cmp):list;
+  },[orders,filterProj,filterStat,search,sort]);
+
+  // How many פק"ע sit in each status, so the filter chips say what they will show
+  // — and so a run of "everything is open" is visible before anyone goes looking.
+  const statCount=useMemo(()=>{
+    const c={open:0,partial:0,complete:0,blocked:0};
+    orders.forEach(o=>{const k=o.status||"open";if(c[k]!==undefined)c[k]++});
+    return c;
+  },[orders]);
+
+  // Looking a project up by id per row is a scan of the project list per row;
+  // once into a Map it is a hash lookup.
+  const projMap=useMemo(()=>new Map(projects.map(p=>[p.id,p])),[projects]);
 
   const del=id=>{if(!confirm('למחוק פק"ע זו?'))return;updO(prev=>prev.filter(o=>o.id!==id));if(detail?.id===id)setDetail(null);SB.del("orders",{id}).catch(()=>{})};
   const handleUpd=(upd)=>{updO(prev=>prev.map(o=>o.id===upd.id?upd:o));setDetail(upd)};
@@ -2012,19 +2364,28 @@ function Orders({orders,projects,stages,stageBlocks,updO,workLogs,onWorkLog,work
       <Card style={{padding:"12px 14px",marginBottom:12,display:"flex",gap:10,flexWrap:"wrap",alignItems:"flex-end"}}>
         <div style={{display:"flex",flexDirection:"column",gap:3,flex:"1 1 150px"}}><label style={{fontSize:11,color:"var(--c-dim)"}}>חיפוש</label><input value={search} onChange={e=>setSearch(e.target.value)} placeholder="חיפוש לפי מספר / תיאור / P/N..."/></div>
         <div style={{display:"flex",flexDirection:"column",gap:3}}><label style={{fontSize:11,color:"var(--c-dim)"}}>פרויקט</label><select value={filterProj} onChange={e=>setFilterProj(e.target.value)} style={{padding:"7px 8px",fontSize:12}}><option value="all">כל הפרויקטים</option>{projects.map(p=><option key={p.id} value={p.id}>{p.name}</option>)}</select></div>
+        <div style={{display:"flex",flexDirection:"column",gap:3}}><label style={{fontSize:11,color:"var(--c-dim)"}}>מיון</label><select value={sort} onChange={e=>setSort(e.target.value)} style={{padding:"7px 8px",fontSize:12}}>
+          <option value="wo">מספר פק"ע</option><option value="target">יעד אספקה</option><option value="status">סטטוס</option><option value="qty">כמות</option>
+        </select></div>
         {setWorkdayHours&&<div style={{display:"flex",flexDirection:"column",gap:3}}><label style={{fontSize:11,color:"var(--c-dim)"}}>יום עבודה (שע' נטו)</label><input type="number" min="1" step="0.5" value={workdayHours} onChange={e=>setWorkdayHours(e.target.value)} style={{padding:"7px 8px",fontSize:12,width:90}} title="משמש לחישוב צפי הסיום"/></div>}
         <div style={{fontSize:12,color:"var(--c-dim)",paddingBottom:4}}>{filtered.length} פק"ע</div>
+        <div style={{display:"flex",gap:6,flexWrap:"wrap",width:"100%"}}>
+          {[["all",'הכל',orders.length,"#8b95a8"],...ST_ORDER.map(k=>[k,SL[k],statCount[k],SC[k]])].map(([k,l,n,c])=>(
+            <button key={k} onClick={()=>setFilterStat(k)} style={{background:filterStat===k?c+"26":"var(--c-deep)",
+              border:`1px solid ${filterStat===k?c+"88":"var(--c-border)"}`,color:filterStat===k?c:"var(--c-muted)",
+              borderRadius:16,padding:"3px 11px",fontSize:11.5,fontWeight:600,fontFamily:"inherit",cursor:"pointer"}}>{l} · {n}</button>
+          ))}
+        </div>
       </Card>
-      <div style={{display:"flex",flexDirection:"column",gap:7}}>
-        {filtered.length===0&&<EmptyState icon="📋" title='אין פק"ע להצגה' subtitle="צור הזמנה חדשה כדי להתחיל"/>}
-        {filtered.map(o=>{
+      {filtered.length===0&&<EmptyState icon="📋" title='אין פק"ע להצגה' subtitle={orders.length?"אף פק\"ע לא עונה על הסינון הנוכחי":"צור הזמנה חדשה כדי להתחיל"}/>}
+      <VirtualList items={filtered} estimate={122} gap={7} renderRow={o=>{
           const serials=o.serials||[];
           const oStages=orderRoute(o,stages);
-          const completed=serials.filter(s=>oStages.every(st=>workLogs.some(w=>w.serialId===s.id&&w.stageId===st.id&&w.completed))).length;
+          const completed=orderDoneCount(o,oStages,workLogs,doneIdx);
           const pct=serials.length?Math.round(completed/serials.length*100):0;
-          const proj=projects.find(p=>p.id===o.projectId);
+          const proj=projMap.get(o.projectId);
           const openDef=(o.defects||[]).filter(d=>d.status!=="closed").length;
-          const remainMin=orderRemainingMin(o,stages,stageBlocks,workLogs);
+          const remainMin=orderRemainingMin(o,stages,stageBlocks,workLogs,doneIdx);
           return(
             <div key={o.id} style={{background:"var(--c-card)",borderRadius:10,padding:"12px 14px",border:"1px solid var(--c-border)",cursor:"pointer",transition:"border-color .15s"}}
               onClick={()=>setDetail(o)}
@@ -2034,6 +2395,7 @@ function Orders({orders,projects,stages,stageBlocks,updO,workLogs,onWorkLog,work
               <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:4}}>
                 <div style={{display:"flex",alignItems:"center",gap:6,flexWrap:"wrap"}}>
                   <span style={{fontWeight:700,fontSize:15}}>{o.woNumber}</span>
+                  <Badge status={o.status||"open"}/>
                   {o.pn&&<span style={{fontSize:11,color:"#a78bfa"}}>P/N: {o.pn}</span>}
                   {proj?<span style={{fontSize:11,background:"var(--c-tag-blue-bg)",color:"var(--c-tag-blue)",padding:"2px 7px",borderRadius:20}}>{proj.name}</span>:<span style={{fontSize:11,background:"var(--c-border)",color:"var(--c-dim)",padding:"2px 7px",borderRadius:20}}>ללא פרויקט</span>}
                   {openDef>0&&<span style={{fontSize:11,background:"#450a0a",color:"#fca5a5",padding:"2px 7px",borderRadius:20}}>🔧 {openDef}</span>}
@@ -2053,8 +2415,7 @@ function Orders({orders,projects,stages,stageBlocks,updO,workLogs,onWorkLog,work
               <PBar pct={pct}/>
             </div>
           );
-        })}
-      </div>
+        }}/>
       {showForm&&(<Modal onClose={()=>setShowForm(false)}><OrderForm initial={editing} projects={projects} stages={stages} stageBlocks={stageBlocks} onSave={data=>{
         const{_serials,...rest}=data;
         if(editing){
@@ -2077,10 +2438,16 @@ function Shortages({orders,updO,projects}){
   const [filterProj,setFilterProj]=useState("all");
   const [partialModal,setPartialModal]=useState(null);
   const [partialQty,setPartialQty]=useState("");
-  const all=orders.flatMap(o=>(o.shortages||[]).map(s=>({...s,order:o,proj:projects.find(p=>p.id===o.projectId)}))).filter(s=>{
-    if(filterProj!=="all"&&s.order.projectId!==filterProj)return false;
-    return filter==="all"||(filter==="open"&&!s.received)||(filter==="received"&&s.received);
-  });
+  const [search,setSearch]=useState("");
+  const projMap=useMemo(()=>new Map(projects.map(p=>[p.id,p])),[projects]);
+  const all=useMemo(()=>{
+    const q=search.trim().toLowerCase();
+    return orders.flatMap(o=>(o.shortages||[]).map(s=>({...s,order:o,proj:projMap.get(o.projectId)}))).filter(s=>{
+      if(filterProj!=="all"&&s.order.projectId!==filterProj)return false;
+      if(q&&!String(s.item||"").toLowerCase().includes(q)&&!String(s.sku||"").toLowerCase().includes(q)&&!String(s.order.woNumber||"").toLowerCase().includes(q))return false;
+      return filter==="all"||(filter==="open"&&!s.received)||(filter==="received"&&s.received);
+    });
+  },[orders,projMap,filterProj,filter,search]);
   const markRec=(oid,sid)=>{updO(prev=>prev.map(o=>{if(o.id!==oid)return o;const sh=o.shortages.map(s=>s.id===sid?{...s,received:true,receivedDate:todays(),receivedQty:Number(s.missing||0)}:s);return{...o,shortages:sh}}))};
   const markRecPartial=(oid,sid,qty)=>{updO(prev=>prev.map(o=>{if(o.id!==oid)return o;const sh=o.shortages.map(s=>{if(s.id!==sid)return s;const nq=Number(s.receivedQty||0)+Number(qty),tot=Number(s.missing||0);return{...s,receivedQty:nq,received:tot>0&&nq>=tot,receivedDate:todays()}});return{...o,shortages:sh}}));setPartialModal(null);setPartialQty("")};
   return(
@@ -2091,12 +2458,12 @@ function Shortages({orders,updO,projects}){
       </div>
       <Card style={{padding:"10px 14px",marginBottom:12,display:"flex",gap:12,alignItems:"flex-end",flexWrap:"wrap"}}>
         <div style={{display:"flex",flexDirection:"column",gap:3,minWidth:160}}><label style={{fontSize:11,color:"var(--c-dim)"}}>פרויקט</label><select value={filterProj} onChange={e=>setFilterProj(e.target.value)} style={{padding:"6px 8px",fontSize:12}}><option value="all">הכל</option>{projects.map(p=><option key={p.id} value={p.id}>{p.name}</option>)}</select></div>
+        <div style={{display:"flex",flexDirection:"column",gap:3,flex:"1 1 150px"}}><label style={{fontSize:11,color:"var(--c-dim)"}}>חיפוש</label><input value={search} onChange={e=>setSearch(e.target.value)} placeholder='פריט / מק"ט / פק"ע...'/></div>
         <div style={{fontSize:12,color:"var(--c-dim)",paddingBottom:4}}>{all.length} חוסרים</div>
       </Card>
       {all.length===0?<EmptyState icon={filter==="open"?"🎉":"📭"} title={filter==="open"?"אין חוסרים פתוחים!":"אין נתונים"} subtitle={filter==="open"?"כל החומרים זמינים":"נסה לשנות את הסינון"}/>:(
-        <div style={{display:"flex",flexDirection:"column",gap:8}}>
-          {all.map(s=>{const rq=Number(s.receivedQty||0),tot=Number(s.missing||0),isPar=rq>0&&!s.received;return(
-            <div key={s.id} style={{background:"var(--c-card)",borderRadius:10,padding:"12px 14px",border:`1px solid ${s.received?"#10b98133":isPar?"#f59e0b33":"#ef444433"}`,display:"flex",justifyContent:"space-between",alignItems:"center",flexWrap:"wrap",gap:10}}>
+        <VirtualList items={all} estimate={92} gap={8} renderRow={s=>{const rq=Number(s.receivedQty||0),tot=Number(s.missing||0),isPar=rq>0&&!s.received;return(
+            <div style={{background:"var(--c-card)",borderRadius:10,padding:"12px 14px",border:`1px solid ${s.received?"#10b98133":isPar?"#f59e0b33":"#ef444433"}`,display:"flex",justifyContent:"space-between",alignItems:"center",flexWrap:"wrap",gap:10}}>
               <div style={{flex:1}}>
                 <div style={{fontWeight:700,color:s.received?"#10b981":isPar?"#f59e0b":"#f87171",marginBottom:3}}>{s.item}{s.sku&&<span style={{fontSize:11,color:"#7eb8ff",marginRight:8,fontWeight:400}}>מק"ט: {s.sku}</span>}</div>
                 <div style={{fontSize:12,color:"var(--c-muted)",display:"flex",gap:10,flexWrap:"wrap"}}>
@@ -2112,8 +2479,7 @@ function Shortages({orders,updO,projects}){
                 {s.received?<span style={{fontSize:11,background:"#052e16",color:"#6ee7b7",padding:"3px 9px",borderRadius:20}}>✅ הושלם</span>:isPar?<span style={{fontSize:11,background:"#451a0344",color:"#fbbf24",padding:"3px 9px",borderRadius:20}}>📦 חלקי</span>:<span style={{fontSize:11,background:"#450a0a",color:"#fca5a5",padding:"3px 9px",borderRadius:20}}>❌ ממתין</span>}
               </div>
             </div>
-          )})}
-        </div>
+          )}}/>
       )}
       {partialModal&&(<div onClick={()=>setPartialModal(null)} style={{position:"fixed",inset:0,background:"#000c",zIndex:200,display:"flex",alignItems:"center",justifyContent:"center",padding:16}}><div onClick={e=>e.stopPropagation()} style={{background:"var(--c-card)",borderRadius:12,padding:24,minWidth:280,border:"1px solid var(--c-border2)"}}><div style={{fontWeight:700,fontSize:16,marginBottom:12,color:"#f59e0b"}}>📦 קבלה חלקית</div><div style={{fontSize:13,color:"var(--c-muted)",marginBottom:12}}>{partialModal.item}</div><Field label="כמות שהתקבלה" type="number" value={partialQty} onChange={setPartialQty}/><div style={{display:"flex",gap:8,marginTop:14}}><Btn color="#f59e0b" onClick={()=>partialQty&&markRecPartial(partialModal.oid,partialModal.sid,partialQty)}>שמור</Btn><Btn onClick={()=>setPartialModal(null)}>ביטול</Btn></div></div></div>)}
     </div>
@@ -2347,10 +2713,11 @@ function MyWork({orders,stages,workLogs,onStartWork,onEndWork,onPauseWork,onResu
   const [taskName,setTaskName]=useState("");
   const [taskDesc,setTaskDesc]=useState("");
 
+  const {done:doneIdx,running:runIdx,busy:busyIdx}=useLogIndex(workLogs);
   const accessible=orders.filter(o=>(o.stageIds||[]).some(sid=>myAccess.includes(sid)));
   // Today's work plan assigned to me by my manager
   const myPlans=(dailyPlans||[]).filter(p=>p.userId===currentUser.id&&p.date===todays()).sort((a,b)=>{const sa=stages.find(s=>s.id===a.stageId),sb=stages.find(s=>s.id===b.stageId);return (sa?.order||0)-(sb?.order||0)});
-  const planPending=(orderId,stageId,serialIds)=>{const o=orders.find(x=>x.id===orderId);if(!o)return [];let sers=o.serials||[];if(Array.isArray(serialIds)&&serialIds.length){sers=sers.filter(sr=>serialIds.includes(sr.id))}return sers.filter(sr=>!workLogs.some(w=>w.serialId===sr.id&&w.stageId===stageId&&w.completed)&&!workLogs.some(w=>w.serialId===sr.id&&w.stageId===stageId&&!w.completed))};
+  const planPending=(orderId,stageId,serialIds)=>{const o=orders.find(x=>x.id===orderId);if(!o)return [];let sers=o.serials||[];if(Array.isArray(serialIds)&&serialIds.length){sers=sers.filter(sr=>serialIds.includes(sr.id))}return sers.filter(sr=>!doneIdx.has(logKey(sr.id,stageId))&&!runIdx.has(logKey(sr.id,stageId)))};
   // A unit belongs to my plan when a plan line covers its order+stage — either by
   // naming its serial explicitly, or by covering the whole פק"ע (no serials listed).
   const isPlanned=(orderId,stageId,serialId)=>myPlans.some(p=>p.orderId===orderId&&p.stageId===stageId&&(!Array.isArray(p.serialIds)||p.serialIds.length===0||p.serialIds.includes(serialId)));
@@ -2364,7 +2731,7 @@ function MyWork({orders,stages,workLogs,onStartWork,onEndWork,onPauseWork,onResu
       // When specific serials were assigned, only they count toward completion; otherwise all order units.
       const scope=(Array.isArray(p.serialIds)&&p.serialIds.length)?(o.serials||[]).filter(sr=>p.serialIds.includes(sr.id)):(o.serials||[]);
       if(!scope.length)return;
-      const allDone=scope.every(sr=>workLogs.some(w=>w.serialId===sr.id&&w.stageId===p.stageId&&w.completed));
+      const allDone=scope.every(sr=>doneIdx.has(logKey(sr.id,p.stageId)));
       if(allDone)onMarkPlanDone(p.id);
     });
   },[workLogs,dailyPlans]);
@@ -2383,7 +2750,7 @@ function MyWork({orders,stages,workLogs,onStartWork,onEndWork,onPauseWork,onResu
     bulkSelected.forEach(sId=>{
       const serial=(order?.serials||[]).find(s=>s.id===sId);
       // Find THIS serial's correct next stage
-      const nextSt=allStagesOrdered.find(st=>!workLogs.some(w=>w.serialId===sId&&w.stageId===st.id&&w.completed));
+      const nextSt=allStagesOrdered.find(st=>!doneIdx.has(logKey(sId,st.id)));
       if(!nextSt||!myAccess.includes(nextSt.id))return;
       onStartWork({id:uid(),userId:currentUser.id,userName:currentUser.name,serialId:sId,stageId:nextSt.id,orderId:oId,serialSn:serial?.sn||"",startTime:nowISO(),endTime:null,completed:false,durationMin:0,paused:false,pauseStart:null,totalPauseMin:0,pauseLog:[],bulk:true,bulkGroupId:groupId,bulkCount:bulkSelected.length});
     });
@@ -2426,9 +2793,9 @@ function MyWork({orders,stages,workLogs,onStartWork,onEndWork,onPauseWork,onResu
     const allStagesOrdered=orderRoute(o,stages);
     const units=(o.serials||[]).map(s=>{
       // The unit's true next stage (stages must run in order)
-      const next=allStagesOrdered.find(st=>!workLogs.some(w=>w.serialId===s.id&&w.stageId===st.id&&w.completed));
+      const next=allStagesOrdered.find(st=>!doneIdx.has(logKey(s.id,st.id)));
       if(!next||!myAccess.includes(next.id))return null;                                  // done, or not mine to do
-      if(workLogs.some(w=>w.serialId===s.id&&w.stageId===next.id&&!w.completed))return null; // already running
+      if(runIdx.has(logKey(s.id,next.id)))return null;                                    // already running
       return{...s,next,planned:isPlanned(o.id,next.id,s.id)};
     }).filter(Boolean).sort((a,b)=>(b.planned?1:0)-(a.planned?1:0));
     return{order:o,units,planned:units.filter(u=>u.planned).length};
@@ -2444,7 +2811,7 @@ function MyWork({orders,stages,workLogs,onStartWork,onEndWork,onPauseWork,onResu
           {/* Active workers — group by worker, not by log */}
           {(()=>{
             const activeWork=workLogs.filter(w=>!w.completed);
-            const totalPending=orders.reduce((s,o)=>{const oSt=o.stageIds||[];return s+(o.serials||[]).filter(sr=>!oSt.every(sid=>workLogs.some(w2=>w2.serialId===sr.id&&w2.stageId===sid&&w2.completed))).length},0);
+            const totalPending=orders.reduce((s,o)=>{const oSt=o.stageIds||[];return s+(o.serials||[]).filter(sr=>!oSt.every(sid=>doneIdx.has(logKey(sr.id,sid)))).length},0);
             // Group by worker
             const allW={};
             activeWork.forEach(w=>{
@@ -2470,7 +2837,7 @@ function MyWork({orders,stages,workLogs,onStartWork,onEndWork,onPauseWork,onResu
                 <KpiBox i="🔄" v={ww} label="עובדים בעבודה" c="#f59e0b"/>
                 <KpiBox i="⏸️" v={bw} label="בהפסקה" c="#8b95a8"/>
                 <KpiBox i="📋" v={totalPending} label="יחידות ממתינות" c="#3b82f6"/>
-                <KpiBox i="📦" v={orders.filter(o=>(o.serials||[]).length>0&&(o.serials||[]).some(sr=>!(o.stageIds||[]).every(sid=>workLogs.some(w2=>w2.serialId===sr.id&&w2.stageId===sid&&w2.completed)))).length} label={'פק"ע בתהליך'} c="#06b6d4"/>
+                <KpiBox i="📦" v={orders.filter(o=>(o.serials||[]).length>0&&(o.serials||[]).some(sr=>!(o.stageIds||[]).every(sid=>doneIdx.has(logKey(sr.id,sid))))).length} label={'פק"ע בתהליך'} c="#06b6d4"/>
               </div>
               {ww>0&&(<Card style={{marginBottom:12,border:"2px solid #f59e0b33"}}><div style={{fontWeight:700,fontSize:15,color:"#f59e0b",marginBottom:10}}>🔄 עובדים בעבודה ({ww})</div><div style={{display:"flex",flexDirection:"column",gap:8}}>{Object.values(workerWork).flatMap(wk=>wk.items.map(w=>{const stage=stages.find(s2=>s2.id===w.stageId);const order=orders.find(o=>o.id===w.orderId);return(<div key={w.id} style={{background:"var(--c-deep)",borderRadius:10,padding:"10px 14px",border:"1px solid #f59e0b22",display:"flex",justifyContent:"space-between",alignItems:"center",flexWrap:"wrap",gap:8}}><div><span style={{fontWeight:700,fontSize:14}}>{w.userName}</span><span style={{fontSize:12,color:"#60a5fa",marginRight:8}}>← {order?.woNumber||""}</span>{w._count>1?<span style={{fontSize:11,background:"#3b82f622",color:"#60a5fa",padding:"2px 8px",borderRadius:10}}>{w._count} יחידות</span>:<span style={{fontSize:12,color:"#7eb8ff"}}>{w.serialSn}</span>}<span style={{fontSize:11,color:stage?.color||"var(--c-muted)",marginRight:6}}>/ {stage?.name||""}</span></div><ActiveTimer startTime={w.startTime} pauseMin={w.totalPauseMin||0}/></div>)}))}</div></Card>)}
               {bw>0&&(<Card style={{marginBottom:12,border:"1px solid #8b95a833"}}><div style={{fontWeight:700,fontSize:15,color:"#8b95a8",marginBottom:10}}>⏸️ בהפסקה ({bw})</div><div style={{display:"flex",flexDirection:"column",gap:6}}>{Object.values(workerBreak).flatMap(wk=>wk.items.map(w=>{const stage=stages.find(s2=>s2.id===w.stageId);return(<div key={w.id} style={{background:"var(--c-deep)",borderRadius:8,padding:"8px 12px",display:"flex",justifyContent:"space-between",alignItems:"center",opacity:.7}}><div><span style={{fontWeight:600}}>{w.userName}</span>{w._count>1?<span style={{fontSize:11,color:"var(--c-dim)",marginRight:8}}>{w._count} יחידות / {stage?.name||""}</span>:<span style={{fontSize:12,color:"var(--c-dim)",marginRight:8}}>{w.serialSn} / {stage?.name||""}</span>}</div><span style={{fontSize:12,color:"#8b95a8"}}>⏸️</span></div>)}))}</div></Card>)}
@@ -2482,8 +2849,8 @@ function MyWork({orders,stages,workLogs,onStartWork,onEndWork,onPauseWork,onResu
                 <div style={{overflowX:"auto"}}><table><thead><tr><th>פק"ע</th><th>P/N</th><th>יחידות</th><th>הושלמו</th><th>בתהליך</th><th>נותרו</th><th>התקדמות</th></tr></thead><tbody>
                   {orders.filter(o=>(o.serials||[]).length>0).map(o=>{
                     const sers=o.serials||[];const oSt=o.stageIds||[];
-                    const done=sers.filter(sr=>oSt.every(sid=>workLogs.some(w=>w.serialId===sr.id&&w.stageId===sid&&w.completed))).length;
-                    const inProg=sers.filter(sr=>workLogs.some(w=>w.serialId===sr.id&&!w.completed)).length;
+                    const done=sers.filter(sr=>oSt.every(sid=>doneIdx.has(logKey(sr.id,sid)))).length;
+                    const inProg=sers.filter(sr=>busyIdx.has(sr.id)).length;
                     const remain=sers.length-done;
                     const pct=sers.length?Math.round(done/sers.length*100):0;
                     if(done===sers.length)return null;
@@ -3417,6 +3784,7 @@ function StagesManagement({stages,setStages,stageBlocks,setStageBlocks,persist})
 // ═══ PROJECTS ═══════════════════════════════════════════════════════════
 // ══════════════════════════════════════════════════════════════════════════
 function Projects({projects,orders,updP,stages,workLogs}){
+  const doneIdx=useDoneIndex(workLogs);
   const {toast}=useToast();
   const {canEdit}=useAuth();
   const [showForm,setShowForm]=useState(false);
@@ -3436,7 +3804,7 @@ function Projects({projects,orders,updP,stages,workLogs}){
           const totalSer=po.reduce((s,o)=>s+(o.serials||[]).length,0);
           const completed=po.reduce((s,o)=>(o.serials||[]).filter(sr=>{
             const oStages=(o.stageIds||[]);
-            return oStages.every(sid=>workLogs.some(w=>w.serialId===sr.id&&w.stageId===sid&&w.completed));
+            return oStages.every(sid=>doneIdx.has(logKey(sr.id,sid)));
           }).length+s,0);
           const pct=totalSer?Math.round(completed/totalSer*100):0;
           const rev=completed*po.reduce((s,o)=>s+Number(o.unitPrice||0),0)/Math.max(po.length,1);
@@ -5449,6 +5817,22 @@ function doExport(ctx){
   addSheet(wb,"חוסרים",h4,r4,[15,14,24,14,11,20,14,12,10,12,12,24],
     (ri,c,row)=>c===8?(row[8]==="התקבל"?XL_OK:XL_WARN):null,"78350F");
 
+  // ── 4b: התקדמות ─────────────────────────────────────────────────────────
+  // The same shape the import reads, so a full export can be edited and fed
+  // straight back in without the progress falling out on the way. "לוג עבודה"
+  // below is the detailed history; this is the standing state, per stage.
+  const h4b=['פק"ע','שלב','כמות שהושלמה','מתוך יחידות','אחוז'];
+  const doneIdx=buildDoneIndex(workLogs);
+  const r4b=orders.flatMap(o=>{
+    const sers=o.serials||[];
+    if(!sers.length)return[];
+    return orderRoute(o,stages).map(st=>{
+      const n=sers.filter(sr=>doneIdx.has(logKey(sr.id,st.id))).length;
+      return n>0?[o.woNumber,st.name,n,sers.length,xlRound(n/sers.length*100)]:null;
+    }).filter(Boolean);
+  });
+  addSheet(wb,"התקדמות",h4b,r4b,[15,26,15,13,10],null,"064E3B");
+
   // ── 5: לוג עבודה ────────────────────────────────────────────────────────
   const h5=['תאריך','יום','עובד','תפקיד','מחלקה','פק"ע','P/N (מק"ט)','S/N','פעולה (שלב)','פרויקט','סוג רישום','התחלה','סיום','זמן נטו (דק\')','הפסקות (דק\')','יחידות','זמן ליחידה (דק\')','זמן תקן (דק\')','פער מול תקן (דק\')','עמידה בתקן %','זמן מכירה (דק\')','פער מכירה (דק\')','ניצול %'];
   const r5=done.slice().sort((a,b)=>String(b.endTime||"").localeCompare(String(a.endTime||""))).map(w=>{
@@ -5597,6 +5981,10 @@ const TPL_ORDERS=['מספר פק"ע','P/N (מק"ט)','תיאור','פרויקט'
 const TPL_SERIALS=['פק"ע','S/N','נמסר'];
 const TPL_DEFECTS=['פק"ע','S/N','כותרת','סוג','חומרה','אחראי','תאריך גילוי','סטטוס','תאריך סגירה','תיאור'];
 const TPL_SHORTS=['פק"ע','פריט','מק"ט רכיב','כמות חסרה','סיבה','אחראי','תאריך הזמנה','התקבל','תאריך קבלה','כמות שהתקבלה','הערה'];
+// Progress is per unit per stage inside the app; in a spreadsheet it is far
+// easier to state per stage — "twelve units cleared הלחמה" — so that is what the
+// template asks for and what the importer expands.
+const TPL_PROGRESS=['פק"ע','שלב','כמות שהושלמה'];
 function doTemplate(ctx){
   const {projects=[],stages=[],stageBlocks=[]}=ctx||{};
   const wb=XLSX.utils.book_new();
@@ -5612,6 +6000,7 @@ function doTemplate(ctx){
     ["שדה חובה יחיד",'מספר פק"ע — כל שורה בכל גיליון חייבת להתחבר לפק"ע קיימת בגיליון ״פקודות עבודה״'],
     ["תאריכים","אפשר dd/mm/yyyy או yyyy-mm-dd או תא בפורמט תאריך של Excel"],
     ["שלבים",'רשימת שלבים מופרדת בפסיקים. אם נשאיר ריק — הפק"ע תקבל את כל השלבים המוגדרים במערכת'],
+    ["גיליון ״התקדמות״",'כמה יחידות כבר עברו כל שלב. בלעדיו כל פק"ע נכנסת ב-0% גם אם היא בפועל כמעט גמורה'],
     ["פרויקט","חייב להיות שם של פרויקט קיים (ראה גיליון ״רשימות עזר״); שם לא מוכר יסומן כאזהרה"],
     ["S/N בגיליון תקלות",'אפשר להשאיר ריק — התקלה תירשם ברמת הפק"ע ולא ברמת יחידה'],
     ["כן / לא","עמודות ״נמסר״ ו״התקבל״ מקבלות: כן / לא (או TRUE / FALSE)"],
@@ -5625,6 +6014,7 @@ function doTemplate(ctx){
   addSheet(wb,"סידוריים",TPL_SERIALS,blanks(TPL_SERIALS,60),[16,22,9],null,"1E3A8A");
   addSheet(wb,"תקלות",TPL_DEFECTS,blanks(TPL_DEFECTS,30),[16,20,26,12,11,15,13,11,13,32],null,"7F1D1D");
   addSheet(wb,"חוסרים",TPL_SHORTS,blanks(TPL_SHORTS,30),[16,24,15,12,20,15,13,10,13,13,24],null,"78350F");
+  addSheet(wb,"התקדמות",TPL_PROGRESS,blanks(TPL_PROGRESS,40),[16,26,15],null,"064E3B");
 
   const ex1=[["WO-1001","ALF-PCB","לוח PCB ראשי",projects[0]?.name||"פרויקט אלפא",4,1200,todays(),addDaysISO(todays(),30),stNames.slice(0,3).join(", "),"פתוחה"],
              ["WO-1002","BET-SNS","חיישן תעשייתי",projects[1]?.name||projects[0]?.name||"פרויקט בטא",2,850,todays(),addDaysISO(todays(),45),"","פתוחה"]];
@@ -5636,7 +6026,10 @@ function doTemplate(ctx){
     ["תקלות",TPL_DEFECTS.join(" | ")],
     ["",`WO-1001 | ALF-0001 | הלחמה קרה | איכות | גבוהה | יוסי כהן | ${todays()} | פתוחה |  | נמצא בבדיקה חזותית`],
     ["חוסרים",TPL_SHORTS.join(" | ")],
-    ["",`WO-1001 | נגד 10K | SKU-1001 | 5 | לא סופק מהספק | רכש | ${todays()} | לא |  | 0 | הוזמן מחדש`]];
+    ["",`WO-1001 | נגד 10K | SKU-1001 | 5 | לא סופק מהספק | רכש | ${todays()} | לא |  | 0 | הוזמן מחדש`],
+    ["התקדמות",TPL_PROGRESS.join(" | ")],
+    ["",`WO-1001 | ${stNames[0]||"שלב ראשון"} | 4`],
+    ["",`WO-1001 | ${stNames[1]||"שלב שני"} | 2`]];
   addSheet(wb,"דוגמה למילוי",["גיליון","שורה לדוגמה"],exSheet,[18,110],(ri)=>ri===0?xlTag("1E40AF","DBEAFE"):null,"0F2942");
 
   const maxL=Math.max(projects.length,stNames.length,6,(stageBlocks||[]).length,1);
@@ -5732,6 +6125,15 @@ const priTxt=v=>{const s=String(v==null?"":v).trim();return(s==="0"||s==="-")?""
 // gershayim, which xlNorm strips either way.
 const PRI_S={wo:"פק'ע",pn:"מק'ט",sn:"SN",qty:"כ. הפק'ע",status:"סטטוס פק'ע"};
 const PRI_SKIP="__skip",PRI_NEW="__new",PRI_MAP_LS="priorityStageMap";
+// Progress imported from the ERP is booked against a stand-in "worker" so it never
+// lands in anybody's performance report — no person did this work in the app.
+const PRI_LOG_USER="priority_import",PRI_LOG_NAME="ייבוא Priority",XL_LOG_NAME="ייבוא Excel";
+// Imported history is dated by the פק"ע's release date, so it falls in the right
+// year in the dashboards instead of all landing on the day of the import.
+const priStamp=iso=>{
+  const d=String(iso||"").slice(0,10);
+  return /^\d{4}-\d{2}-\d{2}$/.test(d)&&d<=todays()?`${d}T08:00:00.000Z`:nowISO();
+};
 
 // Is this a Priority export? Judged on the header rows alone, so a renamed sheet
 // or an extra column at the end still matches. Returns the route sheet and, when
@@ -5867,7 +6269,7 @@ function priAutoMap(ops,stages,saved){
 // זמן תקן record per מק"ט built from the ז.תקן column.
 function priBuild(scan,ctx,map,opts){
   const {projects=[],stages=[],pnStandards=[]}=ctx||{};
-  const {onlyOpen=false,makeStages=true,makeProjects=true,importStd=true,fillSerials=false,serialMax=100}=opts||{};
+  const {onlyOpen=false,makeStages=true,makeProjects=true,importStd=true,fillSerials=false,serialMax=100,importProgress=true}=opts||{};
   const issues=[],addIssue=(level,msg)=>{if(issues.length<300)issues.push({level,msg})};
 
   // ── stages ────────────────────────────────────────────────────────────
@@ -5899,6 +6301,8 @@ function priBuild(scan,ctx,map,opts){
 
   // ── orders ────────────────────────────────────────────────────────────
   const orders=[];let closedSkipped=0,noStage=0,guessed=0,serialTotal=0,serialCapped=0,noQty=0,serialFilled=0,fromSheet=0;
+  // Progress carried over from the ERP — see the block inside the loop.
+  const logs=[];let progWos=0,progNoSerials=0,progClamped=0;
   scan.wos.forEach(w=>{
     const s=priStatus(w.statusRaw);
     if(s.guessed)guessed++;
@@ -5926,6 +6330,55 @@ function priBuild(scan,ctx,map,opts){
       serialFilled++;
     }
     serialTotal+=serials.length;
+
+    // ── progress ────────────────────────────────────────────────────────
+    // Priority already knows how far each operation got: כמות מדווחת is how many
+    // units were reported through it, יתרה לבצוע how many are still owed. The app
+    // holds the same fact in a different shape — one completed work log per unit
+    // per stage — and *that* is what every progress bar, unit count, WIP figure
+    // and remaining-work estimate reads. Without this translation a פק"ע that is
+    // three quarters built arrives looking untouched, and a whole ERP's worth of
+    // history reads as "everything is open".
+    //
+    // Which physical unit did what is not in the file; how many did, is. So the
+    // units are taken from the front of the list — operations report
+    // non-increasing counts down the route, which makes unit #1 the furthest
+    // along and keeps the picture consistent from stage to stage.
+    if(importProgress&&(s.st==="complete"||w.ops.some(op=>op.reported>0||op.remain>0))){
+      if(!serials.length)progNoSerials++;
+      else{
+        const perStage=new Map();
+        w.ops.forEach(op=>{
+          const sid=stageOf.get(op.key);if(!sid)return;
+          // The reported count is the direct answer. Where Priority left it blank
+          // but did fill in a remainder, "ordered minus what is left" says the
+          // same thing; a remainder of zero is too often an empty cell to trust.
+          let n=op.reported>0?op.reported:((w.qty>0&&op.remain>0&&op.remain<w.qty)?w.qty-op.remain:0);
+          n=Math.floor(n);
+          if(!(n>0))return;
+          if(n>serials.length)progClamped++;
+          perStage.set(sid,Math.max(perStage.get(sid)||0,Math.min(n,serials.length)));
+        });
+        // A פק"ע Priority calls closed has, by definition, been through its whole
+        // route — even when the operation counters in the export are blank.
+        if(s.st==="complete")ids.forEach(sid=>perStage.set(sid,serials.length));
+        let k=0;
+        perStage.forEach((n,sid)=>{
+          for(let u=0;u<n;u++){
+            const sr=serials[u];
+            logs.push({id:`${oid}p${k++}`,userId:PRI_LOG_USER,userName:PRI_LOG_NAME,
+              serialId:sr.id,serialSn:sr.sn,stageId:sid,orderId:oid,
+              startTime:priStamp(w.release),endTime:priStamp(w.release),completed:true,
+              // Deliberately zero: the file says a unit passed the stage, never how
+              // long it took, and a made-up duration would poison זמן בפועל.
+              durationMin:0,paused:false,pauseStart:null,totalPauseMin:0,pauseLog:[],
+              bulk:false,bulkGroupId:null,bulkCount:null});
+          }
+        });
+        if(k)progWos++;
+      }
+    }
+
     orders.push({id:oid,woNumber:w.wo,pn:w.pn,description:w.desc,qty:w.qty,unitPrice:w.price,
       projectId:projectOf(w.project),receivedDate:w.release,targetDate:w.endDate,status:s.st,
       stageIds:ids,serials,shortages:[],defects:[],deliveredSerials:[],
@@ -5973,15 +6426,18 @@ function priBuild(scan,ctx,map,opts){
   if(closedSkipped)addIssue("info",`${closedSkipped} פק"ע סגורות (COC / נסגרה) לא יובאו`);
   if(scan.skipped)addIssue("info",`${scan.skipped} שורות ללא מספר פק"ע — דולגו`);
   if(serialCapped)addIssue("warn",`${serialCapped} פק"ע קיבלו פחות סידוריים מהכמות בגלל התקרה`);
+  if(progNoSerials)addIssue("warn",`${progNoSerials} פק"ע עם התקדמות בקובץ אך ללא סידוריים — ההתקדמות לא נרשמה. סמן ״השלם סידוריים״ כדי לקלוט גם אותה`);
+  if(progClamped)addIssue("info",`${progClamped} פעולות דיווחו יותר יחידות ממספר הסידוריים בפק"ע — נרשמו עד מספר הסידוריים`);
   const sn=scan.serials||{};
   if(sn.orphan)addIssue("warn",`${sn.orphan} שורות בגיליון הסידוריים ללא פק"ע מתאימה — דולגו`);
   if(sn.dup)addIssue("warn",`${sn.dup} סידוריים כפולים באותה פק"ע — דולגו`);
   if(sn.pnMismatch)addIssue("info",`${sn.pnMismatch} סידוריים עם מק"ט שונה מזה שבגיליון הפעולות — נלקח המק"ט של הפק"ע`);
 
-  return{mode:"priority",orders,newStages,newProjects,stds,issues,opStage:Object.fromEntries(stageOf),
+  return{mode:"priority",orders,newStages,newProjects,stds,logs,issues,opStage:Object.fromEntries(stageOf),
     stats:{orders:orders.length,rows:scan.rows,ops:scan.ops.length,mapped:stageOf.size,
       serials:serialTotal,serialWos:fromSheet,serialFilled,sheetSerials:(scan.serials||{}).rows||0,
-      defects:0,shortages:0,
+      defects:0,shortages:0,logs:logs.length,progWos,progNoSerials,
+      byStatus:orders.reduce((m,o)=>{m[o.status]=(m[o.status]||0)+1;return m},{}),
       newStages:newStages.length,newProjects:newProjects.length,stds:stds.length,closedSkipped}};
 }
 const XL_STAT_IN={"פתוחה":"open","פתוח":"open","open":"open","חלקית":"partial","חלקי":"partial","partial":"partial",
@@ -6103,9 +6559,47 @@ function doImport(file,ctx,cb){
       nSh++;
     });
 
+    // התקדמות
+    // The app stores progress as one completed work log per unit per stage; the
+    // sheet states it per stage ("twelve units cleared הלחמה"), which is the only
+    // shape a person can reasonably fill in. Units are taken from the front of the
+    // order's list, so a unit that cleared a later stage also shows the earlier
+    // ones — the same convention the Priority import uses.
+    const logs=[],logSeen=new Set();let nProg=0;
+    rowsOf(xlPickSheet(wb,["התקדמות","progress","ביצוע"])).forEach((r,i)=>{
+      const wo=String(xlGet(r,'פק"ע','מספר פק"ע',"פקע","WO")||"").trim();
+      const stName=String(xlGet(r,"שלב","stage")||"").trim();
+      const qtyRaw=xlGet(r,"כמות שהושלמה","כמות","completed");
+      if(!wo&&!stName)return;
+      const o=oMap[wo];
+      if(!o){orphan("התקדמות",wo,i);return}
+      const sid=stgByName.get(xlNorm(stName));
+      if(!sid){issues.push({level:"warn",msg:`התקדמות שורה ${i+2}: השלב ״${stName}״ לא קיים במערכת — דולג`});return}
+      if(!(o.stageIds||[]).includes(sid)){issues.push({level:"warn",msg:`התקדמות שורה ${i+2}: השלב ״${stName}״ אינו במסלול של פק"ע ${wo} — דולג`});return}
+      if(!o.serials.length){issues.push({level:"warn",msg:`התקדמות שורה ${i+2}: לפק"ע ${wo} אין סידוריים, ובלעדיהם אי אפשר לרשום התקדמות`});return}
+      let n=Math.floor(xlNum(qtyRaw));
+      if(!(n>0))return;
+      if(n>o.serials.length){issues.push({level:"info",msg:`התקדמות שורה ${i+2}: ${n} יחידות מול ${o.serials.length} סידוריים בפק"ע ${wo} — נרשמו ${o.serials.length}`});n=o.serials.length}
+      for(let k=0;k<n;k++){
+        const sr=o.serials[k];
+        // The same stage listed twice for one פק"ע adds nothing the first row did not.
+        if(logSeen.has(logKey(sr.id,sid)))continue;
+        logSeen.add(logKey(sr.id,sid));
+        logs.push({id:uid(),userId:PRI_LOG_USER,userName:XL_LOG_NAME,serialId:sr.id,serialSn:sr.sn,
+          stageId:sid,orderId:o.id,startTime:priStamp(o.receivedDate),endTime:priStamp(o.receivedDate),
+          completed:true,durationMin:0,paused:false,pauseStart:null,totalPauseMin:0,pauseLog:[],
+          bulk:false,bulkGroupId:null,bulkCount:null});
+      }
+      nProg++;
+    });
+
     list.forEach(o=>{if(o.serials.length&&o.qty&&o.serials.length!==o.qty)
       issues.push({level:"info",msg:`פק"ע ${o.woNumber}: ${o.serials.length} סידוריים מול כמות ${o.qty}`})});
-    cb({orders:list,issues,stats:{orders:list.length,serials:nSer,defects:nDef,shortages:nSh}},null);
+    if(!logs.length&&list.some(o=>(o.status||"open")!=="open"))
+      issues.push({level:"info",msg:'יש פק"ע שאינן ״פתוחה״ אך גיליון ״התקדמות״ ריק — הן ייכנסו עם סרגל התקדמות 0%'});
+    cb({orders:list,logs,issues,stats:{orders:list.length,serials:nSer,defects:nDef,shortages:nSh,
+      logs:logs.length,progRows:nProg,
+      byStatus:list.reduce((m,o)=>{m[o.status]=(m[o.status]||0)+1;return m},{})}},null);
   }catch(err){cb(null,"שגיאה בקריאת הקובץ: "+err.message)}};
   fr.readAsArrayBuffer(file);
 }
@@ -6118,7 +6612,7 @@ const ChkOpt=({checked,onChange,label,hint,color="#10b981"})=>(
   </label>
 );
 
-function ExcelTab({orders,projects,stages,stageBlocks,workLogs,users,customTasks,dailyPlans,departments,pnStandards,updO,updP,updS,importPnStds,canImport}){
+function ExcelTab({orders,projects,stages,stageBlocks,workLogs,users,customTasks,dailyPlans,departments,pnStandards,updO,updP,updS,importPnStds,importWorkLogs,canImport}){
   const {toast}=useToast();
   const [res,setRes]=useState(null);const[mode,setMode]=useState("replace");const[drag,setDrag]=useState(false);
   const [showIssues,setShowIssues]=useState(false);
@@ -6127,7 +6621,10 @@ function ExcelTab({orders,projects,stages,stageBlocks,workLogs,users,customTasks
   // different stage rebuilds the orders without touching the file again.
   const [pri,setPri]=useState(null);
   const [priMap,setPriMap]=useState({});
-  const [priOpts,setPriOpts]=useState({onlyOpen:true,makeStages:true,makeProjects:true,importStd:true,fillSerials:false,serialMax:100});
+  // Skipping closed פק"ע used to be the default, which quietly threw away every
+  // סגורה in the file — the import looked like it worked and the history was gone.
+  // Now everything in the file comes in, and dropping the closed ones is a choice.
+  const [priOpts,setPriOpts]=useState({onlyOpen:false,makeStages:true,makeProjects:true,importStd:true,fillSerials:false,serialMax:100,importProgress:true});
   const [showMap,setShowMap]=useState(false);const[mapQ,setMapQ]=useState("");
   const setOpt=(k,v)=>setPriOpts(p=>({...p,[k]:v}));
   const priRes=useMemo(()=>pri?priBuild(pri.scan,{projects,stages,pnStandards},priMap,priOpts):null,
@@ -6153,12 +6650,14 @@ function ExcelTab({orders,projects,stages,stageBlocks,workLogs,users,customTasks
   // otherwise the next sync pulls the replaced orders straight back in.
   const commitOrders=list=>{
     LS.set("importSnapshot",JSON.parse(JSON.stringify(orders)));
+    let gone=[];
     if(mode==="replace"){
       const keep=new Set(list.map(o=>o.id));
-      const gone=orders.filter(o=>!keep.has(o.id)).map(o=>o.id);
+      gone=orders.filter(o=>!keep.has(o.id)).map(o=>o.id);
       if(gone.length)SB.delIds("orders",gone).catch(e=>console.warn("order cleanup skipped",e));
     }
     updO(prev=>mode==="replace"?list:[...prev,...list]);
+    return gone;
   };
 
   const applyPri=()=>{
@@ -6174,12 +6673,16 @@ function ExcelTab({orders,projects,stages,stageBlocks,workLogs,users,customTasks
     LS.set(PRI_MAP_LS,saved);
     if(r.newStages.length&&updS)updS(prev=>[...prev,...r.newStages]);
     if(r.newProjects.length&&updP)updP(prev=>[...prev,...r.newProjects]);
-    commitOrders(r.orders.map(({_pri,...o})=>o));
+    const gone=commitOrders(r.orders.map(({_pri,...o})=>o));
+    // The progress rides along with the orders it belongs to — and in "replace"
+    // mode the logs of the orders that just went away go with them, or the next
+    // sync pulls back progress for units that no longer exist.
+    if(importWorkLogs&&(r.logs.length||gone.length))importWorkLogs(r.logs,gone);
     if(r.stds.length&&importPnStds)importPnStds(r.stds);
     addAuditEntry({userId:"admin",username:"admin",name:"מנהל",action:"ייבוא Priority",
       target:`${r.orders.length} פקעות`,
-      details:`${mode==="replace"?"החלפה":"הוספה"} | ${r.stats.newStages} שלבים חדשים | ${r.stats.newProjects} פרויקטים | ${r.stats.stds} זמני תקן | ${r.stats.serials} סידוריים (${r.stats.serialWos} מהקובץ, ${r.stats.serialFilled} הושלמו)`,canUndo:true});
-    setPri(null);toast(`יובאו ${r.orders.length} פק"ע מ-Priority`,"success");
+      details:`${mode==="replace"?"החלפה":"הוספה"} | ${r.stats.newStages} שלבים חדשים | ${r.stats.newProjects} פרויקטים | ${r.stats.stds} זמני תקן | ${r.stats.serials} סידוריים (${r.stats.serialWos} מהקובץ, ${r.stats.serialFilled} הושלמו) | ${r.stats.logs} רישומי התקדמות ב-${r.stats.progWos} פק"ע`,canUndo:true});
+    setPri(null);toast(`יובאו ${r.orders.length} פק"ע מ-Priority · ${r.stats.logs.toLocaleString()} רישומי התקדמות`,"success");
   };
 
   const exportCtx={orders,projects,stages,stageBlocks,workLogs,users,customTasks,dailyPlans,departments,pnStandards};
@@ -6196,7 +6699,7 @@ function ExcelTab({orders,projects,stages,stageBlocks,workLogs,users,customTasks
       <Card style={{marginBottom:14}}>
         <div style={{fontWeight:700,marginBottom:6}}>📤 ייצוא דוח מלא</div>
         <div style={{fontSize:13,color:"var(--c-muted)",marginBottom:10}}>
-          15 גיליונות מעוצבים: סיכום כללי · פקודות עבודה · סידוריים · תקלות · חוסרים · לוג עבודה · משימות · תוכניות עבודה · ביצועי עובדים · זמן תקן מול בפועל · הגדרות זמן תקן · שלבים · בלוקים · עובדים · מחלקות
+          16 גיליונות מעוצבים: סיכום כללי · פקודות עבודה · סידוריים · תקלות · חוסרים · התקדמות · לוג עבודה · משימות · תוכניות עבודה · ביצועי עובדים · זמן תקן מול בפועל · הגדרות זמן תקן · שלבים · בלוקים · עובדים · מחלקות
         </div>
         <div style={{display:"flex",gap:12,flexWrap:"wrap",marginBottom:12,fontSize:11.5,color:"var(--c-dim)"}}>
           <span>📋 {orders.length} פק"ע</span><span>🏷️ {orders.reduce((s,o)=>s+(o.serials||[]).length,0)} סידוריים</span>
@@ -6209,10 +6712,10 @@ function ExcelTab({orders,projects,stages,stageBlocks,workLogs,users,customTasks
         <div style={{fontWeight:700,marginBottom:6}}>📄 תבנית ריקה למילוי</div>
         <div style={{fontSize:13,color:"var(--c-muted)",marginBottom:10}}>
           קובץ עם ראשי עמודות מוכנים ומותאמים בדיוק לשאיבת נתונים לתוך האפליקציה — כולל גיליון הוראות, דוגמה למילוי ורשימות הערכים החוקיים (הפרויקטים והשלבים שמוגדרים אצלכם).
-          פשוט מורידים, ממלאים ומעלים חזרה.
+          פשוט מורידים, ממלאים ומעלים חזרה. גיליון ״התקדמות״ הוא מה שמונע מהפק"ע להיכנס ב-0% — מלאו בו כמה יחידות כבר עברו כל שלב.
         </div>
         <div style={{display:"flex",gap:7,flexWrap:"wrap",marginBottom:12}}>
-          {["פקודות עבודה","סידוריים","תקלות","חוסרים"].map(n=>(
+          {["פקודות עבודה","סידוריים","תקלות","חוסרים","התקדמות"].map(n=>(
             <span key={n} style={{fontSize:11.5,background:"var(--c-deep)",border:"1px solid var(--c-border)",borderRadius:14,padding:"3px 11px",color:"var(--c-muted)"}}>{n}</span>
           ))}
         </div>
@@ -6231,7 +6734,7 @@ function ExcelTab({orders,projects,stages,stageBlocks,workLogs,users,customTasks
         <div className={`dz${drag?" drag":""}`} onDragOver={e=>{e.preventDefault();setDrag(true)}} onDragLeave={()=>setDrag(false)} onDrop={e=>{e.preventDefault();setDrag(false);handleFile(e.dataTransfer.files[0])}} onClick={()=>{const inp=document.createElement("input");inp.type="file";inp.accept=".xlsx,.xls";inp.onchange=ev=>handleFile(ev.target.files[0]);inp.click()}}>
           <div style={{fontSize:36,marginBottom:8}}>📁</div>
           <div style={{fontWeight:600,marginBottom:4}}>גרור קובץ Excel לכאן או לחץ לבחירה</div>
-          <div style={{fontSize:12,color:"var(--c-dim)"}}>תבנית האפליקציה (פקודות עבודה · סידוריים · תקלות · חוסרים) או דוח פק"ע מ-Priority — הפורמט מזוהה אוטומטית</div>
+          <div style={{fontSize:12,color:"var(--c-dim)"}}>תבנית האפליקציה (פקודות עבודה · סידוריים · תקלות · חוסרים · התקדמות) או דוח פק"ע מ-Priority — הפורמט מזוהה אוטומטית</div>
         </div>
 
         {/* ── Priority ───────────────────────────────────────────────────── */}
@@ -6251,15 +6754,36 @@ function ExcelTab({orders,projects,stages,stageBlocks,workLogs,users,customTasks
               [`${priRes.stats.newStages} שלבים חדשים`,priRes.stats.newStages?"#f59e0b":"#8b95a8"],
               [`${priRes.stats.newProjects} פרויקטים חדשים`,priRes.stats.newProjects?"#f59e0b":"#8b95a8"],
               [`${priRes.stats.stds} מק"טים עם זמן תקן`,"#10b981"],
-              [`${priRes.stats.serials.toLocaleString()} סידוריים ב-${priRes.stats.serialWos+priRes.stats.serialFilled} פק"ע`,priRes.stats.serials?"#3b82f6":"#8b95a8"]].map(([t,c])=>(
+              [`${priRes.stats.serials.toLocaleString()} סידוריים ב-${priRes.stats.serialWos+priRes.stats.serialFilled} פק"ע`,priRes.stats.serials?"#3b82f6":"#8b95a8"],
+              [`${priRes.stats.logs.toLocaleString()} רישומי התקדמות ב-${priRes.stats.progWos} פק"ע`,priRes.stats.logs?"#06b6d4":"#8b95a8"]].map(([t,c])=>(
               <span key={t} style={{background:c+"1a",color:c,border:`1px solid ${c}44`,borderRadius:14,padding:"3px 11px",fontWeight:600}}>{t}</span>
             ))}
           </div>
 
+          {/* What the file says about status, before it is imported — this is the
+              answer to "where did all the closed ones go" without having to look. */}
+          <div style={{background:"var(--c-deep)",border:"1px solid var(--c-border)",borderRadius:10,padding:"9px 13px",marginBottom:12}}>
+            <div style={{fontWeight:700,fontSize:12.5,marginBottom:6}}>סטטוס הפק"ע שייכנסו</div>
+            <div style={{display:"flex",gap:7,flexWrap:"wrap"}}>
+              {ST_ORDER.map(k=>{const n=priRes.stats.byStatus[k]||0;const c=SC[k];return(
+                <span key={k} style={{background:c+"1a",color:n?c:"var(--c-dim)",border:`1px solid ${c}44`,borderRadius:14,padding:"3px 11px",fontWeight:600,fontSize:12}}>{SL[k]} · {n}</span>
+              )})}
+              {priRes.stats.closedSkipped>0&&(
+                <span style={{background:"#f59e0b1a",color:"#f59e0b",border:"1px solid #f59e0b44",borderRadius:14,padding:"3px 11px",fontWeight:600,fontSize:12}}>
+                  ⚠️ {priRes.stats.closedSkipped} סגורות מדולגות
+                </span>
+              )}
+            </div>
+          </div>
+
           <div style={{background:"var(--c-deep)",border:"1px solid var(--c-border)",borderRadius:10,padding:"8px 13px",marginBottom:12}}>
             <div style={{fontWeight:700,fontSize:12.5,marginBottom:2}}>מה נכנס לאפליקציה</div>
-            <ChkOpt checked={priOpts.onlyOpen} onChange={v=>setOpt("onlyOpen",v)} label='דלג על פק"ע סגורות'
-              hint={`סטטוס פקע COC / נסגרה${priRes.stats.closedSkipped?` — ${priRes.stats.closedSkipped} פק"ע`:""}`}/>
+            <ChkOpt checked={priOpts.onlyOpen} onChange={v=>setOpt("onlyOpen",v)} color="#f59e0b" label='דלג על פק"ע סגורות'
+              hint={priOpts.onlyOpen
+                ?`פק"ע בסטטוס פקע COC / נסגרה לא ייובאו כלל — ${priRes.stats.closedSkipped} פק"ע יישארו בחוץ`
+                :'כבוי — כל הפק"ע שבקובץ נכנסות, והסגורות נכנסות בסטטוס ״הושלמה״'}/>
+            <ChkOpt checked={priOpts.importProgress} onChange={v=>setOpt("importProgress",v)} label="ייבא התקדמות בייצור"
+              hint='עמודות ״כמות מדווחת״ / ״יתרה לבצוע״ — כל יחידה שדווחה בפעולה נרשמת כשלב שהושלם, כך שסרגלי ההתקדמות באפליקציה מראים את המצב האמיתי ולא 0%'/>
             <ChkOpt checked={priOpts.makeStages} onChange={v=>setOpt("makeStages",v)} label="צור שלבים חסרים"
               hint="פעולה שאין לה שלב מקביל תיפתח כשלב חדש בסוף רשימת השלבים"/>
             <ChkOpt checked={priOpts.makeProjects} onChange={v=>setOpt("makeProjects",v)} label="צור פרויקטים חסרים"
@@ -6319,9 +6843,16 @@ function ExcelTab({orders,projects,stages,stageBlocks,workLogs,users,customTasks
         {/* ── shared preview ─────────────────────────────────────────────── */}
         {cur&&(<div style={{marginTop:14}}>
           {!priRes&&(
-            <div style={{fontWeight:700,color:"#10b981",marginBottom:8}}>
-              ✅ {cur.stats.orders} פק"ע | {cur.stats.serials} סידוריים | {cur.stats.defects} תקלות | {cur.stats.shortages} חוסרים
-            </div>
+            <>
+              <div style={{fontWeight:700,color:"#10b981",marginBottom:8}}>
+                ✅ {cur.stats.orders} פק"ע | {cur.stats.serials} סידוריים | {cur.stats.defects} תקלות | {cur.stats.shortages} חוסרים | {cur.stats.logs||0} רישומי התקדמות
+              </div>
+              <div style={{display:"flex",gap:7,flexWrap:"wrap",marginBottom:10}}>
+                {ST_ORDER.map(k=>{const n=(cur.stats.byStatus||{})[k]||0;const c=SC[k];return(
+                  <span key={k} style={{background:c+"1a",color:n?c:"var(--c-dim)",border:`1px solid ${c}44`,borderRadius:14,padding:"3px 11px",fontWeight:600,fontSize:12}}>{SL[k]} · {n}</span>
+                )})}
+              </div>
+            </>
           )}
           {cur.issues.length>0&&(
             <div style={{marginBottom:10,background:"var(--c-deep)",border:`1px solid ${errCount?"#f59e0b55":"var(--c-border)"}`,borderRadius:9,padding:"9px 12px"}}>
@@ -6358,9 +6889,10 @@ function ExcelTab({orders,projects,stages,stageBlocks,workLogs,users,customTasks
           <div style={{display:"flex",gap:10,alignItems:"center",flexWrap:"wrap"}}>
             <Btn color="#10b981" disabled={!cur.orders.length} onClick={()=>{
               if(priRes){applyPri();return}
-              commitOrders(res.orders);
-              addAuditEntry({userId:"admin",username:"admin",name:"מנהל",action:"ייבוא Excel",target:`${res.orders.length} פקעות`,details:`${mode==="replace"?"החלפה":"הוספה"} | ${res.stats.serials} סידוריים | ${res.stats.defects} תקלות | ${res.stats.shortages} חוסרים`,canUndo:true});
-              setRes(null);toast("הנתונים יובאו בהצלחה","success")}}>✅ אשר ייבוא ({cur.orders.length})</Btn>
+              const gone=commitOrders(res.orders);
+              if(importWorkLogs&&((res.logs||[]).length||gone.length))importWorkLogs(res.logs||[],gone);
+              addAuditEntry({userId:"admin",username:"admin",name:"מנהל",action:"ייבוא Excel",target:`${res.orders.length} פקעות`,details:`${mode==="replace"?"החלפה":"הוספה"} | ${res.stats.serials} סידוריים | ${res.stats.defects} תקלות | ${res.stats.shortages} חוסרים | ${res.stats.logs} רישומי התקדמות`,canUndo:true});
+              setRes(null);toast(`הנתונים יובאו בהצלחה${res.stats.logs?` · ${res.stats.logs} רישומי התקדמות`:""}`,"success")}}>✅ אשר ייבוא ({cur.orders.length})</Btn>
             <Btn onClick={clearAll}>ביטול</Btn>
             {priRes&&cur.orders.length>500&&<span style={{fontSize:11.5,color:"var(--c-dim)"}}>ייבוא גדול — השמירה לענן עשויה לקחת מספר שניות</span>}
           </div>
@@ -6644,7 +7176,8 @@ function LiveFactoryBoard({orders,workLogs,stages,customTasks,users,departments,
   activeTasks.forEach(t=>{(liveByUser[t.userId]=liveByUser[t.userId]||{logs:[],tasks:[]}).tasks.push(t)});
   const userStatus=uid=>{const lv=liveByUser[uid];if(!lv)return"idle";const anyW=lv.logs.some(l=>!l.paused),anyT=lv.tasks.some(t=>!t.paused);return anyW?"working":anyT?"task":(lv.logs.length||lv.tasks.length)?"break":"idle"};
 
-  const isSerDone=(o,s)=>{const st=o.stageIds||[];return st.length>0&&st.every(sid=>workLogs.some(w=>w.serialId===s.id&&w.stageId===sid&&w.completed))};
+  const liveDoneIdx=useDoneIndex(workLogs);
+  const isSerDone=(o,s)=>{const st=o.stageIds||[];return st.length>0&&st.every(sid=>liveDoneIdx.has(logKey(s.id,sid)))};
   const remainingUnits=o=>Math.max(0,(o.serials||[]).length-(o.serials||[]).filter(sr=>isSerDone(o,sr)).length);
   const doneUnits=o=>(o.serials||[]).filter(sr=>isSerDone(o,sr)).length;
 
@@ -7532,8 +8065,8 @@ function App(){
             const cf=`company_id=eq.${_companyId}&`;
             // apply() re-checks the guard — a click may have happened during the fetch
             const apply=(setter,lsKey,rows)=>{if(remoteApplyBlocked())return;setter(rows);LS.set(lsKey,rows)};
-            if(["orders"].includes(tbl)){const rows=(await SB.get("orders",cf+"order=created_at.asc")).map(dbToOrder);apply(setOrders,"orders",rows)}
-            if(["work_logs"].includes(tbl)){const rows=(await SB.get("work_logs",cf+"order=created_at.asc")).map(dbToLog);apply(setWorkLogs,"workLogs",rows)}
+            if(["orders"].includes(tbl)){const rows=(await SB.getAll("orders",cf+ORDER_BY.orders)).map(dbToOrder);SYNC.prime("orders",rows,orderToDb);apply(setOrders,"orders",rows)}
+            if(["work_logs"].includes(tbl)){const rows=(await SB.getAll("work_logs",cf+ORDER_BY.work_logs)).map(dbToLog);SYNC.prime("work_logs",rows,logToDb);apply(setWorkLogs,"workLogs",rows)}
             if(["custom_tasks"].includes(tbl)){const rows=(await SB.get("custom_tasks",cf+"order=created_at.asc")).map(dbToTask);apply(setCustomTasks,"customTasks",rows)}
             if(["stages"].includes(tbl)){const rows=(await SB.get("stages",cf+"order=stage_order.asc")).map(dbToStage);apply(setStages,"stages",rows)}
             if(["projects"].includes(tbl)){const rows=(await SB.get("projects",cf+"order=name.asc")).map(dbToProject);apply(setProjects,"projects",rows)}
@@ -7574,18 +8107,20 @@ function App(){
     saveRunningRef.current=true;
     pendingSaveRef.current=false;
     try{
+      // Only rows whose content actually changed go out — see SYNC. On an ordinary
+      // click that is a single row; right after an import it is everything, once.
       await Promise.all([
-        SB.upsert("orders",oRef.current.map(orderToDb)),
-        SB.upsert("projects",pRef.current.map(projectToDb)),
-        SB.upsert("stages",sRef.current.map(stageToDb)),
-        SB.upsert("stage_blocks",sbRef.current.map(blockToDb)),
-        SB.upsert("work_logs",wRef.current.map(logToDb)),
-        SB.upsert("custom_tasks",ctRef.current.map(taskToDb)),
-        SB.upsert("departments",dpRef.current.map(deptToDb)),
-        SB.upsert("daily_plans",plRef.current.map(planToDb)),
+        SB.upsertChanged("orders",oRef.current.map(orderToDb)),
+        SB.upsertChanged("projects",pRef.current.map(projectToDb)),
+        SB.upsertChanged("stages",sRef.current.map(stageToDb)),
+        SB.upsertChanged("stage_blocks",sbRef.current.map(blockToDb)),
+        SB.upsertChanged("work_logs",wRef.current.map(logToDb)),
+        SB.upsertChanged("custom_tasks",ctRef.current.map(taskToDb)),
+        SB.upsertChanged("departments",dpRef.current.map(deptToDb)),
+        SB.upsertChanged("daily_plans",plRef.current.map(planToDb)),
         // Standard times live in their own (newer) table — if it hasn't been created
         // yet the rest of the save must still succeed; the local cache keeps them.
-        SB.upsert("pn_standards",psRef.current.map(pnStdToDb)).catch(e=>console.warn("pn_standards save skipped",e)),
+        SB.upsertChanged("pn_standards",psRef.current.map(pnStdToDb)).catch(e=>console.warn("pn_standards save skipped",e)),
       ]);
       lastPersistRef.current=Date.now();
       setSync("ok");
@@ -7596,12 +8131,25 @@ function App(){
     }finally{saveRunningRef.current=false}
   };
   doSaveRef.current=doSave;
+  // What each cache key was last written from, so an unchanged collection is
+  // skipped instead of re-serialised.
+  const lsSeen=useRef({});
+  const cacheLS=(key,val)=>{
+    if(lsSeen.current[key]===val)return;
+    lsSeen.current[key]=val;
+    LS.set(key,val);
+  };
   const persist=(no,np,ns,nw,nct,nsb,ndp,npl,nps)=>{
     const o=no??oRef.current,p=np??pRef.current,s=ns??sRef.current,w=nw??wRef.current,ct=nct??ctRef.current,sb=nsb??sbRef.current,dp=ndp??dpRef.current,pl=npl??plRef.current,ps=nps??psRef.current;
     // Refs lag one render behind the state — sync them now so doSave sees this change
     oRef.current=o;pRef.current=p;sRef.current=s;wRef.current=w;ctRef.current=ct;sbRef.current=sb;dpRef.current=dp;plRef.current=pl;psRef.current=ps;
-    // Always save to localStorage immediately
-    LS.set("orders",o);LS.set("projects",p);LS.set("stages",s);LS.set("workLogs",w);LS.set("customTasks",ct);LS.set("stageBlocks",sb);LS.set("departments",dp);LS.set("dailyPlans",pl);LS.set("pnStandards",ps);
+    // Save to localStorage immediately — but only the collections that actually
+    // changed. These arrays are replaced, never mutated, so an identity check is
+    // enough, and it keeps a single click from re-serialising every פק"ע, every
+    // סידורי and every רישום התקדמות in the company.
+    cacheLS("orders",o);cacheLS("projects",p);cacheLS("stages",s);cacheLS("workLogs",w);
+    cacheLS("customTasks",ct);cacheLS("stageBlocks",sb);cacheLS("departments",dp);
+    cacheLS("dailyPlans",pl);cacheLS("pnStandards",ps);
     lastPersistRef.current=Date.now();
     pendingSaveRef.current=true;
     setSync("saving");clearTimeout(saveTimer);
@@ -7614,6 +8162,7 @@ function App(){
     setCompanyId(cid);
     // If company changed — clear stale cache immediately so no data leaks between companies
     if(cid!==prevCid){
+      SYNC.reset();
       setOrders([]);setProjects(DEF_PROJ);setStages(DEF_STAGES);setWorkLogs([]);setCustomTasks([]);setStageBlocks([]);setDepartments([]);setDailyPlans([]);setPnStandards([]);
       ["orders","projects","stages","workLogs","customTasks","stageBlocks","departments","dailyPlans","pnStandards"].forEach(k=>{try{localStorage.removeItem(LS_PREFIX+k)}catch{}});
     }
@@ -7718,6 +8267,24 @@ function App(){
     addAuditEntry({userId:currentUser?.id,username:currentUser?.username,name:currentUser?.name,
       action:"ייבוא זמני תקן",target:`${list.length} מק"טים`,details:"ייבוא מ-Excel"});
   },[currentUser]);
+  // Bulk import of progress: the completed work logs an ERP export implies, one
+  // per unit per stage. `dropOrderIds` is the list of orders a "replace all"
+  // import just removed — their logs go with them, here and on the server, or the
+  // next sync pulls back progress for units that no longer exist.
+  const importWorkLogs=useCallback((logs,dropOrderIds)=>{
+    const add=(logs||[]).filter(w=>w&&w.serialId&&w.stageId);
+    const drop=(dropOrderIds&&dropOrderIds.length)?new Set(dropOrderIds):null;
+    if(!add.length&&!drop)return;
+    setWorkLogs(prev=>{
+      const gone=drop?prev.filter(w=>drop.has(w.orderId)):[];
+      const next=drop?[...prev.filter(w=>!drop.has(w.orderId)),...add]:[...prev,...add];
+      persist(null,null,null,next);
+      if(gone.length)SB.delIds("work_logs",gone.map(w=>w.id)).catch(e=>console.warn("log cleanup skipped",e));
+      return next;
+    });
+    if(add.length)addAuditEntry({userId:currentUser?.id,username:currentUser?.username,name:currentUser?.name,
+      action:"ייבוא התקדמות",target:`${add.length} רישומים`,details:"נגזר מכמות מדווחת בקובץ הייבוא"});
+  },[currentUser]);
   const deletePnStd=useCallback((pn)=>{
     const k=pnKey(pn);
     setPnStandards(prev=>{
@@ -7737,10 +8304,11 @@ function App(){
     const sers=order.serials||[];if(!sers.length)return;
     const oSt=order.stageIds||[];if(!oSt.length)return;
     const delivered=new Set(order.deliveredSerials||[]);
+    const doneIdx=buildDoneIndex(nextLogs);
     let changed=false;
     sers.forEach(sr=>{
       if(delivered.has(sr.id))return;
-      const allDone=oSt.every(sid=>nextLogs.some(w=>w.serialId===sr.id&&w.stageId===sid&&w.completed));
+      const allDone=oSt.every(sid=>doneIdx.has(logKey(sr.id,sid)));
       if(allDone){delivered.add(sr.id);changed=true}
     });
     if(changed){
@@ -8112,8 +8680,9 @@ function App(){
         {tab==="stages"&&isAdmin&&<StagesManagement stages={stages} setStages={setStages} stageBlocks={stageBlocks} setStageBlocks={setStageBlocks} persist={persist}/>}
         {tab==="projects"&&<Projects projects={filteredProjects} orders={filteredOrders} updP={updP} stages={stages} workLogs={filteredWorkLogs}/>}
         {tab==="reports"&&(isAdmin||isDeptMgr||isLead)&&<TeamReports users={visibleUsers} workLogs={filteredWorkLogs} orders={filteredOrders} stages={stages} stageBlocks={stageBlocks} projects={filteredProjects} customTasks={visibleTasks} dailyPlans={visiblePlans} departments={visibleDepartments} pnStandards={pnStandards}/>}
-        {tab==="excel"&&(isAdmin||isDeptMgr)&&<ExcelTab orders={filteredOrders} projects={filteredProjects} stages={stages} stageBlocks={stageBlocks} workLogs={filteredWorkLogs} users={visibleUsers} customTasks={visibleTasks} dailyPlans={visiblePlans} departments={visibleDepartments} pnStandards={pnStandards} updO={updO} updP={updP} updS={updS} importPnStds={importPnStds} canImport={isAdmin}/>}
+        {tab==="excel"&&(isAdmin||isDeptMgr)&&<ExcelTab orders={filteredOrders} projects={filteredProjects} stages={stages} stageBlocks={stageBlocks} workLogs={filteredWorkLogs} users={visibleUsers} customTasks={visibleTasks} dailyPlans={visiblePlans} departments={visibleDepartments} pnStandards={pnStandards} updO={updO} updP={updP} updS={updS} importPnStds={importPnStds} importWorkLogs={importWorkLogs} canImport={isAdmin}/>}
       </main>
+      <FastScroll/>
       {showInstall&&<InstallBanner onInstall={handleInstall} onDismiss={()=>setShowInstall(false)} lm={lm}/>}
       {showAdmin&&isAdmin&&<AdminPanel projects={projects} stages={stages} onClose={()=>setShowAdmin(false)} lightMode={lightMode} updO={updO} departments={departments} updD={updD}/>}
       {showAlerts&&<AlertsPanel orders={filteredOrders} stages={stages} workLogs={filteredWorkLogs} users={visibleUsers} onClose={()=>setShowAlerts(false)} dismissedAlerts={dismissedAlerts} onDismissAll={ids=>setDismissedAlerts(prev=>[...new Set([...prev,...ids])])}/>}
