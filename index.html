@@ -287,16 +287,30 @@ async function sha256(str){
 let _companyId=DEFAULT_COMPANY_ID;
 function setCompanyId(id){_companyId=id||DEFAULT_COMPANY_ID}
 function sbHeaders(){return{...SB_H,"x-company-id":_companyId}}
+const SB_CHUNK=200;
 const SB={
   async get(table,params=""){
     const r=await fetch(`${SB_URL}/rest/v1/${table}?${params}`,{headers:{...sbHeaders(),"Range":"0-9999"}});
     if(!r.ok)throw new Error(await r.text());return r.json();
   },
+  // Sent in chunks: an Excel import can hand over a couple of thousand orders at
+  // once, and one request that size is refused long before the data is at fault.
   async upsert(table,data){
     const arr=Array.isArray(data)?data:[data];
     if(arr.length===0)return; // Skip empty upserts
-    const r=await fetch(`${SB_URL}/rest/v1/${table}`,{method:"POST",headers:{...sbHeaders(),"Prefer":"resolution=merge-duplicates,return=minimal"},body:JSON.stringify(arr)});
-    if(!r.ok)throw new Error(await r.text());
+    for(let i=0;i<arr.length;i+=SB_CHUNK){
+      const r=await fetch(`${SB_URL}/rest/v1/${table}`,{method:"POST",headers:{...sbHeaders(),"Prefer":"resolution=merge-duplicates,return=minimal"},body:JSON.stringify(arr.slice(i,i+SB_CHUNK))});
+      if(!r.ok)throw new Error(await r.text());
+    }
+  },
+  // Deletes by id in batches — used when an import replaces the whole order list.
+  async delIds(table,ids){
+    const list=[...new Set((ids||[]).filter(Boolean))];
+    for(let i=0;i<list.length;i+=SB_CHUNK){
+      const q=list.slice(i,i+SB_CHUNK).map(encodeURIComponent).join(",");
+      const r=await fetch(`${SB_URL}/rest/v1/${table}?id=in.(${q})`,{method:"DELETE",headers:sbHeaders()});
+      if(!r.ok)throw new Error(await r.text());
+    }
   },
   async del(table,match){
     const q=Object.entries(match).map(([k,v])=>`${k}=eq.${v}`).join("&");
@@ -5635,8 +5649,12 @@ const xlBool=v=>/^(כן|נמסר|התקבל|בוצע|yes|y|true|1|v|✓)$/i.test
 function xlDate(v){
   if(v==null||v==="")return"";
   if(v instanceof Date&&!isNaN(v))return isoOf(v);
-  if(typeof v==="number"&&isFinite(v)&&v>0)return new Date(Date.UTC(1899,11,30)+Math.round(v)*864e5).toISOString().slice(0,10);
+  // Priority writes "no date" as a plain 0, and a bare "0" would otherwise be
+  // parsed by Date() as the year 2000 — anything non-positive is simply empty.
+  if(typeof v==="number")return(isFinite(v)&&v>0)?new Date(Date.UTC(1899,11,30)+Math.round(v)*864e5).toISOString().slice(0,10):"";
   const s=String(v).trim();
+  // A date column that arrived as text still holds an Excel serial (roughly 1900-2064)
+  if(/^-?\d+(\.\d+)?$/.test(s)){const n=Number(s);return(n>0&&n<60000)?new Date(Date.UTC(1899,11,30)+Math.round(n)*864e5).toISOString().slice(0,10):""}
   let m=s.match(/^(\d{4})[-/.](\d{1,2})[-/.](\d{1,2})/);
   if(m)return`${m[1]}-${String(m[2]).padStart(2,"0")}-${String(m[3]).padStart(2,"0")}`;
   m=s.match(/^(\d{1,2})[-/.](\d{1,2})[-/.](\d{2,4})/);
@@ -5648,6 +5666,266 @@ function xlPickSheet(wb,names){
   for(const n of names){const hit=map.get(xlNorm(n));if(hit)return wb.Sheets[hit]}
   return null;
 }
+// ══════════════════════════════════════════════════════════════════════════
+// ═══ PRIORITY (פריוריטי) ROUTE EXPORT ════════════════════════════════════
+// ══════════════════════════════════════════════════════════════════════════
+// The ERP hands out one flat sheet where every row is a single *operation* of a
+// work order, so a פק"ע with an 8-step route arrives as 8 rows that repeat all of
+// its header fields. The app's model is the other way round — one order carrying
+// its route as a list of stages — so the import folds the rows back up: group by
+// פק"ע, take the header fields from the group, and turn the distinct תאור פעולה
+// values into that order's stages.
+//
+// This is the interim path until Priority is wired up through Engini; nothing
+// here writes back to the ERP.
+const PRI_H={wo:'מספר פק"ע',pn:'מק"ט',desc:'תיאור מוצר',branch:'סניף',project:'פרויקט',qty:'כמות',
+  price:"מחיר אלת'א בש'ח",release:'תאריך שחרור',endDate:'ת. סיום יצור',seq:'שלה בפק"ע',op:'פעולה',
+  opDesc:'תאור פעולה',wc:'מרכז עבודה',reported:'כמות מדווחת',remain:'יתרה לבצוע',
+  stdPn:"ז.תקן ליח' בדק' למקט",stdWo:"ז.תקן ליח' בדק' בפקע",status:'סטטוס פק"ע'};
+// Priority's own סטטוס פק"ע values, folded onto the four statuses the app knows.
+const PRI_STATUS={
+  "פתוחה":"open","הודפסה":"open","שוחררה":"open","ממתין ליצור":"open","קדם יצור":"open",
+  "הועבר לייצור":"open","מאושרת לקיוט":"open",
+  "בתהליך ייצור":"partial","דווח ראשון":"partial","חיווט":"partial","בתהליך סגירה":"partial",
+  "בתהליך בקורת":"partial","בתהליך קיוט":"partial","בקרת יצור":"partial","סיום יצור":"partial",
+  "ביקורת ראשונ":"partial","ביקורת חלקית":"partial","ביקורת סופית":"partial","תהליך מבקר":"partial",
+  "ממתין למבקר":"partial","ממתין לאריזה":"partial","אריזה":"partial","ממתין א.FAI":"partial",
+  "ביצור קבמ":"partial",'מוכן לקב"מ':"partial",
+  "פקע COC":"complete","נסגרה":"complete",
+  "בעיה הנדסית":"blocked",'בעית ח"ג חסר':"blocked","בעית כלי חסר":"blocked","חוסרים ביצור":"blocked",
+  "חוסר נגדי":"blocked","הוקפאה":"blocked","הוחזר לתיקון":"blocked","בטיפול לקוח":"blocked"};
+// Priority statuses get renamed and added to over time, so an unfamiliar one is
+// still placed sensibly instead of silently landing on "open".
+function priStatus(raw){
+  const s=String(raw==null?"":raw).trim();
+  if(!s)return{st:"open",guessed:false};
+  if(PRI_STATUS[s])return{st:PRI_STATUS[s],guessed:false};
+  if(/בעי|חוסר|חסר|הוקפא|מוקפא|תקוע|עיכוב/.test(s))return{st:"blocked",guessed:true};
+  if(/coc|נסגר|הושלמ|בוטל/i.test(s))return{st:"complete",guessed:true};
+  if(/ממתין ליצור|שוחרר|הודפס|פתוח|טרם/.test(s))return{st:"open",guessed:true};
+  return{st:"partial",guessed:true};
+}
+const priNum=v=>{const n=Number(String(v==null?"":v).replace(/[^\d.\-]/g,""));return isFinite(n)?n:0};
+// Priority writes a literal 0 into its code columns (סניף / פרויקט) for "none".
+const priTxt=v=>{const s=String(v==null?"":v).trim();return(s==="0"||s==="-")?"":s};
+const PRI_SKIP="__skip",PRI_NEW="__new",PRI_MAP_LS="priorityStageMap";
+
+// Is this a Priority route export? Judged on the header row alone, so a renamed
+// sheet or an extra column at the end still matches.
+function priDetect(wb){
+  for(const n of wb.SheetNames){
+    const head=(XLSX.utils.sheet_to_json(wb.Sheets[n],{header:1,defval:""})[0]||[]).map(xlNorm);
+    const has=k=>head.includes(xlNorm(k));
+    if(has(PRI_H.wo)&&has(PRI_H.opDesc)&&(has(PRI_H.wc)||has(PRI_H.op)))return wb.Sheets[n];
+  }
+  return null;
+}
+
+// Pass 1 — fold the operation rows into orders and collect the distinct
+// operations, without yet deciding which app stage each one becomes. That
+// decision belongs to the user, and changing it must not re-read the file.
+function priScan(rows){
+  const wos=new Map(),ops=new Map();
+  let skipped=0;
+  rows.forEach((r,i)=>{
+    const wo=String(xlGet(r,PRI_H.wo)||"").trim();
+    if(!wo){skipped++;return}
+    let o=wos.get(wo);
+    if(!o){
+      o={wo,pn:String(xlGet(r,PRI_H.pn)||"").trim(),desc:String(xlGet(r,PRI_H.desc)||"").trim(),
+        project:priTxt(xlGet(r,PRI_H.project)),branch:priTxt(xlGet(r,PRI_H.branch)),
+        qty:priNum(xlGet(r,PRI_H.qty)),price:priNum(xlGet(r,PRI_H.price)),
+        release:xlDate(xlGet(r,PRI_H.release)),endDate:xlDate(xlGet(r,PRI_H.endDate)),
+        statusRaw:String(xlGet(r,PRI_H.status)||"").trim(),row:i+2,ops:[]};
+      wos.set(wo,o);
+    }
+    const name=String(xlGet(r,PRI_H.opDesc)||"").trim();
+    const code=String(xlGet(r,PRI_H.op)||"").trim();
+    const wc=String(xlGet(r,PRI_H.wc)||"").trim();
+    const seq=priNum(xlGet(r,PRI_H.seq));
+    // The מק"ט-level standard is the one the app stores; the פק"ע-level column
+    // only fills in where Priority has no standard for the part itself.
+    const std=priNum(xlGet(r,PRI_H.stdPn))||priNum(xlGet(r,PRI_H.stdWo));
+    o.ops.push({key:xlNorm(name),name,seq,std,code,wc,
+      reported:priNum(xlGet(r,PRI_H.reported)),remain:priNum(xlGet(r,PRI_H.remain))});
+    if(!name)return;
+    let op=ops.get(xlNorm(name));
+    if(!op){op={key:xlNorm(name),name,count:0,seqs:[],codes:new Set(),centers:new Set()};ops.set(op.key,op)}
+    op.count++;
+    if(seq)op.seqs.push(seq);
+    if(code)op.codes.add(code);
+    if(wc)op.centers.add(wc);
+  });
+  // A new stage's place in the route is the sequence number Priority gives that
+  // operation most often — the median, so one odd route can't drag it out of line.
+  const list=[...ops.values()].map(o=>{
+    const s=o.seqs.slice().sort((a,b)=>a-b);
+    return{key:o.key,name:o.name,count:o.count,codes:[...o.codes],centers:[...o.centers],
+      seq:s.length?s[Math.floor(s.length/2)]:0};
+  }).sort((a,b)=>b.count-a.count||a.name.localeCompare(b.name));
+  return{wos:[...wos.values()],ops:list,skipped,rows:rows.length};
+}
+
+// The global running order for the operations in the file.
+//
+// Priority numbers the steps *within* each route (שלה בפק"ע), and those numbers
+// don't line up between routes — the military route counts 20,30,40 over the same
+// ground the civil one calls 10..220. Ordering the new stages by their own numbers
+// would therefore shuffle the families into each other. What every route does
+// agree on is which operation comes *before* which, so the order is read off that:
+// a topological sort of "A precedes B", with the typical step number breaking ties
+// (and freeing the earliest operation whenever routes genuinely contradict).
+function priOpOrder(scan){
+  const keys=scan.ops.map(o=>o.key);
+  const pos=new Map(keys.map((k,i)=>[k,i]));
+  const seqOf=new Map(scan.ops.map(o=>[o.key,o.seq||9999]));
+  const next=new Map();
+  scan.wos.forEach(w=>{
+    const route=[];
+    w.ops.slice().sort((a,b)=>(a.seq||0)-(b.seq||0)).forEach(op=>{if(op.key&&!route.includes(op.key))route.push(op.key)});
+    for(let i=0;i+1<route.length;i++){
+      let set=next.get(route[i]);if(!set){set=new Set();next.set(route[i],set)}
+      set.add(route[i+1]);
+    }
+  });
+  const left=new Set(keys),out=[];
+  while(left.size){
+    const deg=new Map([...left].map(k=>[k,0]));
+    left.forEach(a=>(next.get(a)||[]).forEach(b=>{if(deg.has(b))deg.set(b,deg.get(b)+1)}));
+    let pool=[...left].filter(k=>!deg.get(k));
+    if(!pool.length)pool=[...left];                     // routes disagree — take the earliest step
+    pool.sort((a,b)=>(seqOf.get(a)-seqOf.get(b))||(pos.get(a)-pos.get(b)));
+    left.delete(pool[0]);out.push(pool[0]);
+  }
+  return out;
+}
+
+// Suggested operation → stage mapping: an existing stage of the same name wins,
+// otherwise the operation becomes a new stage. Whatever the user chose on an
+// earlier import beats both — that is the point of saving it.
+function priAutoMap(ops,stages,saved){
+  const byName=new Map((stages||[]).map(s=>[xlNorm(s.name),s.id]));
+  const live=new Set((stages||[]).map(s=>s.id));
+  const m={};
+  (ops||[]).forEach(o=>{
+    const prev=saved&&saved[o.key];
+    if(prev===PRI_SKIP||prev===PRI_NEW||(prev&&live.has(prev))){m[o.key]=prev;return}
+    m[o.key]=byName.get(o.key)||PRI_NEW;
+  });
+  return m;
+}
+
+// Pass 2 — turn the scan plus the user's choices into everything that has to be
+// created: the orders, the stages and projects that don't exist yet, and one
+// זמן תקן record per מק"ט built from the ז.תקן column.
+function priBuild(scan,ctx,map,opts){
+  const {projects=[],stages=[],pnStandards=[]}=ctx||{};
+  const {onlyOpen=false,makeStages=true,makeProjects=true,importStd=true,makeSerials=false,serialMax=100}=opts||{};
+  const issues=[],addIssue=(level,msg)=>{if(issues.length<300)issues.push({level,msg})};
+
+  // ── stages ────────────────────────────────────────────────────────────
+  // Existing stages keep their configured order untouched; new ones are appended
+  // after them, among themselves in Priority's own sequence.
+  const newStages=[];
+  const stageOf=new Map();                                  // op key → stage id
+  const maxOrder=stages.reduce((m,s)=>Math.max(m,Number(s.order)||0),0);
+  const byKey=new Map(scan.ops.map(o=>[o.key,o]));
+  if(makeStages)priOpOrder(scan).filter(k=>map[k]===PRI_NEW).forEach((k,i)=>{
+    const st={id:uid(),name:byKey.get(k).name,order:maxOrder+i+1,
+      color:COLORS[(stages.length+i)%COLORS.length],price:0,hourlyRate:0,roleId:"",minutes:0};
+    newStages.push(st);stageOf.set(k,st.id);
+  });
+  scan.ops.forEach(o=>{const c=map[o.key];if(c&&c!==PRI_NEW&&c!==PRI_SKIP)stageOf.set(o.key,c)});
+  const rank=new Map([...stages,...newStages]
+    .slice().sort((a,b)=>(Number(a.order)||0)-(Number(b.order)||0))
+    .map((s,i)=>[s.id,i]));
+
+  // ── projects ──────────────────────────────────────────────────────────
+  const projByName=new Map(projects.map(p=>[xlNorm(p.name),p.id]));
+  const newProjects=[];
+  const projectOf=code=>{
+    if(!code)return"";
+    const hit=projByName.get(xlNorm(code));
+    if(hit)return hit;
+    if(!makeProjects)return"";
+    const p={id:uid(),name:code};
+    newProjects.push(p);projByName.set(xlNorm(code),p.id);
+    return p.id;
+  };
+
+  // ── orders ────────────────────────────────────────────────────────────
+  const orders=[];let closedSkipped=0,noStage=0,guessed=0,serialTotal=0,serialCapped=0,noQty=0;
+  scan.wos.forEach(w=>{
+    const s=priStatus(w.statusRaw);
+    if(s.guessed)guessed++;
+    if(onlyOpen&&s.st==="complete"){closedSkipped++;return}
+    const ids=[];
+    w.ops.forEach(op=>{const sid=stageOf.get(op.key);if(sid&&!ids.includes(sid))ids.push(sid)});
+    ids.sort((a,b)=>(rank.get(a)??0)-(rank.get(b)??0));
+    if(!ids.length)noStage++;
+    if(!w.qty)noQty++;
+    const oid=uid(),serials=[];
+    if(makeSerials&&w.qty>0){
+      const cap=Number(serialMax)||0,n=cap>0?Math.min(w.qty,cap):w.qty;
+      if(n<w.qty)serialCapped++;
+      const prefix=w.pn||w.wo;
+      // Ids are derived from the order's own id so a bulk run can't collide.
+      for(let k=1;k<=n;k++)serials.push({id:`${oid}s${k}`,sn:`${prefix}-${String(k).padStart(4,"0")}`,createdAt:nowISO()});
+      serialTotal+=n;
+    }
+    orders.push({id:oid,woNumber:w.wo,pn:w.pn,description:w.desc,qty:w.qty,unitPrice:w.price,
+      projectId:projectOf(w.project),receivedDate:w.release,targetDate:w.endDate,status:s.st,
+      stageIds:ids,serials,shortages:[],defects:[],deliveredSerials:[],
+      // Preview only — stripped before the order reaches the app's state.
+      _pri:{statusRaw:w.statusRaw,project:w.project,ops:w.ops.length,
+        reported:w.ops.length?Math.min(...w.ops.map(o=>o.reported)):0,
+        remain:w.ops.length?Math.max(...w.ops.map(o=>o.remain)):0}});
+  });
+
+  // ── זמן תקן per מק"ט ──────────────────────────────────────────────────
+  // Priority's ז.תקן ליח' is standard minutes per unit per operation, which is
+  // exactly the shape of a pn_standards record. Stages the file says nothing
+  // about keep whatever the app already had.
+  const stds=[];let stdConflicts=0;
+  if(importStd){
+    const perPn=new Map();
+    scan.wos.forEach(w=>{
+      if(!w.pn)return;
+      let m=perPn.get(w.pn);if(!m){m=new Map();perPn.set(w.pn,m)}
+      w.ops.forEach(op=>{
+        const sid=stageOf.get(op.key);
+        if(!sid||!(op.std>0))return;
+        const cur=m.get(sid);
+        if(cur===undefined){m.set(sid,op.std);return}
+        if(Math.abs(cur-op.std)>0.001){stdConflicts++;m.set(sid,Math.max(cur,op.std))}
+      });
+    });
+    const existing=pnStdIndex(pnStandards);
+    perPn.forEach((m,pn)=>{
+      if(!m.size)return;
+      const prev=existing.get(pnKey(pn));
+      const stageMin={...(prev?.stageMin||{})};
+      m.forEach((v,sid)=>{stageMin[sid]=Math.round(v*10)/10});
+      stds.push({id:prev?.id||uid(),pn:pnKey(pn),stageMin,total:Number(prev?.total||0),
+        note:prev?.note||"",updatedBy:"Priority",updatedAt:nowISO()});
+    });
+    if(stdConflicts)addIssue("info",`${stdConflicts} זמני תקן נתנו ערך שונה לאותו מק"ט ושלב בפק"ע שונות — נלקח הגבוה`);
+  }
+
+  const unmapped=scan.ops.filter(o=>!stageOf.has(o.key));
+  if(unmapped.length)addIssue("info",`${unmapped.length} פעולות אינן משויכות לשלב — ${unmapped.slice(0,4).map(o=>o.name).join(" · ")}${unmapped.length>4?" ...":""}`);
+  if(noStage)addIssue("warn",`${noStage} פק"ע ללא שלבים — כל הפעולות שלהן לא שויכו`);
+  if(noQty)addIssue("warn",`${noQty} פק"ע ללא כמות`);
+  if(guessed)addIssue("info",`${guessed} פק"ע עם סטטוס Priority שאינו ברשימה — שויך לפי הדמיון`);
+  if(closedSkipped)addIssue("info",`${closedSkipped} פק"ע סגורות (COC / נסגרה) לא יובאו`);
+  if(scan.skipped)addIssue("info",`${scan.skipped} שורות ללא מספר פק"ע — דולגו`);
+  if(serialCapped)addIssue("warn",`${serialCapped} פק"ע קיבלו פחות סידוריים מהכמות בגלל תקרת הסידוריים`);
+
+  return{mode:"priority",orders,newStages,newProjects,stds,issues,opStage:Object.fromEntries(stageOf),
+    stats:{orders:orders.length,rows:scan.rows,ops:scan.ops.length,mapped:stageOf.size,
+      serials:serialTotal,defects:0,shortages:0,
+      newStages:newStages.length,newProjects:newProjects.length,stds:stds.length,closedSkipped}};
+}
 const XL_STAT_IN={"פתוחה":"open","פתוח":"open","open":"open","חלקית":"partial","חלקי":"partial","partial":"partial",
   "הושלמה":"complete","הושלם":"complete","סגורה":"complete","complete":"complete","תקועה":"blocked","חסומה":"blocked","blocked":"blocked"};
 function doImport(file,ctx,cb){
@@ -5657,6 +5935,11 @@ function doImport(file,ctx,cb){
     const wb=XLSX.read(e.target.result,{type:"array",cellDates:true});
     const issues=[];
     const rowsOf=ws=>ws?XLSX.utils.sheet_to_json(ws,{defval:""}).map(xlRow):[];
+    // A Priority route export is a different shape entirely (a row per operation,
+    // not per order) and needs the user to say which stage each operation is, so
+    // it is only scanned here — the orders are built later, from their answers.
+    const wsPri=priDetect(wb);
+    if(wsPri){cb({mode:"priority",scan:priScan(rowsOf(wsPri))},null);return}
     let wsO=xlPickSheet(wb,["פקודות עבודה","פקעות",'פק"ע',"orders","work orders"]);
     if(!wsO){
       // Any sheet carrying a WO column will do — older exports, renamed tabs.
@@ -5691,10 +5974,13 @@ function doImport(file,ctx,cb){
       const qty=xlNum(xlGet(r,"כמות","כמות מוזמנת","qty"));
       if(!qty)issues.push({level:"warn",msg:`פק"ע ${wo}: לא צוינה כמות`});
       oMap[wo]={id:uid(),woNumber:wo,pn:String(xlGet(r,'P/N (מק"ט)',"P/N","PN",'מק"ט',"מקט")||"").trim(),
-        description:String(xlGet(r,"תיאור","description")||"").trim(),qty,
-        unitPrice:xlNum(xlGet(r,"מחיר ליחידה","מחיר","unit price")),projectId:pid,
-        receivedDate:xlDate(xlGet(r,"תאריך קבלה","received")),targetDate:xlDate(xlGet(r,"יעד אספקה","יעד","target")),
-        status:XL_STAT_IN[xlNorm(xlGet(r,"סטטוס","status"))]||"open",
+        description:String(xlGet(r,"תיאור","תיאור מוצר","שם מוצר","description")||"").trim(),qty,
+        unitPrice:xlNum(xlGet(r,"מחיר ליחידה","מחיר",PRI_H.price,"מחיר יחידה","unit price")),projectId:pid,
+        receivedDate:xlDate(xlGet(r,"תאריך קבלה","תאריך שחרור","received")),
+        targetDate:xlDate(xlGet(r,"יעד אספקה","יעד","ת. סיום יצור","תאריך סיום","target")),
+        // Unknown wording (a Priority status pasted into the template, say) is
+        // still placed by meaning rather than defaulting everything to "open".
+        status:XL_STAT_IN[xlNorm(xlGet(r,"סטטוס",PRI_H.status,"status"))]||priStatus(xlGet(r,"סטטוס",PRI_H.status,"status")).st,
         stageIds,serials:[],shortages:[],defects:[],deliveredSerials:[]};
     });
     const list=Object.values(oMap);
@@ -5766,17 +6052,84 @@ function doImport(file,ctx,cb){
   fr.readAsArrayBuffer(file);
 }
 
-function ExcelTab({orders,projects,stages,stageBlocks,workLogs,users,customTasks,dailyPlans,departments,pnStandards,updO,canImport}){
+// A small labelled checkbox — the import screen is mostly a list of choices.
+const ChkOpt=({checked,onChange,label,hint,color="#10b981"})=>(
+  <label style={{display:"flex",alignItems:"flex-start",gap:8,fontSize:12.5,cursor:"pointer",lineHeight:1.5,padding:"5px 0"}}>
+    <input type="checkbox" checked={!!checked} onChange={e=>onChange(e.target.checked)} style={{marginTop:2,accentColor:color}}/>
+    <span><span style={{fontWeight:600}}>{label}</span>{hint&&<span style={{color:"var(--c-dim)"}}> — {hint}</span>}</span>
+  </label>
+);
+
+function ExcelTab({orders,projects,stages,stageBlocks,workLogs,users,customTasks,dailyPlans,departments,pnStandards,updO,updP,updS,importPnStds,canImport}){
   const {toast}=useToast();
   const [res,setRes]=useState(null);const[mode,setMode]=useState("replace");const[drag,setDrag]=useState(false);
   const [showIssues,setShowIssues]=useState(false);
+  // ── Priority route export ──
+  // The scan is kept apart from the built result: mapping an operation to a
+  // different stage rebuilds the orders without touching the file again.
+  const [pri,setPri]=useState(null);
+  const [priMap,setPriMap]=useState({});
+  const [priOpts,setPriOpts]=useState({onlyOpen:true,makeStages:true,makeProjects:true,importStd:true,makeSerials:false,serialMax:100});
+  const [showMap,setShowMap]=useState(false);const[mapQ,setMapQ]=useState("");
+  const setOpt=(k,v)=>setPriOpts(p=>({...p,[k]:v}));
+  const priRes=useMemo(()=>pri?priBuild(pri.scan,{projects,stages,pnStandards},priMap,priOpts):null,
+    [pri,priMap,priOpts,projects,stages,pnStandards]);
+  const cur=priRes||res;
+
   const handleFile=file=>{if(!file)return;doImport(file,{projects,stages},(data,err)=>{
-    if(err){setRes(null);return toast(err,"error")}
-    setRes(data);setShowIssues(false);
+    if(err){setRes(null);setPri(null);return toast(err,"error")}
+    setShowIssues(false);
+    if(data.mode==="priority"){
+      setRes(null);setShowMap(false);setMapQ("");
+      setPriMap(priAutoMap(data.scan.ops,stages,LS.get(PRI_MAP_LS)||{}));
+      setPri(data);
+      toast(`זוהה קובץ Priority · ${data.scan.wos.length} פק"ע · ${data.scan.ops.length} פעולות`,"success");
+      return;
+    }
+    setPri(null);setRes(data);
     toast(`נקראו ${data.stats.orders} פק"ע · ${data.stats.serials} סידוריים`,"success");
   })};
+  const clearAll=()=>{setRes(null);setPri(null)};
+
+  // Replacing the order list has to remove the old rows from the server too,
+  // otherwise the next sync pulls the replaced orders straight back in.
+  const commitOrders=list=>{
+    LS.set("importSnapshot",JSON.parse(JSON.stringify(orders)));
+    if(mode==="replace"){
+      const keep=new Set(list.map(o=>o.id));
+      const gone=orders.filter(o=>!keep.has(o.id)).map(o=>o.id);
+      if(gone.length)SB.delIds("orders",gone).catch(e=>console.warn("order cleanup skipped",e));
+    }
+    updO(prev=>mode==="replace"?list:[...prev,...list]);
+  };
+
+  const applyPri=()=>{
+    const r=priRes;if(!r||!r.orders.length)return;
+    // Remember how each operation was mapped — including the stages this import
+    // creates — so the next monthly file lands on the same route with no work.
+    const saved={...(LS.get(PRI_MAP_LS)||{})};
+    pri.scan.ops.forEach(o=>{
+      const c=priMap[o.key];
+      if(c===PRI_SKIP)saved[o.key]=PRI_SKIP;
+      else if(r.opStage[o.key])saved[o.key]=r.opStage[o.key];
+    });
+    LS.set(PRI_MAP_LS,saved);
+    if(r.newStages.length&&updS)updS(prev=>[...prev,...r.newStages]);
+    if(r.newProjects.length&&updP)updP(prev=>[...prev,...r.newProjects]);
+    commitOrders(r.orders.map(({_pri,...o})=>o));
+    if(r.stds.length&&importPnStds)importPnStds(r.stds);
+    addAuditEntry({userId:"admin",username:"admin",name:"מנהל",action:"ייבוא Priority",
+      target:`${r.orders.length} פקעות`,
+      details:`${mode==="replace"?"החלפה":"הוספה"} | ${r.stats.newStages} שלבים חדשים | ${r.stats.newProjects} פרויקטים | ${r.stats.stds} זמני תקן | ${r.stats.serials} סידוריים`,canUndo:true});
+    setPri(null);toast(`יובאו ${r.orders.length} פק"ע מ-Priority`,"success");
+  };
+
   const exportCtx={orders,projects,stages,stageBlocks,workLogs,users,customTasks,dailyPlans,departments,pnStandards};
-  const errCount=(res?.issues||[]).filter(x=>x.level!=="info").length;
+  const errCount=(cur?.issues||[]).filter(x=>x.level!=="info").length;
+  const stName=id=>stages.find(s=>s.id===id)?.name||priRes?.newStages.find(s=>s.id===id)?.name||"";
+  const mapRows=(pri?.scan.ops||[]).filter(o=>!mapQ.trim()||o.name.includes(mapQ.trim())||o.codes.some(c=>c.toLowerCase().includes(mapQ.trim().toLowerCase())));
+  const priQty=(priRes?.orders||[]).reduce((s,o)=>s+(Number(o.qty)||0),0);
+
   return(
     <div className="fade-in">
       <h2 style={{margin:"0 0 4px"}}>📂 ייבוא / ייצוא Excel</h2>
@@ -5820,37 +6173,133 @@ function ExcelTab({orders,projects,stages,stageBlocks,workLogs,users,customTasks
         <div className={`dz${drag?" drag":""}`} onDragOver={e=>{e.preventDefault();setDrag(true)}} onDragLeave={()=>setDrag(false)} onDrop={e=>{e.preventDefault();setDrag(false);handleFile(e.dataTransfer.files[0])}} onClick={()=>{const inp=document.createElement("input");inp.type="file";inp.accept=".xlsx,.xls";inp.onchange=ev=>handleFile(ev.target.files[0]);inp.click()}}>
           <div style={{fontSize:36,marginBottom:8}}>📁</div>
           <div style={{fontWeight:600,marginBottom:4}}>גרור קובץ Excel לכאן או לחץ לבחירה</div>
-          <div style={{fontSize:12,color:"var(--c-dim)"}}>הגיליונות מזוהים לפי שמם: פקודות עבודה · סידוריים · תקלות · חוסרים</div>
+          <div style={{fontSize:12,color:"var(--c-dim)"}}>תבנית האפליקציה (פקודות עבודה · סידוריים · תקלות · חוסרים) או דוח פק"ע מ-Priority — הפורמט מזוהה אוטומטית</div>
         </div>
-        {res&&(<div style={{marginTop:14}}>
-          <div style={{fontWeight:700,color:"#10b981",marginBottom:8}}>
-            ✅ {res.stats.orders} פק"ע | {res.stats.serials} סידוריים | {res.stats.defects} תקלות | {res.stats.shortages} חוסרים
+
+        {/* ── Priority ───────────────────────────────────────────────────── */}
+        {pri&&priRes&&(<div style={{marginTop:14}}>
+          <div style={{background:"#3b82f611",border:"1px solid #3b82f655",borderRadius:10,padding:"10px 13px",marginBottom:12}}>
+            <div style={{fontWeight:700,color:"#60a5fa",marginBottom:4}}>🔗 זוהה דוח פק"ע מ-Priority</div>
+            <div style={{fontSize:12,color:"var(--c-muted)",lineHeight:1.6}}>
+              {pri.scan.rows} שורות פעולה קופלו ל-{pri.scan.wos.length} פקודות עבודה. כל תאור פעולה הופך לשלב בפק"ע, וזמני התקן שבקובץ נשמרים כזמן תקן למק"ט.
+            </div>
           </div>
-          {res.issues.length>0&&(
+
+          <div style={{display:"flex",gap:8,flexWrap:"wrap",marginBottom:12,fontSize:12}}>
+            {[[`${priRes.stats.orders} פק"ע לייבוא`,"#10b981"],[`${priQty.toLocaleString()} יחידות`,"#3b82f6"],
+              [`${priRes.stats.mapped}/${pri.scan.ops.length} פעולות משויכות`,"#a78bfa"],
+              [`${priRes.stats.newStages} שלבים חדשים`,priRes.stats.newStages?"#f59e0b":"#8b95a8"],
+              [`${priRes.stats.newProjects} פרויקטים חדשים`,priRes.stats.newProjects?"#f59e0b":"#8b95a8"],
+              [`${priRes.stats.stds} מק"טים עם זמן תקן`,"#10b981"],
+              [`${priRes.stats.serials} סידוריים`,priRes.stats.serials?"#3b82f6":"#8b95a8"]].map(([t,c])=>(
+              <span key={t} style={{background:c+"1a",color:c,border:`1px solid ${c}44`,borderRadius:14,padding:"3px 11px",fontWeight:600}}>{t}</span>
+            ))}
+          </div>
+
+          <div style={{background:"var(--c-deep)",border:"1px solid var(--c-border)",borderRadius:10,padding:"8px 13px",marginBottom:12}}>
+            <div style={{fontWeight:700,fontSize:12.5,marginBottom:2}}>מה נכנס לאפליקציה</div>
+            <ChkOpt checked={priOpts.onlyOpen} onChange={v=>setOpt("onlyOpen",v)} label='דלג על פק"ע סגורות'
+              hint={`סטטוס פקע COC / נסגרה${priRes.stats.closedSkipped?` — ${priRes.stats.closedSkipped} פק"ע`:""}`}/>
+            <ChkOpt checked={priOpts.makeStages} onChange={v=>setOpt("makeStages",v)} label="צור שלבים חסרים"
+              hint="פעולה שאין לה שלב מקביל תיפתח כשלב חדש בסוף רשימת השלבים"/>
+            <ChkOpt checked={priOpts.makeProjects} onChange={v=>setOpt("makeProjects",v)} label="צור פרויקטים חסרים"
+              hint="קוד הפרויקט מ-Priority נפתח כפרויקט באפליקציה"/>
+            <ChkOpt checked={priOpts.importStd} onChange={v=>setOpt("importStd",v)} label='ייבא זמני תקן למק"טים'
+              hint="עמודת ז.תקן ליח' בדק' — דקות ליחידה לכל שלב"/>
+            <ChkOpt checked={priOpts.makeSerials} onChange={v=>setOpt("makeSerials",v)} color="#f59e0b" label="צור מספרים סידוריים לפי הכמות"
+              hint={`ב-Priority אין סידוריים. בלי סידוריים אי אפשר לדווח עבודה על הפק"ע${priOpts.makeSerials?"":` — הכמות בקובץ היא ${priQty.toLocaleString()} יחידות`}`}/>
+            {priOpts.makeSerials&&(
+              <div style={{display:"flex",alignItems:"center",gap:8,fontSize:12,color:"var(--c-muted)",padding:"2px 0 6px 0",marginRight:24}}>
+                <span>עד</span>
+                <input type="number" min="0" value={priOpts.serialMax} onChange={e=>setOpt("serialMax",Number(e.target.value)||0)} style={{width:80}}/>
+                <span>סידוריים לפק"ע (0 = ללא הגבלה) · ייווצרו {priRes.stats.serials.toLocaleString()} סידוריים</span>
+              </div>
+            )}
+          </div>
+
+          {/* operation → stage mapping */}
+          <div style={{background:"var(--c-deep)",border:"1px solid var(--c-border)",borderRadius:10,padding:"9px 13px",marginBottom:12}}>
+            <div style={{display:"flex",alignItems:"center",gap:10,flexWrap:"wrap"}}>
+              <button onClick={()=>setShowMap(p=>!p)} style={{background:"none",border:"none",color:"var(--c-text)",fontSize:12.5,fontWeight:700,fontFamily:"inherit",padding:0}}>
+                🔀 שיוך פעולות לשלבים ({priRes.stats.mapped}/{pri.scan.ops.length}) {showMap?"▲":"▼"}
+              </button>
+              <span style={{fontSize:11.5,color:"var(--c-dim)"}}>השיוך נשמר לייבוא הבא</span>
+              {showMap&&(<>
+                <Btn small onClick={()=>setPriMap(priAutoMap(pri.scan.ops,stages,null))}>שיוך אוטומטי מחדש</Btn>
+                <Btn small onClick={()=>setPriMap(Object.fromEntries(pri.scan.ops.map(o=>[o.key,PRI_SKIP])))}>בטל הכל</Btn>
+              </>)}
+            </div>
+            {showMap&&(<div style={{marginTop:9}}>
+              <input value={mapQ} onChange={e=>setMapQ(e.target.value)} placeholder="חיפוש פעולה או קוד..." style={{width:"100%",maxWidth:280,marginBottom:8}}/>
+              <div style={{maxHeight:330,overflowY:"auto",overflowX:"auto"}}>
+                <table><thead><tr><th>תאור פעולה</th><th>קוד</th><th>מרכז</th><th>שורות</th><th>שלב באפליקציה</th></tr></thead><tbody>
+                  {mapRows.map(o=>(<tr key={o.key}>
+                    <td style={{fontWeight:600}}>{o.name||<span style={{color:"var(--c-dim)"}}>(ללא שם)</span>}</td>
+                    <td style={{fontSize:11,color:"var(--c-dim)"}}>{o.codes.slice(0,2).join(", ")}{o.codes.length>2?"…":""}</td>
+                    <td style={{fontSize:11,color:"var(--c-dim)"}}>{o.centers.slice(0,2).join(", ")}{o.centers.length>2?"…":""}</td>
+                    <td>{o.count}</td>
+                    <td>
+                      <select value={priMap[o.key]||PRI_NEW} onChange={e=>setPriMap(p=>({...p,[o.key]:e.target.value}))} style={{minWidth:180}}>
+                        <option value={PRI_NEW}>➕ שלב חדש בשם זה</option>
+                        <option value={PRI_SKIP}>✕ אל תייבא פעולה זו</option>
+                        {stages.map(s=><option key={s.id} value={s.id}>{s.name}</option>)}
+                      </select>
+                    </td>
+                  </tr>))}
+                </tbody></table>
+                {!mapRows.length&&<div style={{fontSize:12,color:"var(--c-dim)",padding:"8px 2px"}}>לא נמצאה פעולה מתאימה</div>}
+              </div>
+            </div>)}
+          </div>
+        </div>)}
+
+        {/* ── shared preview ─────────────────────────────────────────────── */}
+        {cur&&(<div style={{marginTop:14}}>
+          {!priRes&&(
+            <div style={{fontWeight:700,color:"#10b981",marginBottom:8}}>
+              ✅ {cur.stats.orders} פק"ע | {cur.stats.serials} סידוריים | {cur.stats.defects} תקלות | {cur.stats.shortages} חוסרים
+            </div>
+          )}
+          {cur.issues.length>0&&(
             <div style={{marginBottom:10,background:"var(--c-deep)",border:`1px solid ${errCount?"#f59e0b55":"var(--c-border)"}`,borderRadius:9,padding:"9px 12px"}}>
               <button onClick={()=>setShowIssues(p=>!p)} style={{background:"none",border:"none",color:errCount?"#f59e0b":"var(--c-muted)",fontSize:12.5,fontWeight:700,fontFamily:"inherit",padding:0}}>
-                {errCount?"⚠️":"ℹ️"} {res.issues.length} הערות בקובץ {showIssues?"▲":"▼"}
+                {errCount?"⚠️":"ℹ️"} {cur.issues.length} הערות בקובץ {showIssues?"▲":"▼"}
               </button>
               {showIssues&&(<ul style={{margin:"8px 14px 0 0",padding:0,fontSize:12,color:"var(--c-muted)",lineHeight:1.7,maxHeight:190,overflowY:"auto"}}>
-                {res.issues.map((x,i)=><li key={i} style={{color:x.level==="warn"?"#f59e0b":"var(--c-dim)"}}>{x.msg}</li>)}
+                {cur.issues.map((x,i)=><li key={i} style={{color:x.level==="warn"?"#f59e0b":"var(--c-dim)"}}>{x.msg}</li>)}
               </ul>)}
             </div>
           )}
-          <div style={{overflowX:"auto",marginBottom:10}}><table><thead><tr><th>פק"ע</th><th>P/N</th><th>תיאור</th><th>פרויקט</th><th>כמות</th><th>שלבים</th><th>סידוריים</th><th>תקלות</th><th>חוסרים</th></tr></thead><tbody>
-            {res.orders.slice(0,12).map(o=>(<tr key={o.id}>
+          <div style={{overflowX:"auto",marginBottom:10}}><table><thead><tr>
+            <th>פק"ע</th><th>P/N</th><th>תיאור</th><th>פרויקט</th><th>כמות</th><th>שלבים</th>
+            {priRes?<><th>סטטוס</th><th>שחרור</th><th>יעד</th><th>יתרה</th></>:<><th>סידוריים</th><th>תקלות</th><th>חוסרים</th></>}
+          </tr></thead><tbody>
+            {cur.orders.slice(0,12).map(o=>(<tr key={o.id}>
               <td style={{fontWeight:600}}>{o.woNumber}</td><td>{o.pn||"—"}</td><td>{o.description||"—"}</td>
-              <td>{projects.find(p=>p.id===o.projectId)?.name||<span style={{color:"#f59e0b"}}>—</span>}</td>
-              <td>{o.qty||"—"}</td><td>{(o.stageIds||[]).length}</td><td>{(o.serials||[]).length}</td>
-              <td>{(o.defects||[]).length}</td><td>{(o.shortages||[]).length}</td></tr>))}
+              <td>{projects.find(p=>p.id===o.projectId)?.name||priRes?.newProjects.find(p=>p.id===o.projectId)?.name||<span style={{color:"#f59e0b"}}>—</span>}</td>
+              <td>{o.qty||"—"}</td>
+              <td title={(o.stageIds||[]).map(stName).join(" ← ")}>{(o.stageIds||[]).length}</td>
+              {priRes?(<>
+                <td><Badge status={o.status}/></td>
+                <td style={{whiteSpace:"nowrap"}}>{o.receivedDate?fmt(o.receivedDate):"—"}</td>
+                <td style={{whiteSpace:"nowrap"}}>{o.targetDate?fmt(o.targetDate):"—"}</td>
+                <td>{o._pri?.remain??"—"}</td>
+              </>):(<>
+                <td>{(o.serials||[]).length}</td><td>{(o.defects||[]).length}</td><td>{(o.shortages||[]).length}</td>
+              </>)}
+            </tr>))}
           </tbody></table>
-          {res.orders.length>12&&<div style={{fontSize:11.5,color:"var(--c-dim)",padding:"6px 2px"}}>מוצגות 12 מתוך {res.orders.length} פקודות</div>}
+          {cur.orders.length>12&&<div style={{fontSize:11.5,color:"var(--c-dim)",padding:"6px 2px"}}>מוצגות 12 מתוך {cur.orders.length} פקודות</div>}
           </div>
-          <div style={{display:"flex",gap:10}}><Btn color="#10b981" onClick={()=>{
-            LS.set("importSnapshot",JSON.parse(JSON.stringify(orders)));
-            const list=res.orders;
-            updO(prev=>mode==="replace"?list:[...prev,...list]);
-            addAuditEntry({userId:"admin",username:"admin",name:"מנהל",action:"ייבוא Excel",target:`${list.length} פקעות`,details:`${mode==="replace"?"החלפה":"הוספה"} | ${res.stats.serials} סידוריים | ${res.stats.defects} תקלות | ${res.stats.shortages} חוסרים`,canUndo:true});
-            setRes(null);toast("הנתונים יובאו בהצלחה","success")}}>✅ אשר ייבוא ({res.orders.length})</Btn><Btn onClick={()=>setRes(null)}>ביטול</Btn></div>
+          <div style={{display:"flex",gap:10,alignItems:"center",flexWrap:"wrap"}}>
+            <Btn color="#10b981" disabled={!cur.orders.length} onClick={()=>{
+              if(priRes){applyPri();return}
+              commitOrders(res.orders);
+              addAuditEntry({userId:"admin",username:"admin",name:"מנהל",action:"ייבוא Excel",target:`${res.orders.length} פקעות`,details:`${mode==="replace"?"החלפה":"הוספה"} | ${res.stats.serials} סידוריים | ${res.stats.defects} תקלות | ${res.stats.shortages} חוסרים`,canUndo:true});
+              setRes(null);toast("הנתונים יובאו בהצלחה","success")}}>✅ אשר ייבוא ({cur.orders.length})</Btn>
+            <Btn onClick={clearAll}>ביטול</Btn>
+            {priRes&&cur.orders.length>500&&<span style={{fontSize:11.5,color:"var(--c-dim)"}}>ייבוא גדול — השמירה לענן עשויה לקחת מספר שניות</span>}
+          </div>
         </div>)}
       </Card>
       ):(
@@ -7160,6 +7609,7 @@ function App(){
 
   const updO=useCallback((fn)=>{setOrders(prev=>{const next=typeof fn==="function"?fn(prev):fn;persist(next,null,null,null);return next})},[]);
   const updP=useCallback((fn)=>{setProjects(prev=>{const next=typeof fn==="function"?fn(prev):fn;persist(null,next,null,null);return next})},[]);
+  const updS=useCallback((fn)=>{setStages(prev=>{const next=typeof fn==="function"?fn(prev):fn;persist(null,null,next);return next})},[]);
   const updD=useCallback((fn)=>{setDepartments(prev=>{const next=typeof fn==="function"?fn(prev):fn;persist(null,null,null,null,null,null,next);return next})},[]);
 
   // ── Standard times (זמן תקן) — one record per מק"ט, minutes per stage ──
@@ -7186,6 +7636,23 @@ function App(){
       return next;
     });
     addAuditEntry({userId:currentUser?.id,username:currentUser?.username,name:currentUser?.name,action:"עדכון זמן תקן",target:k,details:""});
+  },[currentUser]);
+  // Bulk import of standard times (an ERP export brings hundreds at once): each
+  // record replaces the one for its מק"ט, and every other מק"ט is left alone.
+  const importPnStds=useCallback((recs)=>{
+    const list=(recs||[]).filter(r=>pnKey(r.pn));
+    if(!list.length)return;
+    setPnStandards(prev=>{
+      const incoming=new Map(list.map(r=>[pnKey(r.pn),r]));
+      const kept=prev.filter(r=>!incoming.has(pnKey(r.pn)));
+      const stale=prev.filter(r=>incoming.has(pnKey(r.pn))&&!list.some(n=>n.id===r.id));
+      const next=[...kept,...list];
+      persist(null,null,null,null,null,null,null,null,next);
+      stale.forEach(r=>SB.del("pn_standards",{id:r.id}).catch(()=>{}));
+      return next;
+    });
+    addAuditEntry({userId:currentUser?.id,username:currentUser?.username,name:currentUser?.name,
+      action:"ייבוא זמני תקן",target:`${list.length} מק"טים`,details:"ייבוא מ-Excel"});
   },[currentUser]);
   const deletePnStd=useCallback((pn)=>{
     const k=pnKey(pn);
@@ -7581,7 +8048,7 @@ function App(){
         {tab==="stages"&&isAdmin&&<StagesManagement stages={stages} setStages={setStages} stageBlocks={stageBlocks} setStageBlocks={setStageBlocks} persist={persist}/>}
         {tab==="projects"&&<Projects projects={filteredProjects} orders={filteredOrders} updP={updP} stages={stages} workLogs={filteredWorkLogs}/>}
         {tab==="reports"&&(isAdmin||isDeptMgr||isLead)&&<TeamReports users={visibleUsers} workLogs={filteredWorkLogs} orders={filteredOrders} stages={stages} stageBlocks={stageBlocks} projects={filteredProjects} customTasks={visibleTasks} dailyPlans={visiblePlans} departments={visibleDepartments} pnStandards={pnStandards}/>}
-        {tab==="excel"&&(isAdmin||isDeptMgr)&&<ExcelTab orders={filteredOrders} projects={filteredProjects} stages={stages} stageBlocks={stageBlocks} workLogs={filteredWorkLogs} users={visibleUsers} customTasks={visibleTasks} dailyPlans={visiblePlans} departments={visibleDepartments} pnStandards={pnStandards} updO={updO} canImport={isAdmin}/>}
+        {tab==="excel"&&(isAdmin||isDeptMgr)&&<ExcelTab orders={filteredOrders} projects={filteredProjects} stages={stages} stageBlocks={stageBlocks} workLogs={filteredWorkLogs} users={visibleUsers} customTasks={visibleTasks} dailyPlans={visiblePlans} departments={visibleDepartments} pnStandards={pnStandards} updO={updO} updP={updP} updS={updS} importPnStds={importPnStds} canImport={isAdmin}/>}
       </main>
       {showInstall&&<InstallBanner onInstall={handleInstall} onDismiss={()=>setShowInstall(false)} lm={lm}/>}
       {showAdmin&&isAdmin&&<AdminPanel projects={projects} stages={stages} onClose={()=>setShowAdmin(false)} lightMode={lightMode} updO={updO} departments={departments} updD={updD}/>}
