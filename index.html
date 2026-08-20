@@ -614,6 +614,12 @@ const genuuid=()=>crypto.randomUUID?crypto.randomUUID():"10000000-1000-4000-8000
 const fmt=d=>d?new Date(d).toLocaleDateString("he-IL"):"—";
 const fmtMoney=n=>(n!=null&&n!==""&&!isNaN(n))?"₪"+Number(n).toLocaleString("he-IL",{maximumFractionDigits:0}):"—";
 const fmtTime=mins=>{if(!mins&&mins!==0)return"—";const h=Math.floor(mins/60),m=Math.round(mins%60);return h>0?`${h}:${String(m).padStart(2,"0")} שע'`:`${m} דק'`};
+// A running job past this is almost certainly a forgotten "סיימתי", not real work —
+// no shift runs 12 hours straight. Shown as a warning rather than closed automatically:
+// only the worker knows the real end time, and a guessed one would pollute זמן בפועל.
+const STALE_WORK_MIN=12*60;
+const runningMin=(startTime,pauseMin=0)=>Math.max(0,Math.round((Date.now()-new Date(startTime).getTime())/60000)-(pauseMin||0));
+const isStaleWork=(startTime,pauseMin=0)=>!!startTime&&runningMin(startTime,pauseMin)>=STALE_WORK_MIN;
 const todays=()=>new Date().toISOString().slice(0,10);
 const nowISO=()=>new Date().toISOString();
 const daysBetween=(a,b)=>{if(!a||!b)return null;return Math.round((new Date(b)-new Date(a))/86400000)};
@@ -2839,7 +2845,7 @@ function MyWork({orders,stages,workLogs,onStartWork,onEndWork,onPauseWork,onResu
                 <KpiBox i="📋" v={totalPending} label="יחידות ממתינות" c="#3b82f6"/>
                 <KpiBox i="📦" v={orders.filter(o=>(o.serials||[]).length>0&&(o.serials||[]).some(sr=>!(o.stageIds||[]).every(sid=>doneIdx.has(logKey(sr.id,sid))))).length} label={'פק"ע בתהליך'} c="#06b6d4"/>
               </div>
-              {ww>0&&(<Card style={{marginBottom:12,border:"2px solid #f59e0b33"}}><div style={{fontWeight:700,fontSize:15,color:"#f59e0b",marginBottom:10}}>🔄 עובדים בעבודה ({ww})</div><div style={{display:"flex",flexDirection:"column",gap:8}}>{Object.values(workerWork).flatMap(wk=>wk.items.map(w=>{const stage=stages.find(s2=>s2.id===w.stageId);const order=orders.find(o=>o.id===w.orderId);return(<div key={w.id} style={{background:"var(--c-deep)",borderRadius:10,padding:"10px 14px",border:"1px solid #f59e0b22",display:"flex",justifyContent:"space-between",alignItems:"center",flexWrap:"wrap",gap:8}}><div><span style={{fontWeight:700,fontSize:14}}>{w.userName}</span><span style={{fontSize:12,color:"#60a5fa",marginRight:8}}>← {order?.woNumber||""}</span>{w._count>1?<span style={{fontSize:11,background:"#3b82f622",color:"#60a5fa",padding:"2px 8px",borderRadius:10}}>{w._count} יחידות</span>:<span style={{fontSize:12,color:"#7eb8ff"}}>{w.serialSn}</span>}<span style={{fontSize:11,color:stage?.color||"var(--c-muted)",marginRight:6}}>/ {stage?.name||""}</span></div><ActiveTimer startTime={w.startTime} pauseMin={w.totalPauseMin||0}/></div>)}))}</div></Card>)}
+              {ww>0&&(<Card style={{marginBottom:12,border:"2px solid #f59e0b33"}}><div style={{fontWeight:700,fontSize:15,color:"#f59e0b",marginBottom:10}}>🔄 עובדים בעבודה ({ww})</div><div style={{display:"flex",flexDirection:"column",gap:8}}>{Object.values(workerWork).flatMap(wk=>wk.items.map(w=>{const stage=stages.find(s2=>s2.id===w.stageId);const order=orders.find(o=>o.id===w.orderId);return(<div key={w.id} style={{background:"var(--c-deep)",borderRadius:10,padding:"10px 14px",border:"1px solid #f59e0b22",display:"flex",justifyContent:"space-between",alignItems:"center",flexWrap:"wrap",gap:8}}><div><span style={{fontWeight:700,fontSize:14}}>{w.userName}</span><span style={{fontSize:12,color:"#60a5fa",marginRight:8}}>← {order?.woNumber||""}</span>{w._count>1?<span style={{fontSize:11,background:"#3b82f622",color:"#60a5fa",padding:"2px 8px",borderRadius:10}}>{w._count} יחידות</span>:<span style={{fontSize:12,color:"#7eb8ff"}}>{w.serialSn}</span>}<span style={{fontSize:11,color:stage?.color||"var(--c-muted)",marginRight:6}}>/ {stage?.name||""}</span>{isStaleWork(w.startTime,w.totalPauseMin)&&<span title="העבודה פתוחה מעל 12 שעות — כנראה לא נלחץ 'סיימתי'" style={{fontSize:11,background:"#ef444422",color:"#ef4444",padding:"2px 8px",borderRadius:10,marginRight:6,fontWeight:700}}>⚠️ לא נסגר</span>}</div><ActiveTimer startTime={w.startTime} pauseMin={w.totalPauseMin||0}/></div>)}))}</div></Card>)}
               {bw>0&&(<Card style={{marginBottom:12,border:"1px solid #8b95a833"}}><div style={{fontWeight:700,fontSize:15,color:"#8b95a8",marginBottom:10}}>⏸️ בהפסקה ({bw})</div><div style={{display:"flex",flexDirection:"column",gap:6}}>{Object.values(workerBreak).flatMap(wk=>wk.items.map(w=>{const stage=stages.find(s2=>s2.id===w.stageId);return(<div key={w.id} style={{background:"var(--c-deep)",borderRadius:8,padding:"8px 12px",display:"flex",justifyContent:"space-between",alignItems:"center",opacity:.7}}><div><span style={{fontWeight:600}}>{w.userName}</span>{w._count>1?<span style={{fontSize:11,color:"var(--c-dim)",marginRight:8}}>{w._count} יחידות / {stage?.name||""}</span>:<span style={{fontSize:12,color:"var(--c-dim)",marginRight:8}}>{w.serialSn} / {stage?.name||""}</span>}</div><span style={{fontSize:12,color:"#8b95a8"}}>⏸️</span></div>)}))}</div></Card>)}
               {activeTasks2.length>0&&(<Card style={{marginBottom:12,border:"1px solid #a78bfa33"}}><div style={{fontWeight:700,fontSize:15,color:"#a78bfa",marginBottom:10}}>📌 עובדים על משימות</div><div style={{display:"flex",flexDirection:"column",gap:6}}>{activeTasks2.map(t=>(<div key={t.id} style={{background:"var(--c-deep)",borderRadius:10,padding:"10px 14px",border:t.paused?"1px solid #8b95a833":"1px solid #a78bfa22",display:"flex",justifyContent:"space-between",alignItems:"center",flexWrap:"wrap",gap:6}}><div><span style={{fontWeight:700}}>{t.userName}</span><span style={{fontSize:12,color:"#a78bfa",marginRight:8}}>← {t.name}</span>{t.paused&&<span style={{fontSize:11,color:"#8b95a8"}}>⏸️</span>}</div>{!t.paused?<ActiveTimer startTime={t.startTime} pauseMin={t.totalPauseMin||0}/>:<span style={{fontSize:14,color:"#8b95a8"}}>⏸️</span>}</div>))}</div></Card>)}
               {ww===0&&bw===0&&activeTasks2.length===0&&(<Card style={{marginBottom:12}}><EmptyState icon="😴" title="אין עבודה פעילה כרגע" subtitle="בחר יחידה מהרשימה למטה כדי להתחיל עבודה"/></Card>)}
@@ -2921,6 +2927,7 @@ function MyWork({orders,stages,workLogs,onStartWork,onEndWork,onPauseWork,onResu
               <div style={{fontSize:12,color:"var(--c-dim)",marginTop:4}}>התחלה: {new Date(myActiveLog.startTime).toLocaleTimeString("he-IL",{hour:"2-digit",minute:"2-digit"})}</div>
               {(myActiveLog.totalPauseMin>0||(myActiveLog.pauseLog||[]).length>0)&&<div style={{fontSize:11,color:"#8b95a8",marginTop:2}}>הפסקות: {fmtTime(myActiveLog.totalPauseMin||0)} ({(myActiveLog.pauseLog||[]).length} פעמים)</div>}
               {!myActiveLog.paused&&<ActiveTimer startTime={myActiveLog.startTime} pauseMin={myActiveLog.totalPauseMin||0}/>}
+              {isStaleWork(myActiveLog.startTime,myActiveLog.totalPauseMin)&&<div style={{fontSize:12,color:"#ef4444",fontWeight:700,marginTop:4}}>⚠️ העבודה פתוחה מעל 12 שעות — אם סיימת, לחץ "סיימתי"</div>}
               {myActiveLog.paused&&<div style={{fontSize:22,fontWeight:800,color:"#8b95a8",marginTop:6}}>⏸️ מושהה</div>}
             </div>
             <div style={{display:"flex",flexDirection:"column",gap:8}}>
@@ -3081,7 +3088,8 @@ function ActiveTimer({startTime,pauseMin=0}){
   const[e2,setE]=useState(0);
   useEffect(()=>{const t=setInterval(()=>{setE(Math.max(0,Math.round((Date.now()-new Date(startTime).getTime())/1000)-pauseMin*60))},1000);return()=>clearInterval(t)},[startTime,pauseMin]);
   const h=Math.floor(e2/3600),m=Math.floor((e2%3600)/60),s=e2%60;
-  return<div style={{fontSize:22,fontWeight:800,color:"#f59e0b",marginTop:6,fontVariantNumeric:"tabular-nums"}}>{String(h).padStart(2,"0")}:{String(m).padStart(2,"0")}:{String(s).padStart(2,"0")}</div>;
+  const stale=h*60+m>=STALE_WORK_MIN;
+  return<div style={{fontSize:22,fontWeight:800,color:stale?"#ef4444":"#f59e0b",marginTop:6,fontVariantNumeric:"tabular-nums"}}>{String(h).padStart(2,"0")}:{String(m).padStart(2,"0")}:{String(s).padStart(2,"0")}</div>;
 }
 
 // ══════════════════════════════════════════════════════════════════════════
@@ -7995,18 +8003,38 @@ function App(){
     let pollTimer=null;
     let ws=null;let heartbeat=null;let reconnectTimer=null;
     let realtimeWorking=false;
+    // Which tables the server has actually confirmed a postgres_changes subscription
+    // for. An open socket proves nothing — if the table is missing from the
+    // supabase_realtime publication the join still returns, and not one change
+    // event ever arrives.
+    const joined=new Set();
 
-    // Polling fallback — always active, faster when realtime fails
+    // Safety-net sweep. Realtime pushes changes the moment they land, so it can be
+    // slow — but only once the subscription is confirmed; otherwise it IS the
+    // update path and has to stay quick. A sweep skipped because of an in-flight
+    // save retries in a moment, never a whole interval later: that wait was what
+    // made a finished job keep showing as active for more than a minute.
+    const POLL_LIVE=15000,POLL_FALLBACK=5000,POLL_BLOCKED=1500;
+    const pollDelay=()=>realtimeWorking?POLL_LIVE:POLL_FALLBACK;
+    // Set whenever fresh data had to be turned away, so the sweep that re-arms
+    // afterwards stays quick even if an in-flight poll finishes in between and
+    // would otherwise re-arm at the slow cadence.
+    let sweepSoon=false;
+    const arm=ms=>{if(dead)return;clearTimeout(pollTimer);pollTimer=setTimeout(poll,ms)};
+    const pollSoon=()=>{sweepSoon=true;arm(POLL_BLOCKED)};
+
     const poll=async()=>{
       if(dead)return;
       // Skip while a local change is unsaved / just saved (avoid overwriting it)
-      if(remoteApplyBlocked()){pollTimer=setTimeout(poll,realtimeWorking?30000:8000);return}
+      if(remoteApplyBlocked()){arm(POLL_BLOCKED);return}
       try{
+        sweepSoon=false;
         const data=await dbLoadAll();
         if(dead)return;
         // Re-check — the user may have clicked an action while the fetch was in flight,
         // in which case this data is stale and applying it would undo the click.
-        if(data&&!remoteApplyBlocked()){
+        if(data&&remoteApplyBlocked()){pollSoon();return}
+        if(data){
           if(data.orders){setOrders(data.orders);LS.set("orders",data.orders)}
           if(data.workLogs){setWorkLogs(data.workLogs);LS.set("workLogs",data.workLogs)}
           if(data.customTasks){setCustomTasks(data.customTasks);LS.set("customTasks",data.customTasks)}
@@ -8018,10 +8046,10 @@ function App(){
           setSync("ok");
         }
       }catch(e){console.warn("Poll error",e)}
-      if(!dead)pollTimer=setTimeout(poll,realtimeWorking?30000:8000);
+      arm(sweepSoon?POLL_BLOCKED:pollDelay());
     };
     // Start polling after a short delay
-    pollTimer=setTimeout(poll,5000);
+    pollTimer=setTimeout(poll,2000);
 
     // Try Supabase Realtime WebSocket
     const wsUrl=`wss://lwiurzkiojctwzllpnmr.supabase.co/realtime/v1/websocket?apikey=${SB_KEY}&vsn=1.0.0`;
@@ -8041,12 +8069,28 @@ function App(){
             }));
           });
           heartbeat=setInterval(()=>{try{ws.send(JSON.stringify({topic:"phoenix",event:"heartbeat",payload:{},ref:"hb"}))}catch{}},25000);
-          realtimeWorking=true;
+          // realtimeWorking stays false until the joins are confirmed below —
+          // until then the poll is the update path and must keep its fast cadence.
           setSync("ok");
         };
         ws.onmessage=async(e)=>{
           try{
             const msg=JSON.parse(e.data);
+            // Join acknowledgements — the server echoes back the postgres_changes
+            // filters it accepted. Only tables in that echo actually stream, so a
+            // reply carrying an empty list means "connected, but silent".
+            if(msg.event==="phx_reply"){
+              const jt=msg.topic?.split(":")?.[2];
+              const accepted=msg.payload?.response?.postgres_changes;
+              if(jt&&msg.payload?.status==="ok"&&(!Array.isArray(accepted)||accepted.length>0))joined.add(jt);
+              // work_logs and orders drive the live board; until both are streaming,
+              // keep polling at the fallback rate rather than pretending we're live.
+              if(!realtimeWorking&&joined.has("work_logs")&&joined.has("orders")){
+                realtimeWorking=true;
+                console.log("Realtime subscribed:",[...joined].join(", "));
+              }
+              return;
+            }
             // Supabase sends postgres_changes as the event name in the payload
             const isChange=msg.event==="postgres_changes"||
               msg.event==="INSERT"||msg.event==="UPDATE"||msg.event==="DELETE"||
@@ -8059,12 +8103,14 @@ function App(){
             console.log("Realtime change:",tbl);
             // Never refetch/apply while a local change is unsaved — the change event may be
             // ours (mid-save) or someone else's, and either way stale rows would undo the click.
-            if(remoteApplyBlocked())return;
+            // But the event must not be thrown away either: re-sweep in a moment, or the
+            // change waits for the next full interval before anyone sees it.
+            if(remoteApplyBlocked()){pollSoon();return}
             // Small delay to let write finish
             await new Promise(r=>setTimeout(r,300));
             const cf=`company_id=eq.${_companyId}&`;
             // apply() re-checks the guard — a click may have happened during the fetch
-            const apply=(setter,lsKey,rows)=>{if(remoteApplyBlocked())return;setter(rows);LS.set(lsKey,rows)};
+            const apply=(setter,lsKey,rows)=>{if(remoteApplyBlocked()){pollSoon();return}setter(rows);LS.set(lsKey,rows)};
             if(["orders"].includes(tbl)){const rows=(await SB.getAll("orders",cf+ORDER_BY.orders)).map(dbToOrder);SYNC.prime("orders",rows,orderToDb);apply(setOrders,"orders",rows)}
             if(["work_logs"].includes(tbl)){const rows=(await SB.getAll("work_logs",cf+ORDER_BY.work_logs)).map(dbToLog);SYNC.prime("work_logs",rows,logToDb);apply(setWorkLogs,"workLogs",rows)}
             if(["custom_tasks"].includes(tbl)){const rows=(await SB.get("custom_tasks",cf+"order=created_at.asc")).map(dbToTask);apply(setCustomTasks,"customTasks",rows)}
@@ -8078,7 +8124,7 @@ function App(){
         ws.onclose=()=>{
           console.log("Realtime WS closed");
           clearInterval(heartbeat);
-          realtimeWorking=false;
+          realtimeWorking=false;joined.clear();
           if(!dead)reconnectTimer=setTimeout(connect,5000);
         };
         ws.onerror=()=>{realtimeWorking=false;ws.close()};
@@ -8637,7 +8683,7 @@ function App(){
   };
   useEffect(()=>{const isi=window.matchMedia("(display-mode:standalone)").matches||window.navigator.standalone;if(isi){setIsStandalone(true);return;}const h=e=>{e.preventDefault();setInstallPrompt(e);setShowInstall(true)};window.addEventListener("beforeinstallprompt",h);window.addEventListener("appinstalled",()=>{setShowInstall(false);setInstallPrompt(null);setIsStandalone(true)});return()=>window.removeEventListener("beforeinstallprompt",h)},[]);
   // Service Worker
-  useEffect(()=>{if(!("serviceWorker" in navigator))return;navigator.serviceWorker.register("./sw.js?v=27").then(reg=>{swRegRef.current=reg;if(reg.waiting)setShowUpdate(true);reg.addEventListener("updatefound",()=>{const nw=reg.installing;if(!nw)return;nw.addEventListener("statechange",()=>{if(nw.state==="installed"&&navigator.serviceWorker.controller)setShowUpdate(true)})});setInterval(()=>reg.update(),30*60*1000)}).catch(()=>{});navigator.serviceWorker.addEventListener("controllerchange",()=>window.location.reload())},[]);
+  useEffect(()=>{if(!("serviceWorker" in navigator))return;navigator.serviceWorker.register("./sw.js?v=28").then(reg=>{swRegRef.current=reg;if(reg.waiting)setShowUpdate(true);reg.addEventListener("updatefound",()=>{const nw=reg.installing;if(!nw)return;nw.addEventListener("statechange",()=>{if(nw.state==="installed"&&navigator.serviceWorker.controller)setShowUpdate(true)})});setInterval(()=>reg.update(),30*60*1000)}).catch(()=>{});navigator.serviceWorker.addEventListener("controllerchange",()=>window.location.reload())},[]);
   // Network status
   useEffect(()=>{const on=()=>{setIsOffline(false);toast("החיבור חזר — מסנכרן נתונים...","success");refreshFromDB(true)};const off=()=>{setIsOffline(true)};window.addEventListener("online",on);window.addEventListener("offline",off);return()=>{window.removeEventListener("online",on);window.removeEventListener("offline",off)}},[]);
   // PWA Install
