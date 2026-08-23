@@ -1,0 +1,5 @@
+
+# Generated at deploy time by build.js — never committed, or it goes stale
+# against index.html, which stays the single source of truth.
+app.js
+node_modules/

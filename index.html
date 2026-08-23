@@ -328,6 +328,45 @@ const SYNC=(()=>{
     reset(){seen.clear()}
   };
 })();
+// ── "Did this sweep actually bring anything new?" ─────────────────────────
+// The safety-net sweep runs every few seconds and normally finds nothing: the
+// same rows come back. Applying them anyway replaced every array in the app with
+// an identical copy — and a new array identity invalidates every useMemo hanging
+// off it (the done-index over 56,000 progress records, the visibility scan over
+// every פק"ע, every dashboard aggregate) and re-renders the whole tree. Twelve
+// times a minute, for nothing. That, plus re-serialising megabytes into
+// localStorage each time, is what made the app freeze on a beat.
+//
+// Comparing first costs one pass that bails at the first difference — far less
+// than the serialisation it replaces, and nothing at all next to the re-render it
+// avoids. Rows are flat records of primitives plus a few small arrays (serials,
+// shortages, pauseLog), so a plain recursive walk is enough.
+function sameVal(a,b){
+  if(a===b)return true;
+  if(a==null||b==null)return a==b;
+  if(typeof a!=="object"||typeof b!=="object")return false;
+  const aArr=Array.isArray(a);
+  if(aArr!==Array.isArray(b))return false;
+  if(aArr){
+    if(a.length!==b.length)return false;
+    for(let i=0;i<a.length;i++)if(!sameVal(a[i],b[i]))return false;
+    return true;
+  }
+  const ka=Object.keys(a);
+  if(ka.length!==Object.keys(b).length)return false;
+  for(let i=0;i<ka.length;i++){const k=ka[i];if(!sameVal(a[k],b[k]))return false}
+  return true;
+}
+// Row order is stable between sweeps — every read is ordered by created_at with id
+// as the tiebreak, and the hot-log merge keeps its Map insertion order — so a
+// positional walk is sound. If the order ever did shift the answer is "changed",
+// which is merely the slow path, never a wrong one.
+function sameRows(a,b){
+  if(a===b)return true;
+  if(!a||!b||a.length!==b.length)return false;
+  for(let i=0;i<a.length;i++)if(!sameVal(a[i],b[i]))return false;
+  return true;
+}
 const SB_CHUNK=200;
 // One response is capped, so a table that can outgrow a single page has to be read
 // page by page. work_logs is the one that does: it holds a row per unit per stage,
@@ -564,9 +603,19 @@ async function dbLoadAll(hot){
   let workLogs=freshLogs;
   if(hot){
     const gone=new Set(logs.gone);
-    const byId=new Map((hot.prev||[]).filter(w=>!gone.has(w.id)).map(w=>[w.id,w]));
-    freshLogs.forEach(w=>byId.set(w.id,w));
-    workLogs=[...byId.values()];
+    const prev=hot.prev||[];
+    const byId=new Map(prev.filter(w=>!gone.has(w.id)).map(w=>[w.id,w]));
+    // A sweep that changed nothing should hand back the *same array*, not an equal
+    // copy: a new identity invalidates every useMemo keyed on the logs and re-renders
+    // the app. Only the hot slice can differ, so this is a walk over the handful of
+    // rows just read — not over all of them.
+    let touched=gone.size>0;
+    freshLogs.forEach(w=>{
+      const was=byId.get(w.id);
+      if(!touched&&!sameVal(was,w))touched=true;
+      byId.set(w.id,w);
+    });
+    workLogs=(!touched&&byId.size===prev.length)?prev:[...byId.values()];
   }
   const out={
     orders:orders.map(dbToOrder),projects:projects.map(dbToProject),
@@ -3039,8 +3088,12 @@ const PlanTag=({small,label="תוכנית העבודה שלי"})=>(
 function MyWork({orders,stages,workLogs,onStartWork,onEndWork,onPauseWork,onResumeWork,customTasks,onAddTask,onStartTask,onEndTask,onPauseTask,onResumeTask,onDeleteTask,onMarkPartialTask,onMarkDoneTask,users,dailyPlans,onMarkPlanDone}){
   const {toast}=useToast();
   const {currentUser}=useAuth();
-  const myAccess=currentUser.stageAccess==="all"?stages.map(s=>s.id):(Array.isArray(currentUser.stageAccess)?currentUser.stageAccess:[]);
-  const myActiveLogs=workLogs.filter(w=>w.userId===currentUser.id&&!w.completed);
+  const myAccess=useMemo(()=>currentUser.stageAccess==="all"?stages.map(s=>s.id):(Array.isArray(currentUser.stageAccess)?currentUser.stageAccess:[]),[currentUser,stages]);
+  // The same list as a Set: the checks below ask "is this stage mine" once per
+  // stage per unit per פק"ע, which as an array scan is the inner loop of the
+  // whole screen.
+  const myAccessSet=useMemo(()=>new Set(myAccess),[myAccess]);
+  const myActiveLogs=useMemo(()=>workLogs.filter(w=>w.userId===currentUser.id&&!w.completed),[workLogs,currentUser]);
   const myActiveLog=myActiveLogs[0];
   const [bulkMode,setBulkMode]=useState(false);
   const [bulkSelected,setBulkSelected]=useState([]);
@@ -3050,9 +3103,14 @@ function MyWork({orders,stages,workLogs,onStartWork,onEndWork,onPauseWork,onResu
   const [taskDesc,setTaskDesc]=useState("");
 
   const {done:doneIdx,running:runIdx,busy:busyIdx}=useLogIndex(workLogs);
-  const accessible=orders.filter(o=>(o.stageIds||[]).some(sid=>myAccess.includes(sid)));
+  const accessible=useMemo(()=>orders.filter(o=>(o.stageIds||[]).some(sid=>myAccessSet.has(sid))),[orders,myAccessSet]);
+  // One stage lookup table for this screen. orderRoute() builds its own Map from
+  // the stage list on every call, and the queue below calls it once per פק"ע —
+  // a few thousand identical Maps per render.
+  const stageMap=useMemo(()=>new Map((stages||[]).map(s=>[s.id,s])),[stages]);
   // Today's work plan assigned to me by my manager
-  const myPlans=(dailyPlans||[]).filter(p=>p.userId===currentUser.id&&p.date===todays()).sort((a,b)=>{const sa=stages.find(s=>s.id===a.stageId),sb=stages.find(s=>s.id===b.stageId);return (sa?.order||0)-(sb?.order||0)});
+  const myPlans=useMemo(()=>(dailyPlans||[]).filter(p=>p.userId===currentUser.id&&p.date===todays())
+    .sort((a,b)=>(stageMap.get(a.stageId)?.order||0)-(stageMap.get(b.stageId)?.order||0)),[dailyPlans,currentUser,stageMap]);
   const planPending=(orderId,stageId,serialIds)=>{const o=orders.find(x=>x.id===orderId);if(!o)return [];let sers=o.serials||[];if(Array.isArray(serialIds)&&serialIds.length){sers=sers.filter(sr=>serialIds.includes(sr.id))}return sers.filter(sr=>!doneIdx.has(logKey(sr.id,stageId))&&!runIdx.has(logKey(sr.id,stageId)))};
   // A unit belongs to my plan when a plan line covers its order+stage — either by
   // naming its serial explicitly, or by covering the whole פק"ע (no serials listed).
@@ -3116,7 +3174,7 @@ function MyWork({orders,stages,workLogs,onStartWork,onEndWork,onPauseWork,onResu
   };
 
   // My custom tasks
-  const myTasks=(customTasks||[]).filter(t=>t.userId===currentUser.id);
+  const myTasks=useMemo(()=>(customTasks||[]).filter(t=>t.userId===currentUser.id),[customTasks,currentUser]);
   const activeTask=myTasks.find(t=>t.active&&!t.completed);
 
   const addTask=()=>{if(!taskName.trim())return;onAddTask({id:uid(),userId:currentUser.id,userName:currentUser.name,name:taskName.trim(),description:taskDesc.trim(),createdAt:nowISO(),active:false,completed:false,startTime:null,endTime:null,durationMin:0,paused:false,pauseStart:null,totalPauseMin:0,pauseLog:[]});setTaskName("");setTaskDesc("");setShowTaskForm(false)};
@@ -3125,18 +3183,29 @@ function MyWork({orders,stages,workLogs,onStartWork,onEndWork,onPauseWork,onResu
   // Every pending unit I may start, tagged with whether it came from the work
   // plan my manager assigned me today. Planned units sort first — inside each
   // פק"ע and across פק"עים — so my own plan always sits at the top of the list.
-  const orderQueues=accessible.map(o=>{
-    const allStagesOrdered=orderRoute(o,stages);
+  const orderQueues=useMemo(()=>accessible.map(o=>{
+    // The route, read straight off the shared stage map rather than through
+    // orderRoute() — same result, without a fresh Map per פק"ע.
+    const allStagesOrdered=(o.stageIds||[]).map(id=>stageMap.get(id)).filter(Boolean);
     const units=(o.serials||[]).map(s=>{
       // The unit's true next stage (stages must run in order)
       const next=allStagesOrdered.find(st=>!doneIdx.has(logKey(s.id,st.id)));
-      if(!next||!myAccess.includes(next.id))return null;                                  // done, or not mine to do
+      if(!next||!myAccessSet.has(next.id))return null;                                    // done, or not mine to do
       if(runIdx.has(logKey(s.id,next.id)))return null;                                    // already running
       return{...s,next,planned:isPlanned(o.id,next.id,s.id)};
     }).filter(Boolean).sort((a,b)=>(b.planned?1:0)-(a.planned?1:0));
-    return{order:o,units,planned:units.filter(u=>u.planned).length};
-  }).filter(q=>q.units.length>0).sort((a,b)=>b.planned-a.planned);
-  const visibleQueues=onlyPlan?orderQueues.map(q=>({...q,units:q.units.filter(u=>u.planned)})).filter(q=>q.units.length>0):orderQueues;
+    // id carried on the queue itself so the virtual list keys rows by פק"ע rather
+    // than by position — the list re-sorts as plan units are worked off.
+    return{id:o.id,order:o,units,planned:units.filter(u=>u.planned).length};
+  }).filter(q=>q.units.length>0).sort((a,b)=>b.planned-a.planned),
+    [accessible,stageMap,doneIdx,runIdx,myAccessSet,myPlans]);
+  const visibleQueues=useMemo(()=>onlyPlan?orderQueues.map(q=>({...q,units:q.units.filter(u=>u.planned)})).filter(q=>q.units.length>0):orderQueues,[onlyPlan,orderQueues]);
+  // Admin view: the same two figures were recomputed inline in the markup on every
+  // render — including the pending-unit count, which walks every serial of every
+  // פק"ע against its whole route.
+  const adminActiveWork=useMemo(()=>workLogs.filter(w=>!w.completed),[workLogs]);
+  const adminTotalPending=useMemo(()=>orders.reduce((s,o)=>{const oSt=o.stageIds||[];
+    return s+(o.serials||[]).filter(sr=>!oSt.every(sid=>doneIdx.has(logKey(sr.id,sid)))).length},0),[orders,doneIdx]);
 
   return(
     <div className="fade-in">
@@ -3146,8 +3215,7 @@ function MyWork({orders,stages,workLogs,onStartWork,onEndWork,onPauseWork,onResu
 
           {/* Active workers — group by worker, not by log */}
           {(()=>{
-            const activeWork=workLogs.filter(w=>!w.completed);
-            const totalPending=orders.reduce((s,o)=>{const oSt=o.stageIds||[];return s+(o.serials||[]).filter(sr=>!oSt.every(sid=>doneIdx.has(logKey(sr.id,sid)))).length},0);
+            const activeWork=adminActiveWork,totalPending=adminTotalPending;
             // Group by worker
             const allW={};
             activeWork.forEach(w=>{
@@ -3375,8 +3443,13 @@ function MyWork({orders,stages,workLogs,onStartWork,onEndWork,onPauseWork,onResu
         {myPlans.length>0&&<span style={{fontSize:11,color:"var(--c-dim)"}}>יחידות המסומנות ב-📅 הוקצו לך בתוכנית העבודה</span>}
       </div>
 
-      {/* Available Work — plan units first, each one tagged */}
-      {visibleQueues.map(({order:o,units,planned})=>(
+      {/* Available Work — plan units first, each one tagged.
+          Virtualised: a worker whose access spans the whole plant has a queue as
+          long as the פק"ע list itself, and rendering every card up front — each
+          with up to fifteen unit rows — put tens of thousands of nodes on the page
+          before the tab could paint. Only what fits on screen is built, the same
+          way the פק"ע list works. */}
+      <VirtualList items={visibleQueues} estimate={220} gap={0} renderRow={({order:o,units,planned})=>(
         <Card key={o.id} style={{marginBottom:10,border:planned>0?"1px solid #06b6d455":"1px solid var(--c-border)"}}>
           <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:10,flexWrap:"wrap"}}>
             <span style={{fontWeight:700,color:"#60a5fa"}}>{o.woNumber}</span>
@@ -3404,7 +3477,7 @@ function MyWork({orders,stages,workLogs,onStartWork,onEndWork,onPauseWork,onResu
             {units.length>15&&<div style={{fontSize:12,color:"var(--c-dim)",textAlign:"center"}}>ועוד {units.length-15}...</div>}
           </div>
         </Card>
-      ))}
+      )}/>
       {!myActiveLog&&!activeTask&&visibleQueues.length===0&&(onlyPlan
         ?<EmptyState icon="📅" title="אין יחידות פתוחות בתוכנית שלך" subtitle="כל מה שהוקצה לך להיום בוצע — עבור ל'כל היחידות הממתינות' כדי לראות עבודה נוספת"/>
         :<EmptyState icon="🎉" title="אין עבודה ממתינה!" subtitle="כל היחידות הושלמו"/>)}
@@ -3429,8 +3502,10 @@ function WorkersDashboard({users,workLogs,orders,stages,customTasks,onAddTask,on
   const {toast}=useToast();
   const [search,setSearch]=useState("");
   const [period,setPeriod]=useState("all");
-  const workers=users.filter(u=>u.role!=="admin"&&u.active!==false);
-  const filtered=workers.filter(w=>!search||w.name.includes(search));
+  // Memoised so the indexes below (which key off `filtered`) are not rebuilt by
+  // every unrelated re-render of this screen.
+  const workers=useMemo(()=>users.filter(u=>u.role!=="admin"&&u.active!==false),[users]);
+  const filtered=useMemo(()=>workers.filter(w=>!search||w.name.includes(search)),[workers,search]);
 
   // Period filter for logs
   const filterByPeriod=(dateStr)=>{
@@ -3444,33 +3519,72 @@ function WorkersDashboard({users,workLogs,orders,stages,customTasks,onAddTask,on
     return true;
   };
 
-  const workerData=filtered.map(u=>{
-    const logs=workLogs.filter(w=>w.userId===u.id&&w.completed&&w.durationMin&&filterByPeriod(w.endTime));
-    const totalMin=logs.reduce((s,w)=>s+w.durationMin,0);
+  // ── Indexes ────────────────────────────────────────────────────────────────
+  // Everything below used to be answered by scanning a whole collection from
+  // inside a loop: the owning פק"ע by scanning every order (and every serial in
+  // it) once per log, "did this worker clear that stage" by scanning every log
+  // again inside *that*. On a real database — 56,000 logs, 2,787 פק"ע — the
+  // screen simply stopped. Each scan is now a Map/Set built once.
+  const sMap=useMemo(()=>new Map((stages||[]).map(s2=>[s2.id,s2])),[stages]);
+  const allStageIds=useMemo(()=>(stages||[]).map(s2=>s2.id),[stages]);
+  // serialId → the order that serial belongs to.
+  const orderBySerial=useMemo(()=>{
+    const m=new Map();
+    (orders||[]).forEach(o=>(o.serials||[]).forEach(sr=>{if(sr?.id)m.set(sr.id,o)}));
+    return m;
+  },[orders]);
+  // "user|serial|stage" for every completed log — the inner .some() as a hash lookup.
+  const doneByUser=useMemo(()=>{
+    const s2=new Set();
+    (workLogs||[]).forEach(w=>{if(w.completed&&w.userId&&w.serialId&&w.stageId)s2.add(`${w.userId}|${w.serialId}|${w.stageId}`)});
+    return s2;
+  },[workLogs]);
+  // The logs each worker owns, split once instead of filtered per worker.
+  const logsByUser=useMemo(()=>{
+    const m=new Map();
+    (workLogs||[]).forEach(w=>{
+      if(!w.userId)return;
+      let e=m.get(w.userId);
+      if(!e){e={done:[],active:null};m.set(w.userId,e)}
+      if(w.completed)e.done.push(w);
+      else if(!e.active)e.active=w;
+    });
+    return m;
+  },[workLogs]);
+  const tasksByUser=useMemo(()=>{
+    const m=new Map();
+    (customTasks||[]).forEach(t=>{if(!t.userId)return;const l=m.get(t.userId);if(l)l.push(t);else m.set(t.userId,[t])});
+    return m;
+  },[customTasks]);
+
+  const workerData=useMemo(()=>filtered.map(u=>{
+    const bucket=logsByUser.get(u.id);
+    const logs=(bucket?.done||[]).filter(w=>w.durationMin&&filterByPeriod(w.endTime));
+    const totalMin=logs.reduce((s2,w)=>s2+w.durationMin,0);
     const rate=Number(u.hourlyRate||0);
     const cost=totalMin*(rate/60);
     // Revenue: sum stage prices per completed log
-    const revenue=logs.reduce((s,w)=>{const st=stages.find(s2=>s2.id===w.stageId);return s+Number(st?.price||0)},0);
+    const revenue=logs.reduce((s2,w)=>s2+Number(sMap.get(w.stageId)?.price||0),0);
     // Units: serials where worker completed ALL their assigned stages
-    const workerStageAccess=u.stageAccess==="all"?stages.map(s2=>s2.id):(Array.isArray(u.stageAccess)?u.stageAccess:[]);
+    const workerStageAccess=new Set(u.stageAccess==="all"?allStageIds:(Array.isArray(u.stageAccess)?u.stageAccess:[]));
     const serialsDone=new Set();
     logs.forEach(w=>{
-      const o=orders.find(o2=>(o2.serials||[]).some(sr=>sr.id===w.serialId));
+      const o=orderBySerial.get(w.serialId);
       if(!o)return;
-      const myStagesInOrder=(o.stageIds||[]).filter(sid=>workerStageAccess.includes(sid));
-      const allMyDone=myStagesInOrder.every(sid=>workLogs.some(l=>l.userId===u.id&&l.serialId===w.serialId&&l.stageId===sid&&l.completed));
+      const myStagesInOrder=(o.stageIds||[]).filter(sid=>workerStageAccess.has(sid));
+      const allMyDone=myStagesInOrder.every(sid=>doneByUser.has(`${u.id}|${w.serialId}|${sid}`));
       if(allMyDone)serialsDone.add(w.serialId);
     });
     const units=serialsDone.size;
-    const totalBreaks=logs.reduce((s,w)=>s+((w.pauseLog||[]).length),0);
-    const totalBreakMin=logs.reduce((s,w)=>s+(w.totalPauseMin||0),0);
-    const active=workLogs.find(w=>w.userId===u.id&&!w.completed);
-    const myTasks=(customTasks||[]).filter(t=>t.userId===u.id);
+    const totalBreaks=logs.reduce((s2,w)=>s2+((w.pauseLog||[]).length),0);
+    const totalBreakMin=logs.reduce((s2,w)=>s2+(w.totalPauseMin||0),0);
+    const active=bucket?.active||undefined;
+    const myTasks=tasksByUser.get(u.id)||[];
     const completedTasks=myTasks.filter(t=>t.completed&&filterByPeriod(t.endTime));
-    const taskMin=completedTasks.reduce((s,t)=>s+(t.durationMin||0),0);
-    const taskRev=completedTasks.reduce((s,t)=>s+Number(t.price||0),0);
+    const taskMin=completedTasks.reduce((s2,t)=>s2+(t.durationMin||0),0);
+    const taskRev=completedTasks.reduce((s2,t)=>s2+Number(t.price||0),0);
     return{...u,totalMin,units,cost,revenue:revenue+taskRev,profit:(revenue+taskRev)-cost,uph:totalMin>0?(units/(totalMin/60)):0,active,totalBreaks,totalBreakMin,completedTasks:completedTasks.length,taskMin};
-  });
+  }),[filtered,logsByUser,tasksByUser,sMap,allStageIds,orderBySerial,doneByUser,period]);
 
   return(
     <div className="fade-in">
@@ -5607,24 +5721,33 @@ function YieldDashboard({orders,projects,stages,workLogs}){
   const [fPn,setFPn]=useState("all");
   const [fWo,setFWo]=useState("all");
   const allOrders=orders||[];
-  const byProj=allOrders.filter(o=>fProj==="all"||o.projectId===fProj);
+  const byProj=useMemo(()=>allOrders.filter(o=>fProj==="all"||o.projectId===fProj),[allOrders,fProj]);
   const pnOpts=useMemo(()=>[...new Set(byProj.map(o=>o.pn).filter(Boolean))].sort((a,b)=>String(a).localeCompare(String(b),"he")),[allOrders,fProj]);
   const woOpts=useMemo(()=>byProj.filter(o=>fPn==="all"||o.pn===fPn).sort((a,b)=>String(a.woNumber||"").localeCompare(String(b.woNumber||""),"he")),[allOrders,fProj,fPn]);
   // Keep a narrower filter from sticking around once a wider one excluded it.
   useEffect(()=>{if(fPn!=="all"&&!pnOpts.includes(fPn))setFPn("all")},[pnOpts]);
   useEffect(()=>{if(fWo!=="all"&&!woOpts.some(o=>o.id===fWo))setFWo("all")},[woOpts]);
-  const fOrders=woOpts.filter(o=>fWo==="all"||o.id===fWo);
+  const fOrders=useMemo(()=>woOpts.filter(o=>fWo==="all"||o.id===fWo),[woOpts,fWo]);
   const nFilters=(fProj!=="all"?1:0)+(fPn!=="all"?1:0)+(fWo!=="all"?1:0);
   const clearFilters=()=>{setFProj("all");setFPn("all");setFWo("all")};
 
-  const oY=fOrders.filter(o=>(o.serials||[]).length>0).map(o=>{
+  // Memoised, and the project looked up through a Map: this walks every פק"ע and
+  // used to re-run on every render of the screen, scanning the project list once
+  // per order and the whole order list once per defect type.
+  const projMapY=useMemo(()=>new Map((projects||[]).map(p=>[p.id,p])),[projects]);
+  const oY=useMemo(()=>fOrders.filter(o=>(o.serials||[]).length>0).map(o=>{
     const sn=(o.serials||[]).length,df=(o.defects||[]).filter(d=>d.status!=="closed").length;
     const yP=sn>0?Math.max(0,(1-df/sn)*100):100;
-    return{...o,sn,df,yP,proj:projects.find(p=>p.id===o.projectId)};
-  }).sort((a,b)=>a.yP-b.yP);
+    return{...o,sn,df,yP,proj:projMapY.get(o.projectId)};
+  }).sort((a,b)=>a.yP-b.yP),[fOrders,projMapY]);
   const avg=oY.length?oY.reduce((s,o)=>s+o.yP,0)/oY.length:100;
   const worst=oY.filter(o=>o.yP<90).slice(0,5);
-  const typeDonut=Object.entries(typL).map(([k,l])=>({label:l,value:fOrders.flatMap(o=>(o.defects||[]).filter(d=>d.type===k&&d.status!=="closed")).length})).filter(d=>d.value>0);
+  // One pass over the defects, tallied by type, instead of a pass per type.
+  const typeDonut=useMemo(()=>{
+    const n={};
+    fOrders.forEach(o=>(o.defects||[]).forEach(d=>{if(d.status!=="closed")n[d.type]=(n[d.type]||0)+1}));
+    return Object.entries(typL).map(([k,l])=>({label:l,value:n[k]||0})).filter(d=>d.value>0);
+  },[fOrders]);
   const selLabel=[fProj!=="all"?(projects.find(p=>p.id===fProj)?.name||"פרויקט"):null,fPn!=="all"?`מק"ט ${fPn}`:null,fWo!=="all"?(allOrders.find(o=>o.id===fWo)?.woNumber||'פק"ע'):null].filter(Boolean).join(" · ");
   return(
     <div className="fade-in">
@@ -5666,8 +5789,9 @@ function YieldDashboard({orders,projects,stages,workLogs}){
       <Card style={{marginBottom:14}}>
         <div style={{fontWeight:700,marginBottom:12,fontSize:14}}>Yield לפי פק"ע</div>
         {oY.length===0?<EmptyState icon="📊" title={nFilters>0?"אין נתונים לסינון הזה":"אין נתונים"} subtitle={nFilters>0?"נסה לשנות את הפרויקט / המק\"ט / הפק\"ע, או לנקות את הסינון":"נתוני תפוקה יופיעו אחרי שיירשמו הזמנות"} action={nFilters>0?clearFilters:null} actionLabel="נקה סינון"/>:(
-          <div style={{display:"flex",flexDirection:"column",gap:6}}>
-            {oY.map(o=>(
+          // Virtualised — this is a row per פק"ע in the company, and every one of
+          // them was built into the page whether or not it was ever scrolled to.
+          <VirtualList items={oY} estimate={92} gap={6} renderRow={o=>(
               <div key={o.id} style={{background:"var(--c-deep)",borderRadius:8,padding:"10px 12px",border:`1px solid ${yC(o.yP)}22`}}>
                 <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:6,flexWrap:"wrap",gap:4}}>
                   <div><span style={{fontWeight:700,color:"#60a5fa",fontSize:13}}>{o.woNumber}</span><span style={{fontSize:11,color:"#a78bfa",marginRight:6}}> {o.pn||""}</span></div>
@@ -5683,8 +5807,7 @@ function YieldDashboard({orders,projects,stages,workLogs}){
                   {o.proj&&<span style={{color:"var(--c-tag-blue)"}}>{o.proj.name}</span>}
                 </div>
               </div>
-            ))}
-          </div>
+          )}/>
         )}
       </Card>
 
@@ -7492,9 +7615,19 @@ function AlertsPanel({orders,stages,workLogs,users,onClose,dismissedAlerts,onDis
     orders.forEach(o=>(o.defects||[]).filter(d=>d.status!=="closed"&&(d.severity==="critical"||d.severity==="high")).forEach(d=>{
       a.push({id:`def_${o.id}_${d.id}`,sev:d.severity==="critical"?0:1,icon:d.severity==="critical"?"🔴":"🟠",text:`תקלה ${d.severity==="critical"?"קריטית":"גבוהה"}: ${d.title}`,sub:`פק"ע ${o.woNumber}${d.discoveredDate?` | ${fmt(d.discoveredDate)}`:""}`,color:d.severity==="critical"?"#dc2626":"#f97316"})}));
     orders.filter(o=>o.targetDate&&new Date(o.targetDate)<new Date()).forEach(o=>{const d=daysBetween(o.targetDate,todays());if(d>0)a.push({id:`late_${o.id}`,sev:1,icon:"🚨",text:`פק"ע ${o.woNumber} באיחור ${d} ימים`,sub:`יעד: ${fmt(o.targetDate)}`,color:"#ef4444"})});
-    workLogs.filter(w=>!w.completed).forEach(w=>{const m=Math.round((Date.now()-new Date(w.startTime).getTime())/60000);if(m>120)a.push({id:`stuck_${w.id}`,sev:2,icon:"⏳",text:`${w.userName} תקוע ${fmtTime(m)} על ${w.serialSn}`,sub:stages.find(s=>s.id===w.stageId)?.name||"",color:"#f59e0b"})});
+    const sMap=new Map((stages||[]).map(s=>[s.id,s]));
+    workLogs.filter(w=>!w.completed).forEach(w=>{const m=Math.round((Date.now()-new Date(w.startTime).getTime())/60000);if(m>120)a.push({id:`stuck_${w.id}`,sev:2,icon:"⏳",text:`${w.userName} תקוע ${fmtTime(m)} על ${w.serialSn}`,sub:sMap.get(w.stageId)?.name||"",color:"#f59e0b"})});
     orders.forEach(o=>{const sn=(o.serials||[]).length,df=(o.defects||[]).filter(d=>d.status!=="closed").length;if(sn>0&&df/sn>.2)a.push({id:`yield_${o.id}`,sev:2,icon:"📉",text:`Yield נמוך ב-${o.woNumber}: ${df}/${sn} תקלות`,sub:`${Math.round(df/sn*100)}% שיעור תקלות`,color:"#f97316"})});
-    orders.forEach(o=>{if(!(o.serials||[]).length)return;const last=workLogs.filter(w=>w.orderId===o.id&&w.completed).sort((x,y)=>(y.endTime||"").localeCompare(x.endTime||""))[0];if(last){const d=daysBetween(last.endTime?.slice(0,10),todays());if(d>7)a.push({id:`idle_${o.id}`,sev:3,icon:"💤",text:`אין התקדמות ב-${o.woNumber} כבר ${d} ימים`,sub:`אחרון: ${fmt(last.endTime?.slice(0,10))}`,color:"#8b95a8"})}});
+    // The newest completed log per פק"ע, in one pass over the logs. Asked per order
+    // this was a filter of the whole log table *and a sort of the result* for every
+    // one of them — the most expensive thing on this screen by a wide margin.
+    const lastDone=new Map();
+    workLogs.forEach(w=>{
+      if(!w.completed||!w.orderId)return;
+      const cur=lastDone.get(w.orderId);
+      if(!cur||String(w.endTime||"")>String(cur.endTime||""))lastDone.set(w.orderId,w);
+    });
+    orders.forEach(o=>{if(!(o.serials||[]).length)return;const last=lastDone.get(o.id);if(last){const d=daysBetween(last.endTime?.slice(0,10),todays());if(d>7)a.push({id:`idle_${o.id}`,sev:3,icon:"💤",text:`אין התקדמות ב-${o.woNumber} כבר ${d} ימים`,sub:`אחרון: ${fmt(last.endTime?.slice(0,10))}`,color:"#8b95a8"})}});
     return a.sort((x,y)=>x.sev-y.sev);
   },[orders,stages,workLogs]);
   const visible=alerts.filter(a=>!(dismissedAlerts||[]).includes(a.id));
@@ -7745,19 +7878,47 @@ function LiveFactoryBoard({orders,workLogs,stages,customTasks,users,departments,
   const mutedC=lm?"#5a6478":"#5a6478";
   const dimC=lm?"#8b95a8":"#5a6478";
 
-  const activeWork=workLogs.filter(w=>!w.completed);
-  const activeTasks=(customTasks||[]).filter(t=>t.active&&!t.completed);
+  // ── Why everything below is memoised ───────────────────────────────────────
+  // This board re-renders once a second, by design — the elapsed timers need it.
+  // What it must NOT do once a second is re-derive the whole factory: the scans
+  // here run over every progress record in the company, several of them looked a
+  // user or a stage up *per record*, and perfFor()/stageBreakdown() were called
+  // again for every department on screen. That is the board pinning a CPU core and
+  // taking the rest of the app down with it. Keyed on the data instead of on the
+  // clock, the tick now re-renders the timers and nothing else.
+  const uMap=useMemo(()=>new Map((users||[]).map(u=>[u.id,u])),[users]);
+  const sMapLive=useMemo(()=>new Map((stages||[]).map(s=>[s.id,s])),[stages]);
+  const oMapLive=useMemo(()=>new Map((orders||[]).map(o=>[o.id,o])),[orders]);
+
+  const activeWork=useMemo(()=>workLogs.filter(w=>!w.completed),[workLogs]);
+  const activeTasks=useMemo(()=>(customTasks||[]).filter(t=>t.active&&!t.completed),[customTasks]);
 
   // Live activity per user (active logs + active tasks)
-  const liveByUser={};
-  activeWork.forEach(w=>{(liveByUser[w.userId]=liveByUser[w.userId]||{logs:[],tasks:[]}).logs.push(w)});
-  activeTasks.forEach(t=>{(liveByUser[t.userId]=liveByUser[t.userId]||{logs:[],tasks:[]}).tasks.push(t)});
+  const liveByUser=useMemo(()=>{
+    const m={};
+    activeWork.forEach(w=>{(m[w.userId]=m[w.userId]||{logs:[],tasks:[]}).logs.push(w)});
+    activeTasks.forEach(t=>{(m[t.userId]=m[t.userId]||{logs:[],tasks:[]}).tasks.push(t)});
+    return m;
+  },[activeWork,activeTasks]);
   const userStatus=uid=>{const lv=liveByUser[uid];if(!lv)return"idle";const anyW=lv.logs.some(l=>!l.paused),anyT=lv.tasks.some(t=>!t.paused);return anyW?"working":anyT?"task":(lv.logs.length||lv.tasks.length)?"break":"idle"};
 
   const liveDoneIdx=useDoneIndex(workLogs);
   const isSerDone=(o,s)=>{const st=o.stageIds||[];return st.length>0&&st.every(sid=>liveDoneIdx.has(logKey(s.id,sid)))};
-  const remainingUnits=o=>Math.max(0,(o.serials||[]).length-(o.serials||[]).filter(sr=>isSerDone(o,sr)).length);
-  const doneUnits=o=>(o.serials||[]).filter(sr=>isSerDone(o,sr)).length;
+  // Done/remaining per פק"ע, counted once. These were three separate reduces over
+  // every order — each re-walking every serial against every stage — and they ran
+  // on the clock tick.
+  const unitCounts=useMemo(()=>{
+    const m=new Map();
+    (orders||[]).forEach(o=>{
+      const sers=o.serials||[];
+      let done=0;
+      sers.forEach(sr=>{if(isSerDone(o,sr))done++});
+      m.set(o.id,{done,remaining:Math.max(0,sers.length-done)});
+    });
+    return m;
+  },[orders,liveDoneIdx]);
+  const remainingUnits=o=>unitCounts.get(o.id)?.remaining||0;
+  const doneUnits=o=>unitCounts.get(o.id)?.done||0;
 
   // Available months from completed work logs + completed tasks
   const months=useMemo(()=>[...new Set([
@@ -7766,27 +7927,71 @@ function LiveFactoryBoard({orders,workLogs,stages,customTasks,users,departments,
   ].filter(Boolean))].sort().reverse(),[workLogs,customTasks]);
   const inMonth=iso=>selMonth==="all"||(iso&&iso.slice(0,7)===selMonth);
 
+  // Per-user totals, accumulated in a single pass over the logs and tasks. perfFor
+  // and stageBreakdown are asked for a different set of people every time — the
+  // whole floor, each department, one worker — and each call used to re-scan every
+  // completed record (looking the user up with users.find() per record) for each of
+  // those sets, on every tick. Now the pass happens once per data/month change and
+  // a call is a sum over the handful of ids it was given.
+  const perfByUser=useMemo(()=>{
+    const m=new Map();
+    const slot=id=>{let e=m.get(id);if(!e){e={min:0,cost:0,sale:0,units:0,tasksN:0,stages:new Map()};m.set(id,e)}return e};
+    const add=(id,mins,isTask,stageId)=>{
+      const u=uMap.get(id),e=slot(id);
+      e.min+=mins;
+      e.cost+=mins*Number(u?.hourlyRate||0)/60;
+      e.sale+=mins*Number(u?.saleRate||0)/60;
+      if(isTask)e.tasksN++;
+      else{e.units++;if(stageId)e.stages.set(stageId,(e.stages.get(stageId)||0)+1)}
+    };
+    workLogs.forEach(w=>{if(!w.completed||!w.userId||!inMonth(w.endTime))return;add(w.userId,w.durationMin||0,false,w.stageId)});
+    (customTasks||[]).forEach(t=>{if(!t.completed||!t.userId||!inMonth(t.endTime))return;add(t.userId,t.durationMin||0,true)});
+    return m;
+  },[workLogs,customTasks,uMap,selMonth]);
   // Cumulative performance for a set of user ids (completed logs + tasks), month-filtered
   const perfFor=ids=>{
-    const set=new Set(ids);let min=0,cost=0,sale=0,units=0,tasksN=0;
-    workLogs.forEach(w=>{if(!w.completed||!set.has(w.userId)||!inMonth(w.endTime))return;const u=users.find(x=>x.id===w.userId);const m=w.durationMin||0;min+=m;cost+=m*Number(u?.hourlyRate||0)/60;sale+=m*Number(u?.saleRate||0)/60;units++});
-    (customTasks||[]).forEach(t=>{if(!t.completed||!set.has(t.userId)||!inMonth(t.endTime))return;const u=users.find(x=>x.id===t.userId);const m=t.durationMin||0;min+=m;cost+=m*Number(u?.hourlyRate||0)/60;sale+=m*Number(u?.saleRate||0)/60;tasksN++});
+    let min=0,cost=0,sale=0,units=0,tasksN=0;
+    new Set(ids).forEach(id=>{
+      const e=perfByUser.get(id);if(!e)return;
+      min+=e.min;cost+=e.cost;sale+=e.sale;units+=e.units;tasksN+=e.tasksN;
+    });
     return{min,cost,sale,units,tasksN,profit:sale-cost};
   };
   // Stage output breakdown (operations per stage) for a set of users, month-filtered
   const stageBreakdown=ids=>{
-    const set=new Set(ids);const by={};
-    workLogs.forEach(w=>{if(!w.completed||!set.has(w.userId)||!inMonth(w.endTime))return;const st=stages.find(s=>s.id===w.stageId);if(!st)return;by[st.id]=by[st.id]||{label:st.name,color:st.color,value:0};by[st.id].value++;});
+    const by={};
+    new Set(ids).forEach(id=>{
+      const e=perfByUser.get(id);if(!e)return;
+      e.stages.forEach((n,stageId)=>{
+        const st=sMapLive.get(stageId);if(!st)return;
+        by[st.id]=by[st.id]||{label:st.name,color:st.color,value:0};
+        by[st.id].value+=n;
+      });
+    });
     return Object.values(by).sort((a,b)=>b.value-a.value);
   };
 
   // Sales overview (feature: expected sales + cost of sales) — always cumulative/live
-  const forecastSales=orders.reduce((s,o)=>s+remainingUnits(o)*Number(o.unitPrice||0),0);
-  const realizedSales=orders.reduce((s,o)=>s+doneUnits(o)*Number(o.unitPrice||0),0);
-  const allPerf=perfFor(users.map(u=>u.id));
-
-  const pendingTotal=orders.reduce((s,o)=>s+remainingUnits(o),0);
-  const doneToday=workLogs.filter(w=>w.completed&&w.endTime&&new Date(w.endTime).toDateString()===new Date().toDateString()).length;
+  const {forecastSales,realizedSales,pendingTotal}=useMemo(()=>{
+    let f=0,r=0,pend=0;
+    (orders||[]).forEach(o=>{
+      const c=unitCounts.get(o.id)||{done:0,remaining:0},price=Number(o.unitPrice||0);
+      f+=c.remaining*price;r+=c.done*price;pend+=c.remaining;
+    });
+    return{forecastSales:f,realizedSales:r,pendingTotal:pend};
+  },[orders,unitCounts]);
+  const allPerf=perfFor((users||[]).map(u=>u.id));
+  // Same local-calendar-day test as before, but as a numeric range check instead of
+  // building two Date objects and two toDateString() strings per record — over every
+  // log in the company, once a second. Keyed on the day so it still rolls at midnight.
+  const todayKey=new Date(now).toDateString();
+  const doneToday=useMemo(()=>{
+    const d=new Date();d.setHours(0,0,0,0);
+    const from=d.getTime(),to=from+86400000;
+    let n=0;
+    workLogs.forEach(w=>{if(!w.completed||!w.endTime)return;const t=Date.parse(w.endTime);if(t>=from&&t<to)n++});
+    return n;
+  },[workLogs,todayKey]);
 
   const fmtElapsed=ms=>{const s=Math.floor(ms/1000),m=Math.floor(s/60),h=Math.floor(m/60);return h>0?`${h}:${String(m%60).padStart(2,"0")}:${String(s%60).padStart(2,"0")}`:`${m}:${String(s%60).padStart(2,"0")}`};
   const statusLabel={working:"🔄 עובד",task:"📌 במשימה",break:"⏸️ הפסקה",idle:"😴 לא פעיל"};
@@ -7809,7 +8014,7 @@ function LiveFactoryBoard({orders,workLogs,stages,customTasks,users,departments,
   const liveItems=u=>{
     const lv=liveByUser[u.id];const out=[];if(!lv)return out;
     const seen=new Set();
-    lv.logs.forEach(w=>{const k=w.bulkGroupId||w.id;if(seen.has(k))return;seen.add(k);const grp=w.bulkGroupId?lv.logs.filter(g=>g.bulkGroupId===w.bulkGroupId):[w];const stage=stages.find(s=>s.id===w.stageId);const order=orders.find(o=>o.id===w.orderId);const el=now-new Date(w.startTime).getTime()-(w.totalPauseMin||0)*60000;out.push({key:"w"+k,icon:"🔧",label:stage?.name||"—",color:stage?.color||"#60a5fa",meta:(order?.woNumber||"")+(grp.length>1?` ×${grp.length}`:w.serialSn?" "+w.serialSn:""),time:w.paused?"⏸️":fmtElapsed(Math.max(0,el))})});
+    lv.logs.forEach(w=>{const k=w.bulkGroupId||w.id;if(seen.has(k))return;seen.add(k);const grp=w.bulkGroupId?lv.logs.filter(g=>g.bulkGroupId===w.bulkGroupId):[w];const stage=sMapLive.get(w.stageId);const order=oMapLive.get(w.orderId);const el=now-new Date(w.startTime).getTime()-(w.totalPauseMin||0)*60000;out.push({key:"w"+k,icon:"🔧",label:stage?.name||"—",color:stage?.color||"#60a5fa",meta:(order?.woNumber||"")+(grp.length>1?` ×${grp.length}`:w.serialSn?" "+w.serialSn:""),time:w.paused?"⏸️":fmtElapsed(Math.max(0,el))})});
     lv.tasks.forEach((t,j)=>{const el=t.startTime?now-new Date(t.startTime).getTime()-(t.totalPauseMin||0)*60000:0;out.push({key:"t"+j,icon:"📌",label:t.name,color:"#a78bfa",meta:"משימה",time:t.paused?"⏸️":fmtElapsed(Math.max(0,el))})});
     return out;
   };
@@ -8607,6 +8812,10 @@ function App(){
   const pendingSaveRef=useRef(false); // local changes not yet confirmed saved to Supabase
   const saveRunningRef=useRef(false); // an upsert batch is currently in flight
   const doSaveRef=useRef(null);
+  // Assigned further down, once cacheLS and the collection refs exist. The sweep
+  // and the manual refresh reach it through the ref so they always call the
+  // current one rather than the copy captured when their closure was built.
+  const applyRemoteRef=useRef(null);
   // Applying remote data must be blocked while a local change is unsaved, a save is
   // in flight, or a save just landed — a fetch that started before the save finished
   // returns stale rows and would overwrite the local change (the "click resets" bug).
@@ -8622,17 +8831,7 @@ function App(){
       if(pendingSaveRef.current||saveRunningRef.current)throw new Error("unsaved local changes");
       const [data,users]=await Promise.all([dbLoadAll(),dbLoadUsers()]);
       lastFullSweepRef.current=Date.now();
-      if(data){
-        if(data.orders){setOrders(data.orders);LS.set("orders",data.orders)}
-        if(data.projects){setProjects(data.projects);LS.set("projects",data.projects)}
-        if(data.stages){setStages(data.stages);LS.set("stages",data.stages)}
-        if(data.workLogs){setWorkLogs(data.workLogs);LS.set("workLogs",data.workLogs)}
-        if(data.customTasks){setCustomTasks(data.customTasks);LS.set("customTasks",data.customTasks)}
-        if(data.stageBlocks){setStageBlocks(data.stageBlocks);LS.set("stageBlocks",data.stageBlocks)}
-        if(data.departments){setDepartments(data.departments);LS.set("departments",data.departments)}
-        if(data.dailyPlans){setDailyPlans(data.dailyPlans);LS.set("dailyPlans",data.dailyPlans)}
-        if(data.pnStandards){setPnStandards(data.pnStandards);LS.set("pnStandards",data.pnStandards)}
-      }
+      if(data)applyRemoteRef.current(data);
       if(users?.length)LS.set("users",users);
       setSync("ok");
     }catch{setSync("error")}
@@ -8688,14 +8887,8 @@ function App(){
         // in which case this data is stale and applying it would undo the click.
         if(data&&remoteApplyBlocked()){pollSoon();return}
         if(data){
-          if(data.orders){setOrders(data.orders);LS.set("orders",data.orders)}
-          if(data.workLogs){setWorkLogs(data.workLogs);LS.set("workLogs",data.workLogs)}
-          if(data.customTasks){setCustomTasks(data.customTasks);LS.set("customTasks",data.customTasks)}
-          if(data.stages){setStages(data.stages);LS.set("stages",data.stages)}
-          if(data.projects){setProjects(data.projects);LS.set("projects",data.projects)}
-          if(data.stageBlocks){setStageBlocks(data.stageBlocks);LS.set("stageBlocks",data.stageBlocks)}
-          if(data.departments){setDepartments(data.departments);LS.set("departments",data.departments)}
-          if(data.dailyPlans){setDailyPlans(data.dailyPlans);LS.set("dailyPlans",data.dailyPlans)}
+          // Only the collections that actually moved are applied — see applyRemote.
+          applyRemoteRef.current(data);
           setSync("ok");
         }
       }catch(e){console.warn("Poll error",e)}
@@ -8864,6 +9057,43 @@ function App(){
     lsSeen.current[key]=val;
     LS.set(key,val);
   };
+  // ── Applying what a sweep read ──────────────────────────────────────────────
+  // A sweep that found nothing new must cost nothing. Each collection is compared
+  // against what is already in state (via its ref — the sweep's closure is older
+  // than the current render) and skipped when identical, which keeps the existing
+  // array identity. That identity is what every downstream useMemo is keyed on, so
+  // an unchanged collection now re-renders nothing and re-serialises nothing.
+  //
+  // The refs are updated here rather than waiting for their effects, so two sweeps
+  // in quick succession compare against the newer data, not the older.
+  const remoteSlots=[
+    ["orders",oRef,setOrders,"orders"],
+    ["projects",pRef,setProjects,"projects"],
+    ["stages",sRef,setStages,"stages"],
+    ["workLogs",wRef,setWorkLogs,"workLogs"],
+    ["customTasks",ctRef,setCustomTasks,"customTasks"],
+    ["stageBlocks",sbRef,setStageBlocks,"stageBlocks"],
+    ["departments",dpRef,setDepartments,"departments"],
+    ["dailyPlans",plRef,setDailyPlans,"dailyPlans"],
+    // null (not []) when the pn_standards table isn't there yet — the falsy check
+    // below then keeps whatever standards are cached locally.
+    ["pnStandards",psRef,setPnStandards,"pnStandards"],
+  ];
+  const applyRemote=(data)=>{
+    if(!data)return 0;
+    let changed=0;
+    for(const [key,ref,setter,lsKey] of remoteSlots){
+      const rows=data[key];
+      if(!rows)continue;
+      if(sameRows(ref.current,rows))continue;
+      ref.current=rows;
+      setter(rows);
+      cacheLS(lsKey,rows);
+      changed++;
+    }
+    return changed;
+  };
+  applyRemoteRef.current=applyRemote;
   const persist=(no,np,ns,nw,nct,nsb,ndp,npl,nps)=>{
     const o=no??oRef.current,p=np??pRef.current,s=ns??sRef.current,w=nw??wRef.current,ct=nct??ctRef.current,sb=nsb??sbRef.current,dp=ndp??dpRef.current,pl=npl??plRef.current,ps=nps??psRef.current;
     // Refs lag one render behind the state — sync them now so doSave sees this change
@@ -8945,42 +9175,65 @@ function App(){
   // Only admins, department managers and team leads see beyond their own work.
   const isDeptMgr=currentUser?.role==="dept_manager";
   const allUsers=useMemo(()=>getUsers(),[usersTick,currentUser]);
-  const allStageIds=stages.map(s=>s.id);
-  const scopeIds=overseeingUserIds(currentUser,allUsers,departments);
-  const scopeIdSet=scopeIds==null?null:new Set(scopeIds);
-  const scopeUsers=scopeIds==null?allUsers:allUsers.filter(u=>scopeIdSet.has(u.id));
+  // Every derived list below is memoised, and that is not a micro-optimisation:
+  // this block runs on *every* render of App — every keystroke, every timer tick,
+  // every sweep — and it is the widest scan in the app. Recomputed raw it was the
+  // single thing that made the screen stop responding on a real database.
+  const allStageIds=useMemo(()=>stages.map(s=>s.id),[stages]);
+  const scopeIds=useMemo(()=>overseeingUserIds(currentUser,allUsers,departments),[currentUser,allUsers,departments]);
+  const scopeIdSet=useMemo(()=>scopeIds==null?null:new Set(scopeIds),[scopeIds]);
+  const scopeUsers=useMemo(()=>scopeIds==null?allUsers:allUsers.filter(u=>scopeIdSet.has(u.id)),[scopeIds,scopeIdSet,allUsers]);
   // The user list handed to dashboards/panels — admins see everyone, scoped roles
   // (dept managers, team leads) see only the people they oversee.
   const visibleUsers=scopeIds==null?allUsers:scopeUsers;
-  const visibleDepartments=isDeptMgr?departments.filter(d=>d.id===currentUser.departmentId||d.managerId===currentUser.id):departments;
+  const visibleDepartments=useMemo(()=>isDeptMgr?departments.filter(d=>d.id===currentUser.departmentId||d.managerId===currentUser.id):departments,[isDeptMgr,departments,currentUser]);
   // Leads/managers are created with broad personal access, so their own access must
   // not widen the scope — for them relevance is driven by the people they oversee.
   // A plain employee's scope is simply their own defined work.
-  const relevanceUsers=isLeadRole(currentUser?.role)?scopeUsers.filter(u=>u.id!==currentUser?.id):scopeUsers;
+  const relevanceUsers=useMemo(()=>isLeadRole(currentUser?.role)?scopeUsers.filter(u=>u.id!==currentUser?.id):scopeUsers,[currentUser,scopeUsers]);
+  // Each relevant user's stage ids as a Set. Asked straight from the user record
+  // this was an array .includes() per order per stage per user; as a Set it is a
+  // hash lookup, and the list is built once per scope change rather than per order.
+  const relevanceIdx=useMemo(()=>relevanceUsers.map(u=>({u,stageSet:new Set(userStageIds(u,allStageIds))})),[relevanceUsers,allStageIds]);
+  // Which orders anyone in scope has logged work on. Asked per order — as
+  // workLogs.some(w=>w.orderId===o.id&&…) — this was a scan of every progress
+  // record for every פק"ע: 2,787 × 56,000 ≈ 156 million comparisons, on every
+  // render. One pass over the logs answers it for all of them at once, and the
+  // answer is reused until the logs actually change.
+  const scopeLoggedOrderIds=useMemo(()=>{
+    if(!scopeIdSet)return null;
+    const s=new Set();
+    workLogs.forEach(w=>{if(w.orderId&&scopeIdSet.has(w.userId))s.add(w.orderId)});
+    return s;
+  },[workLogs,scopeIdSet]);
   // An order is visible if: the user is an admin, it is defined work for someone the
   // user oversees (or themselves), or anyone in their scope has logged work on it.
-  const orderVisible=(o)=>{
+  const orderVisible=useCallback((o)=>{
     if(currentUser?.role==="admin")return true;
-    if(relevanceUsers.some(u=>orderIsUsersWork(u,o,allStageIds)))return true;
-    if(scopeIdSet&&workLogs.some(w=>w.orderId===o.id&&scopeIdSet.has(w.userId)))return true;
+    if(relevanceIdx.some(({u,stageSet})=>userHasProjectAccess(u,o.projectId)&&(o.stageIds||[]).some(sid=>stageSet.has(sid))))return true;
+    if(scopeLoggedOrderIds&&scopeLoggedOrderIds.has(o.id))return true;
     return false;
-  };
-  const canViewProject=pid=>{
+  },[currentUser,relevanceIdx,scopeLoggedOrderIds]);
+
+  const filteredOrders=useMemo(()=>orders.filter(orderVisible),[orders,orderVisible]);
+  // The project ids that survived the order filter, collected in one pass — the
+  // question "is this project visible" was previously a scan of the whole order
+  // list, asked once per project and again on every canViewProject() call.
+  const visibleProjectIds=useMemo(()=>new Set(filteredOrders.map(o=>o.projectId)),[filteredOrders]);
+  const filteredProjects=useMemo(()=>currentUser?.role==="admin"?projects:projects.filter(p=>visibleProjectIds.has(p.id)),[projects,visibleProjectIds,currentUser]);
+  const canViewProject=useCallback(pid=>{
     if(!currentUser)return false;
     if(currentUser.role==="admin")return true;
-    return orders.some(o=>o.projectId===pid&&orderVisible(o));
-  };
-
-  const filteredOrders=orders.filter(orderVisible);
-  const filteredProjects=projects.filter(p=>currentUser?.role==="admin"||filteredOrders.some(o=>o.projectId===p.id));
+    return visibleProjectIds.has(pid);
+  },[currentUser,visibleProjectIds]);
   // Scoped roles see the logs of their own people, plus any log on an order they can
   // view (so serial/stage progress done by others still renders correctly).
-  const visibleOrderIds=new Set(filteredOrders.map(o=>o.id));
-  const filteredWorkLogs=scopeIdSet?workLogs.filter(w=>scopeIdSet.has(w.userId)||visibleOrderIds.has(w.orderId)):workLogs;
+  const visibleOrderIds=useMemo(()=>new Set(filteredOrders.map(o=>o.id)),[filteredOrders]);
+  const filteredWorkLogs=useMemo(()=>scopeIdSet?workLogs.filter(w=>scopeIdSet.has(w.userId)||visibleOrderIds.has(w.orderId)):workLogs,[scopeIdSet,workLogs,visibleOrderIds]);
   // Tasks and daily plans belong to a person, so a scoped role only ever sees
   // the ones of the people they oversee (used by reports and the Excel export).
-  const visibleTasks=scopeIdSet?customTasks.filter(t=>scopeIdSet.has(t.userId)):customTasks;
-  const visiblePlans=scopeIdSet?dailyPlans.filter(p=>scopeIdSet.has(p.userId)):dailyPlans;
+  const visibleTasks=useMemo(()=>scopeIdSet?customTasks.filter(t=>scopeIdSet.has(t.userId)):customTasks,[scopeIdSet,customTasks]);
+  const visiblePlans=useMemo(()=>scopeIdSet?dailyPlans.filter(p=>scopeIdSet.has(p.userId)):dailyPlans,[scopeIdSet,dailyPlans]);
 
   const updO=useCallback((fn)=>{setOrders(prev=>{const next=typeof fn==="function"?fn(prev):fn;persist(next,null,null,null);return next})},[]);
   const updP=useCallback((fn)=>{setProjects(prev=>{const next=typeof fn==="function"?fn(prev):fn;persist(null,next,null,null);return next})},[]);
@@ -9422,7 +9675,21 @@ function App(){
   };
   useEffect(()=>{const isi=window.matchMedia("(display-mode:standalone)").matches||window.navigator.standalone;if(isi){setIsStandalone(true);return;}const h=e=>{e.preventDefault();setInstallPrompt(e);setShowInstall(true)};window.addEventListener("beforeinstallprompt",h);window.addEventListener("appinstalled",()=>{setShowInstall(false);setInstallPrompt(null);setIsStandalone(true)});return()=>window.removeEventListener("beforeinstallprompt",h)},[]);
   // Service Worker
-  useEffect(()=>{if(!("serviceWorker" in navigator))return;navigator.serviceWorker.register("./sw.js?v=28").then(reg=>{swRegRef.current=reg;if(reg.waiting)setShowUpdate(true);reg.addEventListener("updatefound",()=>{const nw=reg.installing;if(!nw)return;nw.addEventListener("statechange",()=>{if(nw.state==="installed"&&navigator.serviceWorker.controller)setShowUpdate(true)})});setInterval(()=>reg.update(),30*60*1000)}).catch(()=>{});navigator.serviceWorker.addEventListener("controllerchange",()=>window.location.reload())},[]);
+  useEffect(()=>{if(!("serviceWorker" in navigator))return;navigator.serviceWorker.register("./sw.js?v=30").then(reg=>{swRegRef.current=reg;if(reg.waiting)setShowUpdate(true);reg.addEventListener("updatefound",()=>{const nw=reg.installing;if(!nw)return;nw.addEventListener("statechange",()=>{if(nw.state==="installed"&&navigator.serviceWorker.controller)setShowUpdate(true)})});setInterval(()=>reg.update(),30*60*1000)}).catch(()=>{});
+    // Reload only when a *replacement* worker takes over an already-controlled page
+    // — i.e. a real update, which is what the update banner triggers.
+    //
+    // On a first visit (or the first after the cache is cleared) there is no
+    // controller yet, and the new worker's clients.claim() fires controllerchange
+    // as well. Reloading on that one meant every such visit loaded, parsed and
+    // booted the whole app twice, back to back, for no reason.
+    const hadController=!!navigator.serviceWorker.controller;
+    let reloading=false;
+    navigator.serviceWorker.addEventListener("controllerchange",()=>{
+      if(!hadController||reloading)return;
+      reloading=true;window.location.reload();
+    });
+  },[]);
   // Network status
   useEffect(()=>{const on=()=>{setIsOffline(false);toast("החיבור חזר — מסנכרן נתונים...","success");refreshFromDB(true)};const off=()=>{setIsOffline(true)};window.addEventListener("online",on);window.addEventListener("offline",off);return()=>{window.removeEventListener("online",on);window.removeEventListener("offline",off)}},[]);
   // PWA Install
