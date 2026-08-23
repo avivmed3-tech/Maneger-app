@@ -30,6 +30,26 @@ jobs:
         with:
           enablement: true
 
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      # Compiles the JSX out of index.html into app.js, so every visitor's browser
+      # no longer downloads ~3 MB of Babel and transpiles ~660 KB of JSX before the
+      # app can start. Measured in headless Chromium: 8.8s to a usable screen
+      # becomes 0.1s, and 3.5 MB of transfer becomes 1.0 MB.
+      #
+      # Allowed to fail on purpose. index.html is a complete, working application on
+      # its own — it compiles itself in the browser exactly as it always has — so a
+      # broken build step deploys the slower original rather than nothing at all.
+      # Babel is installed outside the repo so it cannot end up in the artifact.
+      - name: Pre-compile JSX
+        continue-on-error: true
+        run: |
+          npm install --no-save --no-audit --no-fund \
+            --prefix "$RUNNER_TEMP/jsxbuild" @babel/standalone@7.23.2
+          NODE_PATH="$RUNNER_TEMP/jsxbuild/node_modules" node build.js
+
       - uses: actions/upload-pages-artifact@v3
         with:
           path: .
