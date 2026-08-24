@@ -2412,12 +2412,19 @@ function OrderForm({initial,projects,stages,stageBlocks,branchOpts=[],department
 //
 // A signature is capped at what is left, so a stage can never show more units than
 // the פק"ע has, and each one can be taken back on its own from the list below it.
-function QtySignOff({order,stages,workLogs,onSignOff,onDeleteLog}){
+function QtySignOff({order,stages,workLogs,onSignOff,onDeleteLog,compact}){
   const {canEdit,currentUser}=useAuth();
-  // The floor's own supervisors sign for it, not only the editors: a team lead or
-  // a department manager is exactly who knows how many units cleared a stage.
-  const canSign=canEdit||isLeadRole(currentUser?.role);
+  // Who signs what. Managers and editors sign anywhere. A worker signs the stages
+  // they are allowed to work on — the very same permission that decides which
+  // units reach their queue in ״העבודה שלי״ — so a quantity is reported by the
+  // person who actually did that stage, on their own user, and nobody can book
+  // work on a stage that was never theirs.
+  const isMgr=canEdit||isLeadRole(currentUser?.role);
+  const myStageSet=useMemo(()=>currentUser?.stageAccess==="all"?null
+    :new Set(Array.isArray(currentUser?.stageAccess)?currentUser.stageAccess:[]),[currentUser]);
+  const canSignStage=sid=>isMgr||!myStageSet||myStageSet.has(sid);
   const oStages=orderRoute(order,stages);
+  const canSign=oStages.some(st=>canSignStage(st.id));
   const qty=Number(order.qty)||0;
   const qtyIdx=useQtyIndex(workLogs);
   const [amount,setAmount]=useState({});          // stageId → units about to be signed
@@ -2446,6 +2453,7 @@ function QtySignOff({order,stages,workLogs,onSignOff,onDeleteLog}){
     setAmount(p=>({...p,[st.id]:""}));
     setMinutes(p=>({...p,[st.id]:""}));
   };
+  const canUndo=w=>!!onDeleteLog&&(isMgr||w.userId===currentUser?.id);
   const undo=w=>{
     if(!onDeleteLog)return;
     if(!confirm(`לבטל חתימה על ${w.bulkCount} יחידות${w.userName?` (${w.userName})`:""}?`))return;
@@ -2459,17 +2467,25 @@ function QtySignOff({order,stages,workLogs,onSignOff,onDeleteLog}){
   );
   return(
     <div>
-      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",gap:10,flexWrap:"wrap",marginBottom:10}}>
-        <h3 style={{margin:0,fontSize:15}}>✍️ חתימה לפי כמות</h3>
-        <div style={{display:"flex",gap:10,alignItems:"center",flexWrap:"wrap",fontSize:12,color:"var(--c-muted)"}}>
-          <span>יחידות שסיימו את כל המסלול: <b style={{color:fullUnits>=qty&&qty>0?"#10b981":"var(--c-text)"}}>{fullUnits}/{qty}</b></span>
-          {totalNeeded>0&&<span>דיווחי שלבים: <b style={{color:"#3b82f6"}}>{totalSigned}/{totalNeeded}</b></span>}
+      {!compact&&(<>
+        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",gap:10,flexWrap:"wrap",marginBottom:10}}>
+          <h3 style={{margin:0,fontSize:15}}>✍️ חתימה לפי כמות</h3>
+          <div style={{display:"flex",gap:10,alignItems:"center",flexWrap:"wrap",fontSize:12,color:"var(--c-muted)"}}>
+            <span>יחידות שסיימו את כל המסלול: <b style={{color:fullUnits>=qty&&qty>0?"#10b981":"var(--c-text)"}}>{fullUnits}/{qty}</b></span>
+            {totalNeeded>0&&<span>דיווחי שלבים: <b style={{color:"#3b82f6"}}>{totalSigned}/{totalNeeded}</b></span>}
+          </div>
         </div>
-      </div>
-      <div style={{fontSize:12,color:"var(--c-dim)",lineHeight:1.7,marginBottom:12}}>
-        לפק"ע הזו אין מספרים סידוריים, ולכן העבודה מדווחת בכמויות: לכל שלב חותמים כמה יחידות עברו אותו.
-        החתימות נספרות בדיוק כמו דיווח סיריאלי — סרגלי ההתקדמות, יחידות שהושלמו והצפי לסיום מתעדכנים מהן, וכל חתימה נשמרת עם השם והשעה וניתנת לביטול.
-      </div>
+        <div style={{fontSize:12,color:"var(--c-dim)",lineHeight:1.7,marginBottom:12}}>
+          לפק"ע הזו אין מספרים סידוריים, ולכן העבודה מדווחת בכמויות: לכל שלב חותמים כמה יחידות עברו אותו.
+          החתימות נספרות בדיוק כמו דיווח סיריאלי — סרגלי ההתקדמות, יחידות שהושלמו והצפי לסיום מתעדכנים מהן, וכל חתימה נשמרת עם השם והשעה וניתנת לביטול.
+        </div>
+      </>)}
+      {compact&&(
+        <div style={{fontSize:11.5,color:"var(--c-dim)",marginBottom:8}}>
+          יחידות שסיימו את כל המסלול: <b style={{color:fullUnits>=qty&&qty>0?"#10b981":"var(--c-text)"}}>{fullUnits}/{qty}</b>
+          {totalNeeded>0&&<span> · דיווחי שלבים: <b style={{color:"#3b82f6"}}>{totalSigned}/{totalNeeded}</b></span>}
+        </div>
+      )}
       {!oStages.length&&(
         <div style={{fontSize:12.5,color:"#f59e0b",background:"#f59e0b12",border:"1px solid #f59e0b44",borderRadius:9,padding:"10px 13px"}}>
           לפק"ע לא משויכים שלבים — הוסיפו שלבים בעריכת הפק"ע כדי לחתום עליהם.
@@ -2493,7 +2509,9 @@ function QtySignOff({order,stages,workLogs,onSignOff,onDeleteLog}){
                       <td><div style={{minWidth:100}}><PBar pct={pct} h={7}/></div></td>
                       {canSign&&(
                         <td>
-                          {left>0?(
+                          {!canSignStage(st.id)?(
+                            <span title="השלב הזה אינו בהרשאות שלך — הדיווח עליו נעשה ע״י מי שמורשה לו" style={{fontSize:12,color:"var(--c-dim)"}}>🔒 לא בהרשאות שלך</span>
+                          ):left>0?(
                             <div style={{display:"flex",gap:5,alignItems:"center",flexWrap:"wrap"}}>
                               <input type="number" min="1" max={left} value={amount[st.id]??""} placeholder={String(left)}
                                 onChange={e=>setAmount(p=>({...p,[st.id]:e.target.value}))}
@@ -2518,7 +2536,7 @@ function QtySignOff({order,stages,workLogs,onSignOff,onDeleteLog}){
                         <td colSpan={canSign?6:5} style={{fontSize:11.5,color:"var(--c-muted)"}}>
                           <span style={{color:"#10b981",fontWeight:700}}>+{w.bulkCount}</span> יחידות · {w.userName||"—"} · {w.endTime?new Date(w.endTime).toLocaleString("he-IL",{day:"2-digit",month:"2-digit",hour:"2-digit",minute:"2-digit"}):""}
                           {Number(w.durationMin)>0?` · ${fmtTime(w.durationMin)}`:""}
-                          {canSign&&onDeleteLog&&<button onClick={()=>undo(w)} style={{background:"none",border:"none",color:"#ef4444",cursor:"pointer",fontSize:11.5,fontFamily:"inherit",marginRight:8}}>🗑️ בטל</button>}
+                          {canUndo(w)&&<button onClick={()=>undo(w)} style={{background:"none",border:"none",color:"#ef4444",cursor:"pointer",fontSize:11.5,fontFamily:"inherit",marginRight:8}}>🗑️ בטל</button>}
                         </td>
                       </tr>
                     ))}
@@ -2527,7 +2545,7 @@ function QtySignOff({order,stages,workLogs,onSignOff,onDeleteLog}){
               })}
             </tbody>
           </table>
-          {!canSign&&<div style={{fontSize:11.5,color:"var(--c-dim)",marginTop:8}}>לצפייה בלבד — חתימה לפי כמות מבוצעת ע"י מנהל מחלקה, ראש צוות או עורך.</div>}
+          {!canSign&&<div style={{fontSize:11.5,color:"var(--c-dim)",marginTop:8}}>לצפייה בלבד — אף אחד משלבי הפק"ע הזו אינו בהרשאות שלך. חתימה לפי כמות מבוצעת ע"י מנהל מחלקה, ראש צוות, עורך, או עובד שהשלב בהרשאותיו.</div>}
         </div>
       )}
     </div>
@@ -3439,7 +3457,7 @@ function AdminTasksBoard({customTasks,onDeleteTask,onMarkPartialTask,onMarkDoneT
 const PlanTag=({small,label="תוכנית העבודה שלי"})=>(
   <span style={{background:"#06b6d422",color:"#06b6d4",border:"1px solid #06b6d455",borderRadius:10,padding:small?"1px 7px":"2px 9px",fontSize:small?10:11,fontWeight:700,whiteSpace:"nowrap"}}>📅 {label}</span>
 );
-function MyWork({orders,stages,workLogs,onStartWork,onEndWork,onPauseWork,onResumeWork,customTasks,onAddTask,onStartTask,onEndTask,onPauseTask,onResumeTask,onDeleteTask,onMarkPartialTask,onMarkDoneTask,users,dailyPlans,onMarkPlanDone}){
+function MyWork({orders,stages,workLogs,onStartWork,onEndWork,onPauseWork,onResumeWork,onDeleteLog,customTasks,onAddTask,onStartTask,onEndTask,onPauseTask,onResumeTask,onDeleteTask,onMarkPartialTask,onMarkDoneTask,users,dailyPlans,onMarkPlanDone}){
   const {toast}=useToast();
   const {currentUser}=useAuth();
   const myAccess=useMemo(()=>currentUser.stageAccess==="all"?stages.map(s=>s.id):(Array.isArray(currentUser.stageAccess)?currentUser.stageAccess:[]),[currentUser,stages]);
@@ -3554,6 +3572,20 @@ function MyWork({orders,stages,workLogs,onStartWork,onEndWork,onPauseWork,onResu
   }).filter(q=>q.units.length>0).sort((a,b)=>b.planned-a.planned),
     [accessible,stageMap,doneIdx,runIdx,myAccessSet,myPlans]);
   const visibleQueues=useMemo(()=>onlyPlan?orderQueues.map(q=>({...q,units:q.units.filter(u=>u.planned)})).filter(q=>q.units.length>0):orderQueues,[onlyPlan,orderQueues]);
+  // ── פק"ע שאינן מנוהלות סיריאלית ───────────────────────────────────────
+  // These never reach the queue above and never could: that queue is built from
+  // units, and a פק"ע with no serial numbers has none. It is still work, and it is
+  // still *this* worker's work wherever one of its stages is theirs — so it gets
+  // its own list, where the report is a quantity instead of a unit. Only the
+  // orders that still have something unsigned on a stage of mine are listed, the
+  // same rule the unit queue follows.
+  const [openQty,setOpenQty]=useState("");
+  const myQtyIdx=useQtyIndex(workLogs);
+  const qtyOrders=useMemo(()=>accessible.filter(o=>{
+    if(!isQtyOrder(o))return false;
+    const cap=Number(o.qty)||0;
+    return (o.stageIds||[]).some(sid=>myAccessSet.has(sid)&&qtySigned(myQtyIdx,workLogs,o.id,sid)<cap);
+  }),[accessible,myAccessSet,myQtyIdx,workLogs]);
   // Admin view: the same two figures were recomputed inline in the markup on every
   // render — including the pending-unit count, which walks every serial of every
   // פק"ע against its whole route.
@@ -3832,7 +3864,42 @@ function MyWork({orders,stages,workLogs,onStartWork,onEndWork,onPauseWork,onResu
           </div>
         </Card>
       )}/>
-      {!myActiveLog&&!activeTask&&visibleQueues.length===0&&(onlyPlan
+      {qtyOrders.length>0&&(
+        <Card style={{marginBottom:12,border:"1px solid #10b98133"}}>
+          <div style={{fontWeight:700,fontSize:15,color:"#10b981",marginBottom:5}}>✍️ דיווח לפי כמות ({qtyOrders.length})</div>
+          <div style={{fontSize:11.5,color:"var(--c-dim)",lineHeight:1.7,marginBottom:10}}>
+            פק"ע שאינן מנוהלות סיריאלית — אין בהן יחידות להתחיל עליהן טיימר, ולכן מדווחים בהן כמה יחידות עברו כל שלב.
+            אפשר לחתום רק על השלבים שבהרשאות שלך, כל חתימה נרשמת על שמך, ואפשר לבטל חתימה שלך אם טעית.
+          </div>
+          <VirtualList items={qtyOrders} estimate={64} gap={7} renderRow={o=>{
+            const open=openQty===o.id;
+            const cap=Number(o.qty)||0;
+            const mineLeft=(o.stageIds||[]).reduce((n,sid)=>myAccessSet.has(sid)
+              ?n+Math.max(0,cap-Math.min(cap,qtySigned(myQtyIdx,workLogs,o.id,sid))):n,0);
+            const br=branchCode(o.branch);
+            return(
+              <div key={o.id} style={{background:"var(--c-deep)",borderRadius:10,border:`1px solid ${open?"#10b98155":"var(--c-border)"}`,padding:"9px 12px"}}>
+                <div onClick={()=>setOpenQty(open?"":o.id)} style={{display:"flex",justifyContent:"space-between",alignItems:"center",gap:8,flexWrap:"wrap",cursor:"pointer"}}>
+                  <div style={{display:"flex",alignItems:"center",gap:8,flexWrap:"wrap"}}>
+                    <span style={{fontWeight:700,color:"#60a5fa"}}>{o.woNumber}</span>
+                    {o.pn&&<span style={{fontSize:12,color:"#a78bfa"}}>P/N: {o.pn}</span>}
+                    {br&&<span style={{fontSize:11,color:branchColor(br)}}>🏢 {branchLabel(br)}</span>}
+                    <span style={{fontSize:11,color:"var(--c-dim)"}}>כמות: {cap}</span>
+                    {mineLeft>0
+                      ?<span style={{fontSize:11,background:"#f59e0b1a",color:"#f59e0b",border:"1px solid #f59e0b44",padding:"2px 8px",borderRadius:12}}>נותרו {mineLeft} דיווחים שלך</span>
+                      :<span style={{fontSize:11,color:"#10b981"}}>✅ השלבים שלך נחתמו</span>}
+                  </div>
+                  <span style={{fontSize:12,color:open?"#10b981":"var(--c-dim)",fontWeight:600}}>{open?"▲ סגור":"▼ דווח כמות"}</span>
+                </div>
+                {open&&<div style={{marginTop:10}}>
+                  <QtySignOff order={o} stages={stages} workLogs={workLogs} onSignOff={onStartWork} onDeleteLog={onDeleteLog} compact/>
+                </div>}
+              </div>
+            );
+          }}/>
+        </Card>
+      )}
+      {!myActiveLog&&!activeTask&&visibleQueues.length===0&&qtyOrders.length===0&&(onlyPlan
         ?<EmptyState icon="📅" title="אין יחידות פתוחות בתוכנית שלך" subtitle="כל מה שהוקצה לך להיום בוצע — עבור ל'כל היחידות הממתינות' כדי לראות עבודה נוספת"/>
         :<EmptyState icon="🎉" title="אין עבודה ממתינה!" subtitle="כל היחידות הושלמו"/>)}
     </div>
@@ -9832,7 +9899,10 @@ function App(){
       // If admin sign-off (completed=true), check auto delivery
       if(log.completed&&log.orderId)setTimeout(()=>checkAutoDelivery(log.orderId,next),100);
       return next});
-    addAuditEntry({userId:currentUser.id,username:currentUser.username,name:currentUser.name,action:log.completed?"חתימת מנהל":"התחלת עבודה",target:log.serialSn,details:stages.find(s=>s.id===log.stageId)?.name||""});
+    addAuditEntry({userId:currentUser.id,username:currentUser.username,name:currentUser.name,
+      action:isQtyLog(log)?"חתימה לפי כמות":log.completed?"חתימת מנהל":"התחלת עבודה",
+      target:isQtyLog(log)?`${log.bulkCount} יחידות`:log.serialSn,
+      details:stages.find(s=>s.id===log.stageId)?.name||""});
   };
   const handleEndWork=(logId,duration)=>{
     setWorkLogs(prev=>{
@@ -10223,7 +10293,7 @@ function App(){
         {tab==="team"&&isLead&&<TeamDashboard users={getUsers()} workLogs={filteredWorkLogs} orders={filteredOrders} stages={stages} customTasks={customTasks} departments={departments} onAddTask={handleAddTask} onDeleteTask={handleDeleteTask} onMarkPartialTask={handleMarkPartialTask} onMarkDoneTask={handleMarkDoneTask} dailyPlans={dailyPlans} onAddPlan={handleAddPlan} onDeletePlan={handleDeletePlan} onTogglePlanDone={handleTogglePlanDone}/>}
         {tab==="orders"&&<Orders orders={filteredOrders} projects={filteredProjects} stages={stages} stageBlocks={stageBlocks} departments={departments} updO={updO} workLogs={filteredWorkLogs} onWorkLog={handleStartWork} onDeleteLog={handleDeleteLog} workdayHours={workdayHours} setWorkdayHours={setWorkdayHoursPersist} pnStandards={pnStandards}/>}
         {tab==="shortages"&&<Shortages orders={filteredOrders} updO={updO} projects={filteredProjects}/>}
-        {tab==="mywork"&&<MyWork orders={filteredOrders} stages={stages} workLogs={filteredWorkLogs} onStartWork={handleStartWork} onEndWork={handleEndWork} onPauseWork={handlePauseWork} onResumeWork={handleResumeWork} customTasks={customTasks} onAddTask={handleAddTask} onStartTask={handleStartTask} onEndTask={handleEndTask} onPauseTask={handlePauseTask} onResumeTask={handleResumeTask} onDeleteTask={handleDeleteTask} onMarkPartialTask={handleMarkPartialTask} onMarkDoneTask={handleMarkDoneTask} users={getUsers()} dailyPlans={dailyPlans} onMarkPlanDone={handleMarkPlanDone}/>}
+        {tab==="mywork"&&<MyWork orders={filteredOrders} stages={stages} workLogs={filteredWorkLogs} onStartWork={handleStartWork} onEndWork={handleEndWork} onDeleteLog={handleDeleteLog} onPauseWork={handlePauseWork} onResumeWork={handleResumeWork} customTasks={customTasks} onAddTask={handleAddTask} onStartTask={handleStartTask} onEndTask={handleEndTask} onPauseTask={handlePauseTask} onResumeTask={handleResumeTask} onDeleteTask={handleDeleteTask} onMarkPartialTask={handleMarkPartialTask} onMarkDoneTask={handleMarkDoneTask} users={getUsers()} dailyPlans={dailyPlans} onMarkPlanDone={handleMarkPlanDone}/>}
         {tab==="workers"&&(isAdmin||isDeptMgr)&&<WorkersDashboard users={visibleUsers} workLogs={filteredWorkLogs} orders={filteredOrders} stages={stages} customTasks={customTasks} onAddTask={handleAddTask} onDeleteLog={handleDeleteLog} onDeleteTask={handleDeleteTask} onMarkPartialTask={handleMarkPartialTask} onMarkDoneTask={handleMarkDoneTask} dailyPlans={dailyPlans} onAddPlan={handleAddPlan} onDeletePlan={handleDeletePlan} onTogglePlanDone={handleTogglePlanDone}/>}
         {tab==="stdtimes"&&(isAdmin||isDeptMgr||isLead)&&<StandardTimes orders={filteredOrders} stages={stages} stageBlocks={stageBlocks} workLogs={filteredWorkLogs} users={visibleUsers} projects={filteredProjects} pnStandards={pnStandards} onSavePnStd={savePnStd} onDeletePnStd={deletePnStd}/>}
         {tab==="yield"&&<YieldDashboard orders={filteredOrders} projects={filteredProjects} stages={stages} workLogs={filteredWorkLogs}/>}
