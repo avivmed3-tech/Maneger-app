@@ -1,8 +1,8 @@
 {
-  "name": "maneger-app",
+  "name": "omniview",
   "version": "1.0.0",
   "private": true,
-  "description": "מערכת ניהול קו ייצור — PWA",
+  "description": "OmniView — מערכת ניהול רצפת ייצור (PWA)",
   "scripts": {
     "build": "node vercel-build.js"
   },

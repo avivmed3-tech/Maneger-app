@@ -36,6 +36,7 @@ const SHIP = [
   { file: "sw.js" },
   { file: "app-icon-192.png" },
   { file: "app-icon-512.png" },
+  { file: "app-icon-maskable-512.png" },
   { file: "landing.html" },
 ];
 

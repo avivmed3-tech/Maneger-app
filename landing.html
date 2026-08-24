@@ -5,11 +5,11 @@
 <meta name="viewport" content="width=device-width,initial-scale=1"/>
 <meta name="description" content="מערכת SaaS לניהול רצפת ייצור — מעקב הזמנות, שלבי עבודה, מספרים סידוריים, ביצועי עובדים ודוחות בזמן אמת"/>
 <meta property="og:type" content="website"/>
-<meta property="og:title" content="ניהול קו ייצור — מערכת ניהול מפעל חכמה"/>
+<meta property="og:title" content="OmniView — מערכת ניהול רצפת ייצור"/>
 <meta property="og:description" content="מעקב הזמנות, שלבי עבודה, מספרים סידוריים, ביצועי עובדים ודוחות — הכל במקום אחד"/>
 <meta property="og:image" content="app-icon-512.png"/>
 <meta property="og:locale" content="he_IL"/>
-<title>ניהול קו ייצור — מערכת ניהול מפעל חכמה</title>
+<title>OmniView — מערכת ניהול רצפת ייצור</title>
 <link rel="icon" type="image/png" href="app-icon-192.png"/>
 <style>
 @import url('https://fonts.googleapis.com/css2?family=Heebo:wght@300;400;600;800;900&display=swap');
@@ -27,6 +27,9 @@ a{color:var(--accent);text-decoration:none}
 /* ── Hero ── */
 .hero{min-height:100vh;display:flex;flex-direction:column;align-items:center;justify-content:center;text-align:center;padding:60px 20px 40px;position:relative;overflow:hidden}
 .hero::before{content:'';position:absolute;top:-40%;left:-20%;width:140%;height:140%;background:radial-gradient(ellipse at 30% 20%,#3b82f622 0%,transparent 60%),radial-gradient(ellipse at 70% 80%,#06b6d418 0%,transparent 50%);pointer-events:none}
+.brand-lockup{display:flex;flex-direction:column;align-items:center;gap:14px;margin-bottom:22px;animation:fadeUp .6s ease-out}
+.brand-mark{width:78px;height:78px;filter:drop-shadow(0 10px 28px rgba(6,182,212,.35))}
+.brand-word{font-size:clamp(30px,6vw,44px);font-weight:900;letter-spacing:-1.5px;line-height:1;background:linear-gradient(135deg,#3b82f6,#06b6d4);-webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text}
 .hero-badge{display:inline-flex;align-items:center;gap:8px;background:#3b82f618;border:1px solid #3b82f633;border-radius:20px;padding:6px 16px;font-size:13px;color:#93c5fd;margin-bottom:24px;animation:fadeUp .6s ease-out}
 .hero h1{font-size:clamp(32px,7vw,56px);font-weight:900;line-height:1.15;margin-bottom:16px;letter-spacing:-1px;animation:fadeUp .6s ease-out .1s both}
 .hero h1 span{background:linear-gradient(135deg,#3b82f6,#06b6d4);-webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text}
@@ -101,7 +104,11 @@ a{color:var(--accent);text-decoration:none}
 
 <!-- ═══ HERO ═══ -->
 <section class="hero">
-  <div class="hero-badge">⚙️ מערכת ניהול ייצור חכמה</div>
+  <div class="brand-lockup">
+    <svg class="brand-mark" viewBox="0 0 40 40" role="img" aria-label="OmniView"><defs><linearGradient id="ovLandG" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#3b82f6"/><stop offset=".55" stop-color="#2da6e0"/><stop offset="1" stop-color="#06b6d4"/></linearGradient></defs><rect x="2" y="2" width="36" height="36" rx="11.5" fill="url(#ovLandG)"/><rect x="2" y="2" width="36" height="17" rx="11.5" fill="#fff" opacity=".10"/><circle cx="14.8" cy="20" r="6.2" fill="none" stroke="#fff" stroke-width="2.4"/><path d="M23.6 14 L27.2 26.5 L32.6 12.2" fill="none" stroke="#fff" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"/><path d="M18.19 16.61 L16.14 21.34 L13.46 18.66 Z" fill="#fff"/><path d="M11.41 23.39 L16.14 21.34 L13.46 18.66 Z" fill="#fff" fill-opacity=".5"/><path d="M34.01 8.46 L35.48 12.21 L30.42 10.31 Z" fill="#fff"/></svg>
+    <div class="brand-word">OmniView</div>
+  </div>
+  <div class="hero-badge">מערכת ניהול רצפת ייצור חכמה</div>
   <h1>נהל את <span>המפעל שלך</span><br/>ממקום אחד</h1>
   <p>מעקב הזמנות, שלבי עבודה, מספרים סידוריים, ביצועי עובדים ודוחות — בזמן אמת, מכל מכשיר</p>
   <div class="hero-btns">
@@ -257,7 +264,7 @@ a{color:var(--accent);text-decoration:none}
 
 <!-- ═══ FOOTER ═══ -->
 <footer class="footer">
-  <div>⚙️ ניהול קו ייצור — מערכת ניהול מפעל חכמה</div>
+  <div>OmniView — מערכת ניהול רצפת ייצור</div>
   <div style="margin-top:8px">© 2026 כל הזכויות שמורות</div>
 </footer>
 
