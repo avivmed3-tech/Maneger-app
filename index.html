@@ -196,7 +196,7 @@ button{font-family:inherit;cursor:pointer}
 const {useState,useEffect,useCallback,useRef,useMemo}=React;
 
 // ── Config ─────────────────────────────────────────────────────────────────
-const APP_VERSION="4.5.0";const APP_DATE="2026-08-20";
+const APP_VERSION="4.6.0";const APP_DATE="2026-08-24";
 const SB_URL="https://lwiurzkiojctwzllpnmr.supabase.co";
 const SB_KEY="eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imx3aXVyemtpb2pjdHd6bGxwbm1yIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzQ2MjU4NTAsImV4cCI6MjA5MDIwMTg1MH0.jWOnAtsjbefoY18ofSd46WMdgY47Vv4k7LgcHdOrj6Q";
 const SB_H={"Content-Type":"application/json","apikey":SB_KEY,"Authorization":"Bearer "+SB_KEY};
@@ -379,6 +379,25 @@ const SB_CHUNK=200;
 // page, therefore the end", stopping at the first thousand rows of every table.
 // 2,787 פק"ע came back as 1,000, and 56,000 progress records as 1,000.
 const SB_PAGE=1000;
+// ── A column the database does not have (yet) ─────────────────────────────
+// Every release that adds a field adds a column, and the SQL for it has to be run
+// by hand in the Supabase project. Until it is, PostgREST refuses the whole write
+// with PGRST204 — "Could not find the 'branch' column of 'orders' in the schema
+// cache" — and, unguarded, that one missing column would end saving for that table
+// entirely: the retry loop re-sends the same rejected rows every four seconds, and
+// no order, no progress record and no department reaches the server again.
+//
+// A missing column is not worth a broken app, so the column is dropped rather than
+// the save. Everything else in the row lands, what the column held keeps living in
+// the local cache and on the devices that have it, and once the migration is run a
+// reload starts writing it again.
+const SB_MISSING={};
+const sbMissingCol=msg=>{const m=/Could not find the '([^']+)' column/i.exec(String(msg||""));return m?m[1]:null};
+const sbStrip=(table,rows)=>{
+  const drop=SB_MISSING[table];
+  if(!drop||!drop.size)return rows;
+  return rows.map(r=>{const c={...r};drop.forEach(k=>{delete c[k]});return c});
+};
 const SB={
   async get(table,params=""){
     const r=await fetch(`${SB_URL}/rest/v1/${table}?${params}`,{headers:{...sbHeaders(),"Range":"0-9999"}});
@@ -417,9 +436,26 @@ const SB={
     if(arr.length===0)return; // Skip empty upserts
     for(let i=0;i<arr.length;i+=SB_CHUNK){
       const batch=arr.slice(i,i+SB_CHUNK);
-      const r=await fetch(`${SB_URL}/rest/v1/${table}`,{method:"POST",headers:{...sbHeaders(),"Prefer":"resolution=merge-duplicates,return=minimal"},body:JSON.stringify(batch)});
-      if(!r.ok)throw new Error(await r.text());
-      SYNC.mark(table,batch);
+      // Each retry only ever *narrows* what is sent — one more column the database
+      // turns out not to have — so a real failure still surfaces on the first try.
+      for(let attempt=0;;attempt++){
+        const send=sbStrip(table,batch);
+        const r=await fetch(`${SB_URL}/rest/v1/${table}`,{method:"POST",headers:{...sbHeaders(),"Prefer":"resolution=merge-duplicates,return=minimal"},body:JSON.stringify(send)});
+        if(r.ok){
+          // The *full* row is what gets remembered as sent, not the narrowed one:
+          // marking the narrowed row would make it differ from the app's row on
+          // every later save, and the same rejected column would go out forever.
+          SYNC.mark(table,batch);break;
+        }
+        const text=await r.text();
+        const col=sbMissingCol(text);
+        if(col&&attempt<6&&send.some(x=>x&&Object.prototype.hasOwnProperty.call(x,col))){
+          (SB_MISSING[table]||(SB_MISSING[table]=new Set())).add(col);
+          console.warn(`[SB] ${table}.${col} — העמודה עדיין לא קיימת במסד; נשמר בלעדיה`);
+          continue;
+        }
+        throw new Error(text);
+      }
     }
   },
   // Sends only the rows that differ from what the server is known to hold. This is
@@ -468,6 +504,51 @@ function sbErrMsg(e){
   return [j.message,j.hint].filter(Boolean).join(" — ")||raw;
 }
 
+// ── סניף · חטיבה עסקית ─────────────────────────────────────────────────────
+// Priority stamps every שורת פק"ע with a branch number, and that number *is* the
+// business division the work belongs to — it is the one thing in the export that
+// says "this order is ours". It rides along on every row of the file, so carrying
+// it costs nothing; once it is carried, the floor can finally ask the question
+// the number was always for: show me only my division.
+//
+// The four numbers below are the divisions as they stand today. The list is not
+// closed: a number the ERP sends that is not here is still a branch and is shown
+// by its number, and a department can be given any number at all. What the list
+// adds is a name and a colour, so 53 reads as תק"ש everywhere instead of as 53.
+const BRANCHES=[
+  {code:"51",name:"אזרחי",color:"#3b82f6"},
+  {code:"52",name:"משולבות",color:"#a78bfa"},
+  {code:"53",name:'תק"ש',color:"#10b981"},
+  {code:"57",name:"מעבדות",color:"#f59e0b"}
+];
+const BRANCH_MAP=new Map(BRANCHES.map(b=>[b.code,b]));
+// Priority writes a literal 0 for "no branch", exactly as it does for the project code.
+const branchCode=v=>{const c=String(v==null?"":v).trim();return(c==="0"||c==="-")?"":c};
+const branchName=c=>BRANCH_MAP.get(branchCode(c))?.name||"";
+const branchColor=c=>BRANCH_MAP.get(branchCode(c))?.color||"#8b95a8";
+// "53 · תק\"ש" for a known number, "סניף 60" for one the catalogue has never seen.
+const branchLabel=c=>{const k=branchCode(c);if(!k)return"";const n=branchName(k);return n?`${k} · ${n}`:`סניף ${k}`};
+// Every branch number the app currently knows: the catalogue, whatever the ERP
+// actually sent, and whatever a department was given. Sorted numerically, so
+// 51 · 52 · 53 · 57 read in order and a non-numeric code lands at the end.
+const sortBranches=list=>[...new Set((list||[]).map(branchCode).filter(Boolean))]
+  .sort((a,b)=>{const na=Number(a),nb=Number(b);
+    return(isFinite(na)&&isFinite(nb))?na-nb:String(a).localeCompare(String(b),"he",{numeric:true})});
+function branchList(orders,departments){
+  const all=BRANCHES.map(b=>b.code);
+  (orders||[]).forEach(o=>all.push(branchCode(o&&o.branch)));
+  (departments||[]).forEach(d=>(d.branches||[]).forEach(x=>all.push(branchCode(x))));
+  return sortBranches(all);
+}
+// The departments a branch number was given to. A department can hold more than
+// one number, and the same number can be shared by more than one department.
+const deptsForBranch=(departments,code)=>{
+  const k=branchCode(code);
+  return k?(departments||[]).filter(d=>(d.branches||[]).some(x=>branchCode(x)===k)):[];
+};
+// The branch numbers of a department, cleaned and de-duplicated.
+const deptBranches=d=>[...new Set(((d&&d.branches)||[]).map(branchCode).filter(Boolean))];
+
 // ── DB row converters (DB → App format) ────────────────────────────────────
 const dbToUser=r=>({id:r.id,username:r.username,password_hash:r.password_hash,passwordPlain:r.password_plain||"",role:r.role,name:r.name,
   projectAccess:r.project_access,stageAccess:r.stage_access,
@@ -480,11 +561,12 @@ const userToDb=u=>({id:u.id,username:u.username,password_hash:u.password_hash||u
   department_id:u.departmentId||null,manager_id:u.managerId||null,
   company_id:rowCid(u)});
 const dbToOrder=r=>({id:r.id,woNumber:r.wo_number,pn:r.pn,description:r.description,qty:r.qty,
-  unitPrice:r.unit_price,projectId:r.project_id,receivedDate:r.received_date,targetDate:r.target_date,
+  unitPrice:r.unit_price,projectId:r.project_id,branch:branchCode(r.branch),receivedDate:r.received_date,targetDate:r.target_date,
   stageIds:r.stage_ids,blockId:r.block_id,serials:r.serials,shortages:r.shortages,
   defects:r.defects,deliveredSerials:r.delivered_serials,status:r.status,companyId:r.company_id||DEFAULT_COMPANY_ID});
 const orderToDb=o=>({id:o.id,wo_number:o.woNumber,pn:o.pn||null,description:o.description||null,
   qty:Number(o.qty)||0,unit_price:Number(o.unitPrice)||0,project_id:o.projectId||null,
+  branch:branchCode(o.branch)||null,
   received_date:o.receivedDate||null,target_date:o.targetDate||null,stage_ids:o.stageIds||[],
   block_id:o.blockId||null,serials:o.serials||[],shortages:o.shortages||[],
   defects:o.defects||[],delivered_serials:o.deliveredSerials||[],status:o.status||"open",
@@ -518,8 +600,11 @@ const dbToBlock=r=>({id:r.id,name:r.name,stages:r.stages,companyId:r.company_id|
 const blockToDb=b=>({id:b.id,name:b.name,stages:b.stages||[],company_id:rowCid(b)});
 const dbToProject=r=>({id:r.id,name:r.name,companyId:r.company_id||DEFAULT_COMPANY_ID});
 const projectToDb=p=>({id:p.id,name:p.name,company_id:rowCid(p)});
-const dbToDept=r=>({id:r.id,name:r.name,color:r.color||"#3b82f6",managerId:r.manager_id||"",companyId:r.company_id||DEFAULT_COMPANY_ID});
-const deptToDb=d=>({id:d.id,name:d.name,color:d.color||"#3b82f6",manager_id:d.managerId||null,company_id:rowCid(d)});
+const dbToDept=r=>({id:r.id,name:r.name,color:r.color||"#3b82f6",managerId:r.manager_id||"",
+  branches:Array.isArray(r.branch_codes)?r.branch_codes.map(branchCode).filter(Boolean):[],
+  companyId:r.company_id||DEFAULT_COMPANY_ID});
+const deptToDb=d=>({id:d.id,name:d.name,color:d.color||"#3b82f6",manager_id:d.managerId||null,
+  branch_codes:deptBranches(d),company_id:rowCid(d)});
 // Daily work plans — a manager assigns a worker an order+stage to work on for a given day.
 const dbToPlan=r=>({id:r.id,userId:r.user_id,userName:r.user_name,date:r.plan_date,orderId:r.order_id||"",stageId:r.stage_id||"",targetQty:Number(r.target_qty||0),serialIds:Array.isArray(r.serial_ids)?r.serial_ids:[],note:r.note||"",done:r.done||false,createdBy:r.created_by||"",createdByName:r.created_by_name||"",createdAt:r.created_at,companyId:r.company_id||DEFAULT_COMPANY_ID});
 const planToDb=p=>({id:p.id,user_id:p.userId,user_name:p.userName||null,plan_date:p.date,order_id:p.orderId||null,stage_id:p.stageId||null,target_qty:Number(p.targetQty||0),serial_ids:Array.isArray(p.serialIds)?p.serialIds:[],note:p.note||null,done:p.done||false,created_by:p.createdBy||null,created_by_name:p.createdByName||null,company_id:rowCid(p),updated_at:new Date().toISOString()});
@@ -647,8 +732,8 @@ async function dbLoadUsers(){
 }
 // Demo departments — each has one manager (dept_manager) + two team leads, every team lead has ≥3 workers.
 const DEF_DEPTS=[
-  {id:"demo_d1",name:"מחלקת הרכבה",color:"#8b5cf6",managerId:"dm1"},
-  {id:"demo_d2",name:"מחלקת בדיקות",color:"#06b6d4",managerId:"dm2"}
+  {id:"demo_d1",name:"מחלקת הרכבה",color:"#8b5cf6",managerId:"dm1",branches:["51","52"]},
+  {id:"demo_d2",name:"מחלקת בדיקות",color:"#06b6d4",managerId:"dm2",branches:["53","57"]}
 ];
 // Full demo organization covering every role type, with a logical department → team-lead → worker hierarchy.
 const FALLBACK_USERS=[
@@ -826,18 +911,75 @@ const useLogIndex=workLogs=>useMemo(()=>buildLogIndex(workLogs),[workLogs]);
 const useDoneIndex=workLogs=>useMemo(()=>buildLogIndex(workLogs).done,[workLogs]);
 const isDone=(idx,workLogs,serialId,stageId)=>idx?idx.has(logKey(serialId,stageId))
   :(workLogs||[]).some(w=>w.serialId===serialId&&w.stageId===stageId&&w.completed);
-// How many of an order's units cleared its whole route.
-function orderDoneCount(order,oStages,workLogs,doneIdx){
+// ── חתימה לפי כמות ────────────────────────────────────────────────────────
+// Not every פק"ע is managed serially. Plenty of them are a quantity of parts that
+// nobody ever numbers — and the app used to have nothing to say about those: with
+// no serial numbers there is no unit to report against, so every counter stayed 0
+// and the row read "הושלמה · 0/0" for ever.
+//
+// A quantity sign-off is the same fact one level up: instead of "unit #7 cleared
+// לחיטה", it records "40 units cleared לחיטה". It is stored as an ordinary work
+// log with no serial and a count — the columns are already there (bulk / bulkCount,
+// used by group work) — so it needs no new table, syncs like everything else, and
+// shows up in the history and the undo journal beside every other record.
+//
+// A log with a count but no serial is exactly this and nothing else: every other
+// log in the app, group ones included, carries the serial it belongs to.
+const isQtyLog=w=>!!w&&!!w.completed&&!w.serialId&&!!w.orderId&&!!w.stageId&&Number(w.bulkCount)>0;
+// orderId → stageId → units signed. One pass, same idea as the done-index: asked
+// per order per stage across a few thousand פק"ע, a scan of every log would be
+// what makes the list crawl.
+function buildQtyIndex(workLogs){
+  const m=new Map();
+  (workLogs||[]).forEach(w=>{
+    if(!isQtyLog(w))return;
+    let st=m.get(w.orderId);if(!st){st=new Map();m.set(w.orderId,st)}
+    st.set(w.stageId,(st.get(w.stageId)||0)+Number(w.bulkCount||0));
+  });
+  return m;
+}
+const useQtyIndex=workLogs=>useMemo(()=>buildQtyIndex(workLogs),[workLogs]);
+// Callers without an index still get the right answer — they pay for a scan.
+const qtySigned=(qtyIdx,workLogs,orderId,stageId)=>{
+  if(qtyIdx){const st=qtyIdx.get(orderId);return st?(st.get(stageId)||0):0}
+  return(workLogs||[]).reduce((n,w)=>(isQtyLog(w)&&w.orderId===orderId&&w.stageId===stageId)?n+Number(w.bulkCount||0):n,0);
+};
+// A פק"ע tracked by quantity: no serial numbers, but a quantity to work through.
+const isQtyOrder=order=>!((order&&order.serials||[]).length)&&Number(order&&order.qty)>0;
+// The units an order's progress is measured against — its serials, or its quantity
+// when it has none.
+const orderUnits=order=>{const n=((order&&order.serials)||[]).length;return n||(Number(order&&order.qty)||0)};
+// Quantity progress of one פק"ע: stage passes signed out of the passes it needs,
+// and how many units cleared the *whole* route (the stage that got the fewest —
+// a unit is only finished once every stage of the route has been signed for it).
+// Signatures are capped at the order's quantity, so an over-signed stage cannot
+// push a bar past 100%.
+function orderQtyPasses(order,oStages,workLogs,qtyIdx){
+  const cap=Number(order?.qty)||0;
+  if(!cap||!oStages.length)return{done:0,total:0,full:0};
+  let done=0,full=Infinity;
+  oStages.forEach(st=>{
+    const n=Math.min(cap,qtySigned(qtyIdx,workLogs,order.id,st.id));
+    done+=n;full=Math.min(full,n);
+  });
+  return{done,total:cap*oStages.length,full:full===Infinity?0:full};
+}
+// How many of an order's units cleared its whole route. Serial by serial where the
+// פק"ע has serials; from the quantity signatures where it does not.
+function orderDoneCount(order,oStages,workLogs,doneIdx,qtyIdx){
   const sers=order?.serials||[];
   if(!oStages.length)return 0;
+  if(!sers.length)return orderQtyPasses(order,oStages,workLogs,qtyIdx).full;
   return sers.filter(sr=>oStages.every(st=>isDone(doneIdx,workLogs,sr.id,st.id))).length;
 }
 // How many *stage passes* a פק"ע has recorded, out of how many it needs. The
 // whole-unit count above only moves when a unit clears its entire route, so a
 // פק"ע that is genuinely half-built through six of eight stages still reads 0.
-function orderStagePasses(order,oStages,workLogs,doneIdx){
+function orderStagePasses(order,oStages,workLogs,doneIdx,qtyIdx){
   const sers=order?.serials||[];
-  if(!sers.length||!oStages.length)return{done:0,total:0};
+  if(!oStages.length)return{done:0,total:0};
+  // No serials — the same count, taken from the quantity signatures instead.
+  if(!sers.length){const q=orderQtyPasses(order,oStages,workLogs,qtyIdx);return{done:q.done,total:q.total,byQty:true}}
   let done=0;
   sers.forEach(sr=>oStages.forEach(st=>{if(isDone(doneIdx,workLogs,sr.id,st.id))done++}));
   return{done,total:sers.length*oStages.length};
@@ -855,19 +997,23 @@ function orderStagePasses(order,oStages,workLogs,doneIdx){
 //   ahead    units were reported although the ERP still calls it open
 //   ok       the two agree
 const REPORT_STATE={
-  nounits:{icon:"🚫",label:"ללא יחידות לדיווח",color:"#8b95a8",
-    hint:'לפק"ע אין מספרים סידוריים, ולכן אי אפשר לדווח עליה עבודה והמונים שלה יישארו 0. הסטטוס הגיע מה-ERP בייבוא. אפשר להוסיף סידוריים בכרטיס הפק"ע, או לייבא מחדש עם גיליון ״סידוריים״ / ״השלם סידוריים״.'},
+  nounits:{icon:"🔢",label:"ללא סידוריים",color:"#8b95a8",
+    hint:'לפק"ע אין מספרים סידוריים ועדיין לא דווחה עליה עבודה. אם היא לא מנוהלת סיריאלית — פתחו אותה וחתמו ״לפי כמות״ לכל שלב, וההתקדמות תיספר משם. לחלופין אפשר להוסיף סידוריים בכרטיס הפק"ע, או לייבא מחדש עם גיליון ״סידוריים״ / ״השלם סידוריים״.'},
   gap:{icon:"⚠️",label:"פער מול הסטטוס",color:"#f59e0b",
     hint:'הסטטוס הגיע מה-ERP, אבל בדיווחי העבודה באפליקציה חסרות יחידות. זה תקין אם העבודה נעשתה לפני שהמערכת נכנסה לשימוש.'},
   ahead:{icon:"▶️",label:"דווחה עבודה",color:"#3b82f6",
     hint:'ה-ERP עדיין מסמן את הפק"ע כפתוחה, אבל כבר דווחה עליה עבודה באפליקציה.'},
   ok:null
 };
-function orderReportState(order,oStages,workLogs,doneIdx){
+function orderReportState(order,oStages,workLogs,doneIdx,qtyIdx){
   const serials=order?.serials||[];
   const st=order?.status||"open";
-  if(!serials.length)return"nounits";
-  const passes=orderStagePasses(order,oStages,workLogs,doneIdx);
+  const passes=orderStagePasses(order,oStages,workLogs,doneIdx,qtyIdx);
+  // Nothing has been reported and there are no serials — either it is waiting for
+  // its first quantity signature, or there is no quantity and no route to sign at
+  // all. Either way the counters are 0 by construction and the badge says why.
+  if(!passes.total)return"nounits";
+  if(!serials.length&&!passes.done)return"nounits";
   if((st==="complete"||st==="partial")&&passes.done<passes.total)return"gap";
   if(st==="open"&&passes.done>0)return"ahead";
   return"ok";
@@ -877,10 +1023,14 @@ function orderPerUnitMin(order,stages,stageBlocks){
 }
 // Remaining estimated work minutes for an order — only stages not yet completed
 // per unit. Falls back to the full per-unit estimate × qty when there are no serials.
-function orderRemainingMin(order,stages,stageBlocks,workLogs,doneIdx){
+function orderRemainingMin(order,stages,stageBlocks,workLogs,doneIdx,qtyIdx){
   const oStages=orderRoute(order,stages);
   const serials=order.serials||[];
-  if(serials.length===0)return oStages.reduce((s,st)=>s+stageMinutesFor(order,st,stageBlocks),0)*Number(order.qty||0);
+  // Tracked by quantity: what is left is the units of each stage still unsigned.
+  if(serials.length===0)return oStages.reduce((s,st)=>{
+    const left=Math.max(0,Number(order.qty||0)-Math.min(Number(order.qty||0),qtySigned(qtyIdx,workLogs,order.id,st.id)));
+    return s+stageMinutesFor(order,st,stageBlocks)*left;
+  },0);
   let total=0;
   serials.forEach(sr=>oStages.forEach(st=>{
     if(!isDone(doneIdx,workLogs,sr.id,st.id))total+=stageMinutesFor(order,st,stageBlocks);
@@ -2133,15 +2283,17 @@ function Dashboard({orders,projects,stages,users,workLogs,departments,customTask
 // ══════════════════════════════════════════════════════════════════════════
 // ═══ ORDERS (Work Orders / פקעות) ════════════════════════════════════════
 // ══════════════════════════════════════════════════════════════════════════
-function OrderForm({initial,projects,stages,stageBlocks,onSave,onClose}){
+function OrderForm({initial,projects,stages,stageBlocks,branchOpts=[],departments=[],onSave,onClose}){
   const {toast}=useToast();
   const [f,setF]=useState({
     woNumber:initial?.woNumber||"",description:initial?.description||"",pn:initial?.pn||"",
     qty:initial?.qty||"",unitPrice:initial?.unitPrice||"",projectId:initial?.projectId||"",
+    branch:branchCode(initial?.branch),
     receivedDate:initial?.receivedDate||todays(),targetDate:initial?.targetDate||"",
     stageIds:initial?.stageIds||stages.map(s=>s.id),
     blockId:initial?.blockId||""
   });
+  const [otherBranch,setOtherBranch]=useState(false);
   const [genSerials,setGenSerials]=useState(!initial);
   const [snPrefix,setSnPrefix]=useState(initial?.pn||"");
   const [snStart,setSnStart]=useState(1);
@@ -2182,6 +2334,20 @@ function OrderForm({initial,projects,stages,stageBlocks,onSave,onClose}){
         <Field label="כמות יחידות *" type="number" value={f.qty} onChange={v=>s("qty",v)}/>
         <Field label="מחיר ליחידה (₪)" type="number" value={f.unitPrice} onChange={v=>s("unitPrice",v)}/>
         <div style={{display:"flex",flexDirection:"column",gap:4}}><label style={{fontSize:11,color:"var(--c-dim)",fontWeight:600}}>פרויקט</label><select value={f.projectId} onChange={e=>s("projectId",e.target.value)}><option value="">-- בחר פרויקט --</option>{projects.map(p=><option key={p.id} value={p.id}>{p.name}</option>)}</select></div>
+        <div style={{display:"flex",flexDirection:"column",gap:4}}>
+          <label style={{fontSize:11,color:"var(--c-dim)",fontWeight:600}}>סניף (חטיבה עסקית)</label>
+          <select value={otherBranch?"__other":f.branch} onChange={e=>{
+            if(e.target.value==="__other"){setOtherBranch(true);s("branch","")}
+            else{setOtherBranch(false);s("branch",e.target.value)}
+          }}>
+            <option value="">— ללא סניף —</option>
+            {[...new Set([...branchOpts,...(f.branch?[f.branch]:[])])].map(c=><option key={c} value={c}>{branchLabel(c)}</option>)}
+            <option value="__other">➕ מספר סניף אחר…</option>
+          </select>
+          {otherBranch&&<input value={f.branch} onChange={e=>s("branch",e.target.value.trim())} placeholder="מספר סניף" style={{marginTop:4}}/>}
+          {f.branch&&deptsForBranch(departments,f.branch).length>0&&
+            <div style={{fontSize:10.5,color:"var(--c-dim)",marginTop:3}}>🏢 {deptsForBranch(departments,f.branch).map(d=>d.name).join(" · ")}</div>}
+        </div>
         <Field label="תאריך קבלה" type="date" value={f.receivedDate} onChange={v=>s("receivedDate",v)}/>
         <Field label="יעד אספקה" type="date" value={f.targetDate} onChange={v=>s("targetDate",v)}/>
       </div>
@@ -2231,6 +2397,139 @@ function OrderForm({initial,projects,stages,stageBlocks,onSave,onClose}){
         <Btn onClick={onClose}>ביטול</Btn>
         <Btn color="#10b981" onClick={handleSave}>שמור</Btn>
       </div>
+    </div>
+  );
+}
+
+// ══════════════════════════════════════════════════════════════════════════
+// ═══ QUANTITY SIGN-OFF (חתימה לפי כמות) ═════════════════════════════════
+// ══════════════════════════════════════════════════════════════════════════
+// For a פק"ע that is not managed serially. The serial grid asks "did unit #7 pass
+// this stage" and there is no unit #7 to ask about; this asks the only question
+// that has an answer — "how many passed" — and stores it as a work log with a
+// count and no serial (see isQtyLog). From there every progress bar, unit count
+// and remaining-work estimate reads it exactly as it reads serial progress.
+//
+// A signature is capped at what is left, so a stage can never show more units than
+// the פק"ע has, and each one can be taken back on its own from the list below it.
+function QtySignOff({order,stages,workLogs,onSignOff,onDeleteLog}){
+  const {canEdit,currentUser}=useAuth();
+  // The floor's own supervisors sign for it, not only the editors: a team lead or
+  // a department manager is exactly who knows how many units cleared a stage.
+  const canSign=canEdit||isLeadRole(currentUser?.role);
+  const oStages=orderRoute(order,stages);
+  const qty=Number(order.qty)||0;
+  const qtyIdx=useQtyIndex(workLogs);
+  const [amount,setAmount]=useState({});          // stageId → units about to be signed
+  const [minutes,setMinutes]=useState({});        // stageId → optional measured time
+  const [openHist,setOpenHist]=useState("");
+  const signedOf=sid=>Math.min(qty,qtySigned(qtyIdx,workLogs,order.id,sid));
+  const histOf=sid=>(workLogs||[]).filter(w=>isQtyLog(w)&&w.orderId===order.id&&w.stageId===sid)
+    .sort((a,b)=>String(b.endTime||b.startTime||"").localeCompare(String(a.endTime||a.startTime||"")));
+  const totalSigned=oStages.reduce((n,st)=>n+signedOf(st.id),0);
+  const totalNeeded=qty*oStages.length;
+  const fullUnits=oStages.length?Math.min(...oStages.map(st=>signedOf(st.id))):0;
+
+  const sign=(st,n)=>{
+    const left=qty-signedOf(st.id);
+    const count=Math.min(Math.floor(Number(n)||0),left);
+    if(!(count>0))return;
+    const min=Math.max(0,Number(minutes[st.id])||0);
+    onSignOff({id:uid(),userId:currentUser.id,userName:currentUser.name,
+      // No serial: this is the whole point — the count is the unit.
+      serialId:null,serialSn:null,stageId:st.id,orderId:order.id,
+      startTime:nowISO(),endTime:nowISO(),completed:true,
+      // Zero unless someone actually measured the batch. A made-up duration would
+      // land in זמן בפועל and poison every standard-time comparison in the app.
+      durationMin:min,paused:false,pauseStart:null,totalPauseMin:0,pauseLog:[],
+      bulk:true,bulkGroupId:null,bulkCount:count});
+    setAmount(p=>({...p,[st.id]:""}));
+    setMinutes(p=>({...p,[st.id]:""}));
+  };
+  const undo=w=>{
+    if(!onDeleteLog)return;
+    if(!confirm(`לבטל חתימה על ${w.bulkCount} יחידות${w.userName?` (${w.userName})`:""}?`))return;
+    onDeleteLog([w.id]);
+  };
+
+  if(!qty)return(
+    <div style={{fontSize:12.5,color:"var(--c-muted)",background:"#f59e0b12",border:"1px solid #f59e0b44",borderRadius:9,padding:"10px 13px"}}>
+      <b style={{color:"#f59e0b"}}>אין כמות בפק"ע.</b> כדי לעקוב לפי כמות יש להזין כמות יחידות בעריכת הפק"ע.
+    </div>
+  );
+  return(
+    <div>
+      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",gap:10,flexWrap:"wrap",marginBottom:10}}>
+        <h3 style={{margin:0,fontSize:15}}>✍️ חתימה לפי כמות</h3>
+        <div style={{display:"flex",gap:10,alignItems:"center",flexWrap:"wrap",fontSize:12,color:"var(--c-muted)"}}>
+          <span>יחידות שסיימו את כל המסלול: <b style={{color:fullUnits>=qty&&qty>0?"#10b981":"var(--c-text)"}}>{fullUnits}/{qty}</b></span>
+          {totalNeeded>0&&<span>דיווחי שלבים: <b style={{color:"#3b82f6"}}>{totalSigned}/{totalNeeded}</b></span>}
+        </div>
+      </div>
+      <div style={{fontSize:12,color:"var(--c-dim)",lineHeight:1.7,marginBottom:12}}>
+        לפק"ע הזו אין מספרים סידוריים, ולכן העבודה מדווחת בכמויות: לכל שלב חותמים כמה יחידות עברו אותו.
+        החתימות נספרות בדיוק כמו דיווח סיריאלי — סרגלי ההתקדמות, יחידות שהושלמו והצפי לסיום מתעדכנים מהן, וכל חתימה נשמרת עם השם והשעה וניתנת לביטול.
+      </div>
+      {!oStages.length&&(
+        <div style={{fontSize:12.5,color:"#f59e0b",background:"#f59e0b12",border:"1px solid #f59e0b44",borderRadius:9,padding:"10px 13px"}}>
+          לפק"ע לא משויכים שלבים — הוסיפו שלבים בעריכת הפק"ע כדי לחתום עליהם.
+        </div>
+      )}
+      {oStages.length>0&&(
+        <div style={{overflowX:"auto"}}>
+          <table>
+            <thead><tr><th>שלב</th><th>נחתם</th><th>נותר</th><th style={{minWidth:110}}>התקדמות</th>{canSign&&<th style={{minWidth:210}}>חתימה</th>}<th></th></tr></thead>
+            <tbody>
+              {oStages.map(st=>{
+                const done=signedOf(st.id),left=Math.max(0,qty-done);
+                const pct=qty?Math.round(done/qty*100):0;
+                const hist=histOf(st.id);
+                return(
+                  <React.Fragment key={st.id}>
+                    <tr>
+                      <td style={{fontWeight:700,color:st.color}}>{st.name}</td>
+                      <td style={{fontWeight:700,color:done?"#10b981":"var(--c-dim)"}}>{done}</td>
+                      <td style={{color:left?"#f59e0b":"var(--c-dim)"}}>{left}</td>
+                      <td><div style={{minWidth:100}}><PBar pct={pct} h={7}/></div></td>
+                      {canSign&&(
+                        <td>
+                          {left>0?(
+                            <div style={{display:"flex",gap:5,alignItems:"center",flexWrap:"wrap"}}>
+                              <input type="number" min="1" max={left} value={amount[st.id]??""} placeholder={String(left)}
+                                onChange={e=>setAmount(p=>({...p,[st.id]:e.target.value}))}
+                                style={{width:70,padding:"5px 7px",fontSize:12}} title={`עד ${left} יחידות`}/>
+                              <input type="number" min="0" value={minutes[st.id]??""} placeholder="דק' (רשות)"
+                                onChange={e=>setMinutes(p=>({...p,[st.id]:e.target.value}))}
+                                style={{width:96,padding:"5px 7px",fontSize:12}} title="זמן העבודה בפועל על האצווה — לא חובה. אם יוזן, ייכנס לחישובי זמן בפועל מול התקן"/>
+                              <Btn small color="#10b981" onClick={()=>sign(st,amount[st.id]||left)}>✍️ חתום</Btn>
+                              {(!amount[st.id]||Number(amount[st.id])>=left)&&left>1&&<span style={{fontSize:11,color:"var(--c-dim)"}}>הכל ({left})</span>}
+                            </div>
+                          ):<span style={{fontSize:12,color:"#10b981",fontWeight:700}}>✅ הושלם</span>}
+                        </td>
+                      )}
+                      <td style={{textAlign:"center"}}>
+                        {hist.length>0&&<button onClick={()=>setOpenHist(h=>h===st.id?"":st.id)}
+                          style={{background:"none",border:"1px solid var(--c-border2)",borderRadius:6,padding:"2px 8px",fontSize:11,color:"var(--c-dim)",cursor:"pointer",fontFamily:"inherit"}}
+                          title="חתימות שבוצעו על שלב זה">🕘 {hist.length}</button>}
+                      </td>
+                    </tr>
+                    {openHist===st.id&&hist.map(w=>(
+                      <tr key={w.id} style={{background:"var(--c-deep)"}}>
+                        <td colSpan={canSign?6:5} style={{fontSize:11.5,color:"var(--c-muted)"}}>
+                          <span style={{color:"#10b981",fontWeight:700}}>+{w.bulkCount}</span> יחידות · {w.userName||"—"} · {w.endTime?new Date(w.endTime).toLocaleString("he-IL",{day:"2-digit",month:"2-digit",hour:"2-digit",minute:"2-digit"}):""}
+                          {Number(w.durationMin)>0?` · ${fmtTime(w.durationMin)}`:""}
+                          {canSign&&onDeleteLog&&<button onClick={()=>undo(w)} style={{background:"none",border:"none",color:"#ef4444",cursor:"pointer",fontSize:11.5,fontFamily:"inherit",marginRight:8}}>🗑️ בטל</button>}
+                        </td>
+                      </tr>
+                    ))}
+                  </React.Fragment>
+                );
+              })}
+            </tbody>
+          </table>
+          {!canSign&&<div style={{fontSize:11.5,color:"var(--c-dim)",marginTop:8}}>לצפייה בלבד — חתימה לפי כמות מבוצעת ע"י מנהל מחלקה, ראש צוות או עורך.</div>}
+        </div>
+      )}
     </div>
   );
 }
@@ -2333,7 +2632,7 @@ function SerialsManager({order,stages,onUpdate,workLogs,onSignOff}){
       {canEdit&&serials.length===0&&Number(order.qty)>0&&(
         <div style={{background:"#f59e0b12",border:"1px solid #f59e0b44",borderRadius:8,padding:"11px 13px",marginBottom:12,display:"flex",gap:10,flexWrap:"wrap",alignItems:"center",justifyContent:"space-between"}}>
           <div style={{fontSize:12.5,color:"var(--c-muted)",lineHeight:1.6,flex:"1 1 240px"}}>
-            <b style={{color:"#f59e0b"}}>לפק"ע אין מספרים סידוריים.</b> בלעדיהם אי אפשר לדווח עליה עבודה, וההתקדמות תישאר 0 גם כשהסטטוס מה-ERP הוא ״הושלמה״.
+            <b style={{color:"#f59e0b"}}>לפק"ע אין מספרים סידוריים.</b> אם היא מנוהלת סיריאלית — צרו אותם כאן כדי לדווח יחידה-יחידה. אם לא, אין צורך: חתמו ״לפי כמות״ בכרטיס שמעל, וההתקדמות תיספר משם.
           </div>
           <Btn color="#f59e0b" onClick={fillFromQty}>🔢 צור {Number(order.qty)} סידוריים לפי הכמות</Btn>
         </div>
@@ -2509,19 +2808,29 @@ function ShortagesInOrder({order,onUpdate}){
   );
 }
 
-function OrderDetail({order,projects,stages,stageBlocks,onClose,onUpdate,workLogs,onWorkLog,workdayHours=8,pnStandards}){
+function OrderDetail({order,projects,stages,stageBlocks,departments=[],onClose,onUpdate,workLogs,onWorkLog,onDeleteLog,workdayHours=8,pnStandards}){
   const {canEdit,currentUser}=useAuth();
   const isAdmin=currentUser?.role==="admin";
   const proj=projects.find(p=>p.id===order.projectId);
   const serials=order.serials||[];
   const oStages=orderRoute(order,stages);
   const doneIdx=useDoneIndex(workLogs);
-  const totalCompleted=serials.filter(s=>oStages.every(st=>doneIdx.has(logKey(s.id,st.id)))).length;
-  const pct=serials.length?Math.round(totalCompleted/serials.length*100):0;
-  const passes=orderStagePasses(order,oStages,workLogs,doneIdx);
-  const reportState=REPORT_STATE[orderReportState(order,oStages,workLogs,doneIdx)];
+  const qtyIdx=useQtyIndex(workLogs);
+  // Serially, or — with no serials — from the quantity signatures.
+  const byQty=isQtyOrder(order);
+  const units=orderUnits(order);
+  const br=branchCode(order.branch);
+  const brDepts=deptsForBranch(departments,br);
+  const totalCompleted=orderDoneCount(order,oStages,workLogs,doneIdx,qtyIdx);
+  const pct=units?Math.round(totalCompleted/units*100):0;
+  const passes=orderStagePasses(order,oStages,workLogs,doneIdx,qtyIdx);
+  const reportState=REPORT_STATE[orderReportState(order,oStages,workLogs,doneIdx,qtyIdx)];
   const perUnitMin=orderPerUnitMin(order,stages,stageBlocks);
-  const remainMin=orderRemainingMin(order,stages,stageBlocks,workLogs);
+  const remainMin=orderRemainingMin(order,stages,stageBlocks,workLogs,doneIdx,qtyIdx);
+  // Quantity signatures on a פק"ע that has since been given serial numbers: the
+  // progress above is counted from the serials now, so say where the rest went.
+  const strandedQty=useMemo(()=>serials.length
+    ?oStages.reduce((n,st)=>n+qtySigned(qtyIdx,workLogs,order.id,st.id),0):0,[serials.length,oStages,qtyIdx,workLogs,order.id]);
   // The standard defined for this מק"ט (זמן תקן) — the planning figure, next to
   // the price-list time and the time this order's units actually took.
   const stdPerUnit=stdTotalFor(pnStdIndex(pnStandards),order.pn,order.stageIds||[]);
@@ -2550,11 +2859,16 @@ function OrderDetail({order,projects,stages,stageBlocks,onClose,onUpdate,workLog
             <h2 style={{margin:"0 0 3px",color:"#60a5fa"}}>{order.woNumber}</h2>
             {order.pn&&<div style={{color:"#a78bfa",fontSize:13}}>P/N: {order.pn}</div>}
             {order.description&&<div style={{color:"var(--c-muted)"}}>{order.description}</div>}
-            <div style={{marginTop:3,fontSize:13,color:proj?"#7eb8ff":"var(--c-dim)"}}>{proj?`📂 ${proj.name}`:"📂 ללא פרויקט"}</div>
+            <div style={{marginTop:3,fontSize:13,display:"flex",gap:8,alignItems:"center",flexWrap:"wrap"}}>
+              <span style={{color:proj?"#7eb8ff":"var(--c-dim)"}}>{proj?`📂 ${proj.name}`:"📂 ללא פרויקט"}</span>
+              {br
+                ?<span title={`חטיבה עסקית — מספר הסניף מגיע מה-ERP${brDepts.length?"":" · לא שויכה מחלקה למספר הזה"}`} style={{fontSize:12,background:branchColor(br)+"1f",color:branchColor(br),border:`1px solid ${branchColor(br)}44`,padding:"2px 9px",borderRadius:20}}>🏢 {branchLabel(br)}{brDepts.length?` · ${brDepts.map(d=>d.name).join(" · ")}`:""}</span>
+                :<span style={{fontSize:12,color:"var(--c-dim)"}}>🏢 ללא סניף</span>}
+            </div>
           </div>
           <div style={{display:"flex",gap:8,alignItems:"center",flexWrap:"wrap"}}>
             <span title={`סטטוס מה-ERP: ${SL[order.status||"open"]}`}><Badge status={order.status||"open"} large/></span>
-            <span style={{fontSize:14,fontWeight:700,color:"#10b981"}}>{totalCompleted}/{serials.length} הושלמו</span>
+            <span style={{fontSize:14,fontWeight:700,color:"#10b981"}}>{totalCompleted}/{units} הושלמו{byQty?" (לפי כמות)":""}</span>
           </div>
         </div>
         {reportState&&(
@@ -2565,12 +2879,12 @@ function OrderDetail({order,projects,stages,stageBlocks,onClose,onUpdate,workLog
           </div>
         )}
         <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(110px,1fr))",gap:8,marginTop:10}}>
-          {(()=>{const isW=currentUser?.role==="worker";const items=[["כמות",serials.length],["הושלמו",totalCompleted],["תאריך קבלה",fmt(order.receivedDate)],["יעד אספקה",fmt(order.targetDate)]];if(!isW){items.splice(2,0,["מחיר ליחידה",fmtMoney(order.unitPrice)],["הכנסה ממומשת",fmtMoney(totalCompleted*Number(order.unitPrice||0))]);} return items.map(([l,v])=>(
+          {(()=>{const isW=currentUser?.role==="worker";const items=[[byQty?"כמות (לפי כמות)":"כמות",units],["הושלמו",totalCompleted],["תאריך קבלה",fmt(order.receivedDate)],["יעד אספקה",fmt(order.targetDate)]];if(!isW){items.splice(2,0,["מחיר ליחידה",fmtMoney(order.unitPrice)],["הכנסה ממומשת",fmtMoney(totalCompleted*Number(order.unitPrice||0))]);} return items.map(([l,v])=>(
             <div key={l} style={{background:"var(--c-deep)",borderRadius:8,padding:"8px 10px"}}><div style={{fontSize:10,color:"var(--c-dim)",marginBottom:2}}>{l}</div><div style={{fontWeight:700,fontSize:12,wordBreak:"break-word"}}>{v}</div></div>
           ))})()}
         </div>
         <div style={{marginTop:12}}>
-          <div style={{display:"flex",justifyContent:"space-between",fontSize:13,color:"var(--c-muted)",marginBottom:3}}><span>יחידות שסיימו את כל המסלול</span><span>{pct}%</span></div>
+          <div style={{display:"flex",justifyContent:"space-between",fontSize:13,color:"var(--c-muted)",marginBottom:3}}><span>יחידות שסיימו את כל המסלול{byQty?" (חתימה לפי כמות)":""}</span><span>{pct}%</span></div>
           <PBar pct={pct} h={10}/>
           {passes.total>0&&(
             <div style={{marginTop:8}}>
@@ -2587,8 +2901,8 @@ function OrderDetail({order,projects,stages,stageBlocks,onClose,onUpdate,workLog
             {stdPerUnit>0&&<span>🎯 זמן תקן ליחידה: <b style={{color:TIME_CAT.std.text}}>{fmtTime(stdPerUnit)}</b></span>}
             {actPerUnit>0&&<span>⏱️ זמן בפועל ליחידה: <b style={{color:TIME_CAT.act.text}}>{fmtTime(actPerUnit)}</b>{stdPerUnit>0&&<span style={{color:gapColor(actPerUnit-stdPerUnit),fontWeight:700,marginRight:5}}>({fmtSigned(actPerUnit-stdPerUnit)} מול התקן)</span>}</span>}
             {perUnitMin>0&&<span>🏷️ זמן מכירה ליחידה: <b style={{color:TIME_CAT.sale.text}}>{fmtTime(perUnitMin)}</b></span>}
-            {perUnitMin>0&&<span>📦 צפי לכלל הפק"ע: <b style={{color:"#a78bfa"}}>{fmtWorkEstimate(perUnitMin*serials.length,workdayHours)}</b></span>}
-            {stdPerUnit>0&&<span>🎯 צפי לפי תקן: <b style={{color:TIME_CAT.std.text}}>{fmtWorkEstimate(stdPerUnit*serials.length,workdayHours)}</b></span>}
+            {perUnitMin>0&&<span>📦 צפי לכלל הפק"ע: <b style={{color:"#a78bfa"}}>{fmtWorkEstimate(perUnitMin*units,workdayHours)}</b></span>}
+            {stdPerUnit>0&&<span>🎯 צפי לפי תקן: <b style={{color:TIME_CAT.std.text}}>{fmtWorkEstimate(stdPerUnit*units,workdayHours)}</b></span>}
             {perUnitMin>0&&pct<100&&<span>⏳ צפי לסיום הנותר: <b style={{color:"#06b6d4"}}>{fmtWorkEstimate(remainMin,workdayHours)}</b></span>}
             <span style={{color:"var(--c-dim)"}}>(לפי יום עבודה של {workdayHours} שע')</span>
           </div>
@@ -2630,8 +2944,20 @@ function OrderDetail({order,projects,stages,stageBlocks,onClose,onUpdate,workLog
         </Card>
       )}
 
+      {/* Quantity sign-off — for a פק"ע that is not managed serially */}
+      {!serials.length&&(
+        <Card style={{marginBottom:14,border:"1px solid #10b98133"}}>
+          <QtySignOff order={order} stages={stages} workLogs={workLogs} onSignOff={onWorkLog} onDeleteLog={onDeleteLog}/>
+        </Card>
+      )}
+
       {/* Serials Manager */}
       <Card style={{marginBottom:14}}>
+        {strandedQty>0&&(
+          <div style={{background:"#f59e0b12",border:"1px solid #f59e0b44",borderRadius:8,padding:"9px 12px",marginBottom:12,fontSize:12.5,color:"var(--c-muted)",lineHeight:1.7}}>
+            <b style={{color:"#f59e0b"}}>לפק"ע הזו יש גם חתימות לפי כמות ({strandedQty} דיווחי שלב).</b> מרגע שיש מספרים סידוריים, ההתקדמות נספרת מהם בלבד — החתימות נשמרות ביומן העבודה אך אינן נספרות. מחיקת כל הסידוריים תחזיר את המעקב לפי כמות.
+          </div>
+        )}
         <SerialsManager order={order} stages={stages} onUpdate={onUpdate} workLogs={workLogs} onSignOff={onWorkLog}/>
       </Card>
 
@@ -2646,28 +2972,44 @@ function OrderDetail({order,projects,stages,stageBlocks,onClose,onUpdate,workLog
   );
 }
 
-function Orders({orders,projects,stages,stageBlocks,updO,workLogs,onWorkLog,workdayHours=8,setWorkdayHours,pnStandards}){
+function Orders({orders,projects,stages,stageBlocks,updO,workLogs,onWorkLog,onDeleteLog,departments=[],workdayHours=8,setWorkdayHours,pnStandards}){
   const {canEdit,currentUser}=useAuth();
   const [showForm,setShowForm]=useState(false);
   const [editing,setEditing]=useState(null);
   const [detail,setDetail]=useState(null);
   const [search,setSearch]=useState("");
   const [filterProj,setFilterProj]=useState("all");
+  const [filterBranch,setFilterBranch]=useState("all");
   const [filterStat,setFilterStat]=useState("all");
   const [sort,setSort]=useState("wo");
   // One lookup table for "did this unit finish this stage", shared by every row
   // below — see buildDoneIndex.
   const doneIdx=useDoneIndex(workLogs);
+  // The same, for the פק"ע that are signed by quantity instead of unit by unit.
+  const qtyIdx=useQtyIndex(workLogs);
+  // The branch numbers to offer, and how many פק"ע each one holds — so the filter
+  // says what it will show before it is used.
+  const branchOpts=useMemo(()=>branchList(orders,departments),[orders,departments]);
+  const branchCount=useMemo(()=>{
+    const m={none:0};
+    orders.forEach(o=>{const c=branchCode(o.branch);if(c)m[c]=(m[c]||0)+1;else m.none++});
+    return m;
+  },[orders]);
 
   const filtered=useMemo(()=>{
     const q=search.trim().toLowerCase();
     const list=orders.filter(o=>{
       if(filterProj!=="all"&&o.projectId!==filterProj)return false;
+      // Branch = the business division the פק"ע belongs to, straight from the ERP.
+      if(filterBranch!=="all"){
+        const c=branchCode(o.branch);
+        if(filterBranch==="none"?!!c:c!==filterBranch)return false;
+      }
       // "ללא יחידות" and "פער מול הסטטוס" cut across the four ERP statuses rather
       // than sitting beside them — they answer "can this פק"ע be reported on at
       // all", which is the question the status cannot.
       if(filterStat==="nounits"||filterStat==="gap"){
-        if(orderReportState(o,orderRoute(o,stages),workLogs,doneIdx)!==filterStat)return false;
+        if(orderReportState(o,orderRoute(o,stages),workLogs,doneIdx,qtyIdx)!==filterStat)return false;
       }else if(filterStat!=="all"&&(o.status||"open")!==filterStat)return false;
       if(q&&!o.woNumber?.toLowerCase().includes(q)&&!o.description?.toLowerCase().includes(q)&&!o.pn?.toLowerCase().includes(q))return false;
       return true;
@@ -2681,7 +3023,7 @@ function Orders({orders,projects,stages,stageBlocks,updO,workLogs,onWorkLog,work
       qty:(a,b)=>(Number(b.qty)||0)-(Number(a.qty)||0)
     }[sort];
     return cmp?list.slice().sort(cmp):list;
-  },[orders,filterProj,filterStat,search,sort,stages,workLogs,doneIdx]);
+  },[orders,filterProj,filterBranch,filterStat,search,sort,stages,workLogs,doneIdx,qtyIdx]);
 
   // How many פק"ע sit in each status, so the filter chips say what they will show
   // — and so a run of "everything is open" is visible before anyone goes looking.
@@ -2689,11 +3031,11 @@ function Orders({orders,projects,stages,stageBlocks,updO,workLogs,onWorkLog,work
     const c={open:0,partial:0,complete:0,blocked:0,nounits:0,gap:0};
     orders.forEach(o=>{
       const k=o.status||"open";if(c[k]!==undefined)c[k]++;
-      const rs=orderReportState(o,orderRoute(o,stages),workLogs,doneIdx);
+      const rs=orderReportState(o,orderRoute(o,stages),workLogs,doneIdx,qtyIdx);
       if(c[rs]!==undefined)c[rs]++;
     });
     return c;
-  },[orders,stages,workLogs,doneIdx]);
+  },[orders,stages,workLogs,doneIdx,qtyIdx]);
 
   // Looking a project up by id per row is a scan of the project list per row;
   // once into a Map it is a hash lookup.
@@ -2713,7 +3055,7 @@ function Orders({orders,projects,stages,stageBlocks,updO,workLogs,onWorkLog,work
   // Always get fresh order from state
   const detailOrder=detail?orders.find(o=>o.id===detail.id)||detail:null;
 
-  if(detailOrder)return<OrderDetail order={detailOrder} projects={projects} stages={stages} stageBlocks={stageBlocks} onClose={()=>setDetail(null)} onUpdate={handleUpd} workLogs={workLogs} onWorkLog={onWorkLog} workdayHours={workdayHours} pnStandards={pnStandards}/>;
+  if(detailOrder)return<OrderDetail order={detailOrder} projects={projects} stages={stages} stageBlocks={stageBlocks} departments={departments} onClose={()=>setDetail(null)} onUpdate={handleUpd} workLogs={workLogs} onWorkLog={onWorkLog} onDeleteLog={onDeleteLog} workdayHours={workdayHours} pnStandards={pnStandards}/>;
 
   return(
     <div className="fade-in">
@@ -2724,6 +3066,11 @@ function Orders({orders,projects,stages,stageBlocks,updO,workLogs,onWorkLog,work
       <Card style={{padding:"12px 14px",marginBottom:12,display:"flex",gap:10,flexWrap:"wrap",alignItems:"flex-end"}}>
         <div style={{display:"flex",flexDirection:"column",gap:3,flex:"1 1 150px"}}><label style={{fontSize:11,color:"var(--c-dim)"}}>חיפוש</label><input value={search} onChange={e=>setSearch(e.target.value)} placeholder="חיפוש לפי מספר / תיאור / P/N..."/></div>
         <div style={{display:"flex",flexDirection:"column",gap:3}}><label style={{fontSize:11,color:"var(--c-dim)"}}>פרויקט</label><select value={filterProj} onChange={e=>setFilterProj(e.target.value)} style={{padding:"7px 8px",fontSize:12}}><option value="all">כל הפרויקטים</option>{projects.map(p=><option key={p.id} value={p.id}>{p.name}</option>)}</select></div>
+        <div style={{display:"flex",flexDirection:"column",gap:3}}><label style={{fontSize:11,color:"var(--c-dim)"}}>סניף (חטיבה)</label><select value={filterBranch} onChange={e=>setFilterBranch(e.target.value)} style={{padding:"7px 8px",fontSize:12,minWidth:130}} title='מספר הסניף מגיע מה-ERP ומייצג את החטיבה העסקית'>
+          <option value="all">כל הסניפים</option>
+          {branchOpts.map(c=><option key={c} value={c}>{branchLabel(c)}{branchCount[c]?` · ${branchCount[c]}`:""}</option>)}
+          {branchCount.none>0&&<option value="none">ללא סניף · {branchCount.none}</option>}
+        </select></div>
         <div style={{display:"flex",flexDirection:"column",gap:3}}><label style={{fontSize:11,color:"var(--c-dim)"}}>מיון</label><select value={sort} onChange={e=>setSort(e.target.value)} style={{padding:"7px 8px",fontSize:12}}>
           <option value="wo">מספר פק"ע</option><option value="target">יעד אספקה</option><option value="status">סטטוס</option><option value="qty">כמות</option>
         </select></div>
@@ -2742,8 +3089,9 @@ function Orders({orders,projects,stages,stageBlocks,updO,workLogs,onWorkLog,work
         </div>
         {statCount.nounits>0&&(
           <div style={{width:"100%",fontSize:11.5,color:"var(--c-dim)",background:"var(--c-deep)",border:"1px solid var(--c-border)",borderRadius:8,padding:"7px 10px",lineHeight:1.6}}>
-            🚫 ל-<b style={{color:"var(--c-text)"}}>{statCount.nounits}</b> מתוך {orders.length} פק"ע אין מספרים סידוריים, ולכן אי אפשר לדווח עליהן עבודה והן יופיעו כ-0/0 בכל מצב — גם כשהסטטוס שהגיע מה-ERP הוא ״הושלמה״.
-            הסטטוס מגיע מ-Priority; ההתקדמות נספרת רק מדיווחי עבודה באפליקציה. כדי לדווח, הוסף סידוריים בכרטיס הפק"ע או ייבא מחדש עם גיליון ״סידוריים״ / באפשרות ״השלם סידוריים״.
+            🔢 ל-<b style={{color:"var(--c-text)"}}>{statCount.nounits}</b> מתוך {orders.length} פק"ע אין מספרים סידוריים ועדיין לא דווחה עליהן עבודה.
+            פק"ע שאינה מנוהלת סיריאלית לא חייבת סידוריים: פתחו אותה ובצעו <b style={{color:"var(--c-text)"}}>✍️ חתימה לפי כמות</b> — חותמים כמה יחידות עברו כל שלב, וההתקדמות נספרת ומוצגת בדיוק כמו בפק"ע סיריאלית.
+            לחלופין אפשר להוסיף סידוריים בכרטיס הפק"ע או לייבא מחדש עם גיליון ״סידוריים״ / באפשרות ״השלם סידוריים״.
           </div>
         )}
       </Card>
@@ -2751,17 +3099,22 @@ function Orders({orders,projects,stages,stageBlocks,updO,workLogs,onWorkLog,work
       <VirtualList items={filtered} estimate={128} gap={7} renderRow={o=>{
           const serials=o.serials||[];
           const oStages=orderRoute(o,stages);
-          const completed=orderDoneCount(o,oStages,workLogs,doneIdx);
-          const pct=serials.length?Math.round(completed/serials.length*100):0;
+          const completed=orderDoneCount(o,oStages,workLogs,doneIdx,qtyIdx);
+          // Units to measure against: the serials, or — for a פק"ע that is not
+          // managed serially — the quantity it was opened for.
+          const units=orderUnits(o);
+          const byQty=!serials.length&&units>0;
+          const pct=units?Math.round(completed/units*100):0;
           // Whole units finished the route; stage passes are how far the units got
           // through it. Shown together so a פק"ע that is genuinely part-built stops
           // looking identical to one nobody has touched.
-          const passes=orderStagePasses(o,oStages,workLogs,doneIdx);
+          const passes=orderStagePasses(o,oStages,workLogs,doneIdx,qtyIdx);
           const passPct=passes.total?Math.round(passes.done/passes.total*100):0;
-          const rs=REPORT_STATE[orderReportState(o,oStages,workLogs,doneIdx)];
+          const rs=REPORT_STATE[orderReportState(o,oStages,workLogs,doneIdx,qtyIdx)];
           const proj=projMap.get(o.projectId);
+          const br=branchCode(o.branch);
           const openDef=(o.defects||[]).filter(d=>d.status!=="closed").length;
-          const remainMin=orderRemainingMin(o,stages,stageBlocks,workLogs,doneIdx);
+          const remainMin=orderRemainingMin(o,stages,stageBlocks,workLogs,doneIdx,qtyIdx);
           return(
             <div key={o.id} style={{background:"var(--c-card)",borderRadius:10,padding:"12px 14px",border:"1px solid var(--c-border)",cursor:"pointer",transition:"border-color .15s"}}
               onClick={()=>setDetail(o)}
@@ -2774,29 +3127,30 @@ function Orders({orders,projects,stages,stageBlocks,updO,workLogs,onWorkLog,work
                   <span title={`סטטוס מה-ERP: ${SL[o.status||"open"]}`}><Badge status={o.status||"open"}/></span>
                   {rs&&<span title={rs.hint} style={{fontSize:11,background:rs.color+"1f",color:rs.color,border:`1px solid ${rs.color}44`,padding:"2px 7px",borderRadius:20,whiteSpace:"nowrap"}}>{rs.icon} {rs.label}</span>}
                   {o.pn&&<span style={{fontSize:11,color:"#a78bfa"}}>P/N: {o.pn}</span>}
+                  {br&&<span title={`סניף ${br}${branchName(br)?" — "+branchName(br):""} · חטיבה עסקית מה-ERP${deptsForBranch(departments,br).length?" · "+deptsForBranch(departments,br).map(d=>d.name).join(" · "):""}`} style={{fontSize:11,background:branchColor(br)+"1f",color:branchColor(br),border:`1px solid ${branchColor(br)}44`,padding:"2px 7px",borderRadius:20,whiteSpace:"nowrap"}}>🏢 {branchLabel(br)}</span>}
                   {proj?<span style={{fontSize:11,background:"var(--c-tag-blue-bg)",color:"var(--c-tag-blue)",padding:"2px 7px",borderRadius:20}}>{proj.name}</span>:<span style={{fontSize:11,background:"var(--c-border)",color:"var(--c-dim)",padding:"2px 7px",borderRadius:20}}>ללא פרויקט</span>}
                   {openDef>0&&<span style={{fontSize:11,background:"#450a0a",color:"#fca5a5",padding:"2px 7px",borderRadius:20}}>🔧 {openDef}</span>}
                 </div>
                 <div style={{display:"flex",gap:4,alignItems:"center"}}>
-                  <span title='יחידות שסיימו את כל מסלול הפק"ע' style={{fontSize:12,fontWeight:700,color:pct>=100?"#10b981":"var(--c-muted)"}}>{completed}/{serials.length}</span>
+                  <span title={byQty?'יחידות שנחתמו בכל שלבי המסלול (חתימה לפי כמות)':'יחידות שסיימו את כל מסלול הפק"ע'} style={{fontSize:12,fontWeight:700,color:pct>=100?"#10b981":"var(--c-muted)"}}>{completed}/{units}{byQty?" 📦":""}</span>
                   {canEdit&&<><IBtn onClick={e=>{e.stopPropagation();setEditing(o);setShowForm(true)}}>✏️</IBtn><IBtn onClick={e=>{e.stopPropagation();del(o.id)}}>🗑️</IBtn></>}
                 </div>
               </div>
               {o.description&&<div style={{fontSize:13,color:"var(--c-muted)",marginBottom:4}}>{o.description}</div>}
               <div style={{display:"flex",gap:10,fontSize:12,color:"var(--c-dim)",marginBottom:5,flexWrap:"wrap"}}>
-                <span>יחידות: <b style={{color:serials.length?"var(--c-text)":"#f59e0b"}}>{serials.length||"—"}</b>{!serials.length&&<b style={{color:"#f59e0b"}}> (כמות בפק"ע: {Number(o.qty)||0})</b>}</span>
+                <span>{byQty?<>כמות (ללא סידוריים): <b style={{color:"var(--c-text)"}}>{units}</b></>:<>יחידות: <b style={{color:serials.length?"var(--c-text)":"#f59e0b"}}>{serials.length||"—"}</b>{!serials.length&&<b style={{color:"#f59e0b"}}> (כמות בפק"ע: {Number(o.qty)||0})</b>}</>}</span>
                 {canEdit&&<span>מחיר: <b style={{color:"#a78bfa"}}>{fmtMoney(o.unitPrice)}</b></span>}
                 <span>שלבים: <b>{(o.stageIds||[]).length}</b></span>
                 {passes.total>0&&<span title="דיווחי שלב שבוצעו מתוך כלל השלבים × היחידות">דיווחי שלבים: <b style={{color:passes.done?"#3b82f6":"var(--c-dim)"}}>{passes.done}/{passes.total}</b></span>}
                 {remainMin>0&&pct<100&&<span>⏳ צפי לסיום: <b style={{color:"#06b6d4"}}>{fmtWorkEstimate(remainMin,workdayHours)}</b></span>}
               </div>
-              {serials.length
+              {units>0
                 ?<PBar pct={pct>0?pct:passPct}/>
-                :<div style={{fontSize:11,color:"#f59e0b",background:"#f59e0b12",border:"1px dashed #f59e0b55",borderRadius:6,padding:"4px 8px"}}>אין סידוריים — לא ניתן לדווח עבודה על הפק"ע הזו</div>}
+                :<div style={{fontSize:11,color:"#f59e0b",background:"#f59e0b12",border:"1px dashed #f59e0b55",borderRadius:6,padding:"4px 8px"}}>אין סידוריים ואין כמות — לא ניתן לדווח עבודה על הפק"ע הזו</div>}
             </div>
           );
         }}/>
-      {showForm&&(<Modal onClose={()=>setShowForm(false)}><OrderForm initial={editing} projects={projects} stages={stages} stageBlocks={stageBlocks} onSave={data=>{
+      {showForm&&(<Modal onClose={()=>setShowForm(false)}><OrderForm initial={editing} projects={projects} stages={stages} stageBlocks={stageBlocks} branchOpts={branchOpts} departments={departments} onSave={data=>{
         const{_serials,...rest}=data;
         if(editing){
           updO(prev=>prev.map(o=>o.id===editing.id?{...editing,...rest}:o));
@@ -4438,7 +4792,43 @@ function CompaniesTab({lightMode,currentUser}){
 // ══════════════════════════════════════════════════════════════════════════
 // ═══ ADMIN PANEL ════════════════════════════════════════════════════════
 // ══════════════════════════════════════════════════════════════════════════
-function AdminPanel({projects,stages,onClose,lightMode,departments,updD}){
+// ── Branch numbers of a department ────────────────────────────────────────
+// A department can hold more than one branch number — a team that runs both
+// אזרחי and משולבות work is the ordinary case, not the exception — so this is a
+// multi-select. Numbers outside the catalogue are accepted as typed: the
+// catalogue names the divisions the app knows, it does not limit them.
+function BranchPicker({value=[],onChange,options=[],inp,border,muted}){
+  const sel=sortBranches(value);
+  const [extra,setExtra]=useState("");
+  const opts=sortBranches([...options,...sel]);
+  const toggle=c=>onChange(sortBranches(sel.includes(c)?sel.filter(x=>x!==c):[...sel,c]));
+  const add=()=>{const c=branchCode(extra);if(c&&!sel.includes(c))onChange(sortBranches([...sel,c]));setExtra("")};
+  return(
+    <div>
+      <div style={{display:"flex",gap:6,flexWrap:"wrap"}}>
+        {opts.map(c=>{
+          const on=sel.includes(c),col=branchColor(c);
+          return(
+            <button key={c} type="button" onClick={()=>toggle(c)}
+              style={{background:on?col+"22":"transparent",border:`1px solid ${on?col:border||"var(--c-border)"}`,
+                color:on?col:muted||"var(--c-muted)",borderRadius:14,padding:"4px 11px",fontSize:12,
+                fontWeight:on?700:500,fontFamily:"inherit",cursor:"pointer"}}>
+              {on?"✓ ":""}{branchLabel(c)}
+            </button>
+          );
+        })}
+      </div>
+      <div style={{display:"flex",gap:6,alignItems:"center",marginTop:7}}>
+        <input value={extra} onChange={e=>setExtra(e.target.value)}
+          onKeyDown={e=>{if(e.key==="Enter"){e.preventDefault();add()}}}
+          placeholder="מספר סניף אחר" style={{...(inp||{}),width:130,fontSize:12,padding:"5px 8px"}}/>
+        <Btn small onClick={add}>➕ הוסף</Btn>
+      </div>
+    </div>
+  );
+}
+
+function AdminPanel({projects,stages,orders=[],onClose,lightMode,departments,updD}){
   const {toast}=useToast();
   const {currentUser}=useAuth();
   const [users,setUsersLocal]=useState(getUsers());
@@ -4480,15 +4870,20 @@ function AdminPanel({projects,stages,onClose,lightMode,departments,updD}){
   const [deptName,setDeptName]=useState("");
   const [deptColor,setDeptColor]=useState("#3b82f6");
   const [deptManager,setDeptManager]=useState("");
+  const [newDeptBranches,setNewDeptBranches]=useState([]);
+  // Every branch number in play: the catalogue, the ones the ERP actually sent,
+  // and the ones other departments already hold.
+  const branchOpts=useMemo(()=>branchList(orders,departments),[orders,departments]);
   const [editDept,setEditDept]=useState(null);
   const leadOptions=users.filter(u=>u.active!==false&&(isLeadRole(u.role)||u.role==="admin"));
   const addDept=()=>{
     if(!deptName.trim())return toast("יש להזין שם מחלקה","warning");
-    const d={id:uid(),name:deptName.trim(),color:deptColor,managerId:deptManager};
+    const d={id:uid(),name:deptName.trim(),color:deptColor,managerId:deptManager,branches:sortBranches(newDeptBranches)};
     updD(prev=>[...prev,d]);
     UNDO.record({user:currentUser,action:"הוספת מחלקה",target:d.name,
+      details:d.branches.length?`סניפים: ${d.branches.join(", ")}`:"",
       changes:[{coll:"departments",before:[],after:[d.id]}]});
-    setDeptName("");setDeptManager("");
+    setDeptName("");setDeptManager("");setNewDeptBranches([]);
   };
   const delDept=(d)=>{
     const members=users.filter(u=>u.departmentId===d.id);
@@ -4509,8 +4904,9 @@ function AdminPanel({projects,stages,onClose,lightMode,departments,updD}){
   const saveDept=()=>{
     if(!editDept||!editDept.name.trim())return toast("יש להזין שם מחלקה","warning");
     const before=departments.find(d=>d.id===editDept.id);
-    updD(prev=>prev.map(d=>d.id===editDept.id?{...d,name:editDept.name.trim(),color:editDept.color}:d));
+    updD(prev=>prev.map(d=>d.id===editDept.id?{...d,name:editDept.name.trim(),color:editDept.color,branches:sortBranches(editDept.branches||[])}:d));
     UNDO.record({user:currentUser,action:"עריכת מחלקה",target:editDept.name.trim(),
+      details:sortBranches(editDept.branches||[]).length?`סניפים: ${sortBranches(editDept.branches||[]).join(", ")}`:"",
       changes:before?[{coll:"departments",before:[before],after:[before.id]}]:[]});
     setEditDept(null);
   };
@@ -4688,7 +5084,12 @@ function AdminPanel({projects,stages,onClose,lightMode,departments,updD}){
 
           {tab==="departments"&&(
             <div>
-              <div style={{fontSize:13,color:muted,marginBottom:12,lineHeight:1.5}}>חלק את העובדים למחלקות וקבע מנהל לכל מחלקה. עובדים משויכים למחלקה ולמנהל ישיר דרך כרטיס המשתמש (לשונית "משתמשים").</div>
+              <div style={{fontSize:13,color:muted,marginBottom:12,lineHeight:1.6}}>חלק את העובדים למחלקות וקבע מנהל לכל מחלקה. עובדים משויכים למחלקה ולמנהל ישיר דרך כרטיס המשתמש (לשונית "משתמשים").</div>
+              <div style={{fontSize:12.5,color:muted,marginBottom:12,lineHeight:1.7,background:lm?"#f7f8fa":"#0d1120",border:`1px solid ${border}`,borderRadius:9,padding:"9px 12px"}}>
+                🏢 <b style={{color:text}}>מספרי סניף</b> — מספר הסניף מגיע מקובץ ה-Priority ומייצג חטיבה עסקית ({BRANCHES.map(b=>`${b.code} ${b.name}`).join(" · ")}).
+                שיוך מספר סניף למחלקה קושר בין הפק"ע לבין הצוות שמבצע אותן: המספר מוצג לצד כל פק"ע יחד עם שם המחלקה, וניתן לסנן לפיו במסך פקודות העבודה.
+                למחלקה אפשר לשייך יותר ממספר סניף אחד, ואפשר להוסיף מספר שאינו ברשימה.
+              </div>
               <div style={{background:lm?"#f7f8fa":"#0d1120",borderRadius:10,padding:14,marginBottom:14,border:`1px solid ${border}`}}>
                 <div style={{fontWeight:700,marginBottom:10,color:text,fontSize:13}}>➕ מחלקה חדשה</div>
                 <div style={{display:"flex",gap:10,flexWrap:"wrap",alignItems:"flex-end"}}>
@@ -4702,6 +5103,10 @@ function AdminPanel({projects,stages,onClose,lightMode,departments,updD}){
                   <div><label style={{fontSize:11,color:muted,display:"block",marginBottom:3}}>צבע</label><input type="color" value={deptColor} onChange={e=>setDeptColor(e.target.value)} style={{width:38,height:36,padding:2,border:`1px solid ${border}`,borderRadius:6,background:"transparent"}}/></div>
                   <Btn color="#10b981" onClick={addDept}>✅ הוסף</Btn>
                 </div>
+                <div style={{marginTop:12}}>
+                  <label style={{fontSize:11,color:muted,display:"block",marginBottom:5}}>מספרי סניף (חטיבות) — אפשר לבחור יותר מאחד</label>
+                  <BranchPicker value={newDeptBranches} onChange={setNewDeptBranches} options={branchOpts} inp={inp} border={border} muted={muted}/>
+                </div>
               </div>
               {(departments||[]).length===0?<EmptyState icon="🏢" title="אין מחלקות עדיין" subtitle="צור מחלקה ראשונה כדי להתחיל לארגן את הצוות"/>:(
                 <div style={{display:"flex",flexDirection:"column",gap:8}}>
@@ -4714,6 +5119,11 @@ function AdminPanel({projects,stages,onClose,lightMode,departments,updD}){
                             <span style={{width:11,height:11,borderRadius:3,background:d.color,display:"inline-block"}}/>
                             <span style={{fontWeight:700,color:text,fontSize:14}}>{d.name}</span>
                             <span style={{fontSize:11,background:d.color+"22",color:d.color,padding:"2px 9px",borderRadius:12,fontWeight:700}}>{members.length} עובדים</span>
+                            {deptBranches(d).map(c=>(
+                              <span key={c} title={`סניף ${c}${branchName(c)?" — "+branchName(c):""} · ${(orders||[]).filter(o=>branchCode(o.branch)===c).length} פק"ע`}
+                                style={{fontSize:11,background:branchColor(c)+"1f",color:branchColor(c),border:`1px solid ${branchColor(c)}44`,padding:"2px 9px",borderRadius:12,fontWeight:700}}>🏢 {branchLabel(c)}</span>
+                            ))}
+                            {!deptBranches(d).length&&<span style={{fontSize:11,color:muted}}>ללא מספר סניף</span>}
                           </div>
                           <div style={{display:"flex",gap:8,alignItems:"center"}}>
                             <select style={{...inp,width:"auto",minWidth:150,padding:"5px 10px",paddingRight:"28px",fontSize:12}} value={d.managerId||""} onChange={e=>setDeptMgr(d.id,e.target.value)}>
@@ -4862,6 +5272,15 @@ function AdminPanel({projects,stages,onClose,lightMode,departments,updD}){
               <div>
                 <label style={{fontSize:11,color:muted,display:"block",marginBottom:3}}>שם המחלקה</label>
                 <input style={inp} value={editDept.name} onChange={e=>setEditDept(p=>({...p,name:e.target.value}))} placeholder="שם המחלקה"/>
+              </div>
+              <div>
+                <label style={{fontSize:11,color:muted,display:"block",marginBottom:5}}>מספרי סניף (חטיבות)</label>
+                <BranchPicker value={editDept.branches||[]} onChange={v=>setEditDept(p=>({...p,branches:v}))} options={branchOpts} inp={inp} border={border} muted={muted}/>
+                <div style={{fontSize:10.5,color:muted,marginTop:5}}>
+                  {sortBranches(editDept.branches||[]).length
+                    ?`${(orders||[]).filter(o=>sortBranches(editDept.branches||[]).includes(branchCode(o.branch))).length} פק"ע משויכות למספרים האלה`
+                    :'לא שויך מספר סניף — הפק"ע של המחלקה לא יזוהו לפי חטיבה'}
+                </div>
               </div>
               <div>
                 <label style={{fontSize:11,color:muted,display:"block",marginBottom:3}}>צבע</label>
@@ -6424,13 +6843,16 @@ function doExport(ctx){
     ["תוכניות עבודה יומיות",(dailyPlans||[]).length],
     ["עובדים פעילים",users.filter(u=>u.active!==false&&u.role!=="admin").length],
     ["מחלקות",departments.length],
+    ...branchList(orders,departments).map(c=>[`פק"ע · סניף ${c}${branchName(c)?" "+branchName(c):""}`,orders.filter(o=>branchCode(o.branch)===c).length]),
+    ['פק"ע ללא סניף',orders.filter(o=>!branchCode(o.branch)).length],
+    ['פק"ע במעקב לפי כמות (ללא סידוריים)',orders.filter(o=>isQtyOrder(o)).length],
     ["שלבי ייצור",stages.length],
     ["פרויקטים",projects.length]
   ];
   addSheet(wb,"סיכום כללי",["מדד","ערך"],sumRows,[30,26],null,"0F2942");
 
   // ── 1: פקודות עבודה ─────────────────────────────────────────────────────
-  const h1=['מספר פק"ע','P/N (מק"ט)','תיאור','פרויקט','סטטוס','כמות מוזמנת','סידוריים','נמסרו','% השלמה','מחיר ליחידה','שווי כולל','תאריך קבלה','יעד אספקה','ימים ליעד','שלבים','בלוק','זמן תקן ליח\' (דק\')','זמן מכירה ליח\' (דק\')','זמן תקן שנצבר (שע\')','זמן מכירה שנצבר (שע\')','זמן בפועל (שע\')','פער מול תקן (שע\')','עמידה בתקן %','פער מכירה (שע\')','ניצול %','תקלות פתוחות','תקלות סה"כ','חוסרים פתוחים'];
+  const h1=['מספר פק"ע','P/N (מק"ט)','תיאור','פרויקט','סניף','חטיבה','מחלקות הסניף','סטטוס','כמות מוזמנת','סידוריים','נמסרו','% השלמה','מחיר ליחידה','שווי כולל','תאריך קבלה','יעד אספקה','ימים ליעד','שלבים','בלוק','זמן תקן ליח\' (דק\')','זמן מכירה ליח\' (דק\')','זמן תקן שנצבר (שע\')','זמן מכירה שנצבר (שע\')','זמן בפועל (שע\')','פער מול תקן (שע\')','עמידה בתקן %','פער מכירה (שע\')','ניצול %','תקלות פתוחות','תקלות סה"כ','חוסרים פתוחים'];
   const r1=orders.map(o=>{
     const sers=o.serials||[],logs=byOrder.get(o.id)||[];
     const act=logs.reduce((s,w)=>s+Number(w.durationMin||0),0);
@@ -6443,7 +6865,9 @@ function doExport(ctx){
     const pairs=new Set(logs.map(w=>`${w.serialId}|${w.stageId}`));
     const totalPairs=(sers.length||Number(o.qty||0))*(o.stageIds||[]).length;
     const stNames=(o.stageIds||[]).map(id=>sMap.get(id)?.name).filter(Boolean).join(", ");
-    return[o.woNumber,o.pn||"",o.description||"",pMap.get(o.projectId)||"",SL[o.status||"open"]||"פתוחה",
+    const br=branchCode(o.branch);
+    return[o.woNumber,o.pn||"",o.description||"",pMap.get(o.projectId)||"",br,branchName(br),
+      deptsForBranch(departments,br).map(d=>d.name).join(", "),SL[o.status||"open"]||"פתוחה",
       Number(o.qty||0),sers.length,(o.deliveredSerials||[]).length,
       totalPairs>0?Math.round(pairs.size/totalPairs*100):0,
       Number(o.unitPrice||0),Number(o.unitPrice||0)*Number(o.qty||0),
@@ -6455,8 +6879,11 @@ function doExport(ctx){
       (o.defects||[]).filter(d=>d.status!=="closed").length,(o.defects||[]).length,
       (o.shortages||[]).filter(h=>!h.received).length];
   });
-  addSheet(wb,"פקודות עבודה",h1,r1,[15,14,28,14,11,12,10,9,10,12,13,12,12,10,30,14,15,15,16,16,14,15,12,14,10,11,11,11],
-    (ri,c,row)=>c===4?(row[4]==="הושלמה"?XL_OK:row[4]==="תקועה"?XL_BAD:row[4]==="חלקית"?XL_INFO:XL_WARN):((c===22||c===24)?effStyle(row[c]):null));
+  // Column positions are read off the header row rather than counted by hand, so
+  // inserting a column cannot leave the colouring pointing at the wrong one.
+  const c1st=h1.indexOf("סטטוס"),c1eff=[h1.indexOf("עמידה בתקן %"),h1.indexOf("ניצול %")];
+  addSheet(wb,"פקודות עבודה",h1,r1,[15,14,28,14,9,12,22,11,12,10,9,10,12,13,12,12,10,30,14,15,15,16,16,14,15,12,14,10,11,11,11],
+    (ri,c,row)=>c===c1st?(row[c1st]==="הושלמה"?XL_OK:row[c1st]==="תקועה"?XL_BAD:row[c1st]==="חלקית"?XL_INFO:XL_WARN):(c1eff.includes(c)?effStyle(row[c]):null));
 
   // ── 2: סידוריים ─────────────────────────────────────────────────────────
   const h2=['פק"ע','P/N (מק"ט)','S/N','פרויקט','שלבים שהושלמו','מתוך','סטטוס','נמסר','זמן בפועל (דק\')','זמן מכירה (דק\')','פער (דק\')','יעילות %','עובדים','פעולה ראשונה','פעולה אחרונה'];
@@ -6501,17 +6928,22 @@ function doExport(ctx){
   // The same shape the import reads, so a full export can be edited and fed
   // straight back in without the progress falling out on the way. "לוג עבודה"
   // below is the detailed history; this is the standing state, per stage.
-  const h4b=['פק"ע','שלב','כמות שהושלמה','מתוך יחידות','אחוז'];
+  const h4b=['פק"ע','שלב','כמות שהושלמה','מתוך יחידות','אחוז','אופן המעקב'];
   const doneIdx=buildDoneIndex(workLogs);
+  const qtyIdxX=buildQtyIndex(workLogs);
   const r4b=orders.flatMap(o=>{
     const sers=o.serials||[];
-    if(!sers.length)return[];
+    // A פק"ע with no serials is counted from its quantity signatures — the same
+    // row shape, so a full export can still be edited and fed straight back in.
+    const cap=sers.length||Number(o.qty||0);
+    if(!cap)return[];
     return orderRoute(o,stages).map(st=>{
-      const n=sers.filter(sr=>doneIdx.has(logKey(sr.id,st.id))).length;
-      return n>0?[o.woNumber,st.name,n,sers.length,xlRound(n/sers.length*100)]:null;
+      const n=sers.length?sers.filter(sr=>doneIdx.has(logKey(sr.id,st.id))).length
+                         :Math.min(cap,qtySigned(qtyIdxX,workLogs,o.id,st.id));
+      return n>0?[o.woNumber,st.name,n,cap,xlRound(n/cap*100),sers.length?"סיריאלי":"לפי כמות"]:null;
     }).filter(Boolean);
   });
-  addSheet(wb,"התקדמות",h4b,r4b,[15,26,15,13,10],null,"064E3B");
+  addSheet(wb,"התקדמות",h4b,r4b,[15,26,15,13,10,12],null,"064E3B");
 
   // ── 5: לוג עבודה ────────────────────────────────────────────────────────
   const h5=['תאריך','יום','עובד','תפקיד','מחלקה','פק"ע','P/N (מק"ט)','S/N','פעולה (שלב)','פרויקט','סוג רישום','התחלה','סיום','זמן נטו (דק\')','הפסקות (דק\')','יחידות','זמן ליחידה (דק\')','זמן תקן (דק\')','פער מול תקן (דק\')','עמידה בתקן %','זמן מכירה (דק\')','פער מכירה (דק\')','ניצול %'];
@@ -6521,8 +6953,8 @@ function doExport(ctx){
     const act=Number(w.durationMin||0),n=unitsOf(w),sale=saleOf(o,w);
     const std=act>0?stdStageMin(stdIdx.get(pnKey(o?.pn)),w.stageId)*n:0;
     return[day,day?HEB_DAYS[new Date(day+"T00:00:00").getDay()]:"",w.userName||"",ROLES[u?.role]?.label||"",dMap.get(u?.departmentId)||"",
-      o?.woNumber||"",o?.pn||"",w.serialSn||"",st?.name||"",pMap.get(o?.projectId)||"",
-      w.bulk?"קבוצתי":act>0?"עבודה":"חתימה",
+      o?.woNumber||"",o?.pn||"",isQtyLog(w)?`לפי כמות ×${n}`:(w.serialSn||""),st?.name||"",pMap.get(o?.projectId)||"",
+      isQtyLog(w)?"חתימה לפי כמות":w.bulk?"קבוצתי":act>0?"עבודה":"חתימה",
       w.startTime?w.startTime.slice(0,16).replace("T"," "):"",w.endTime?w.endTime.slice(0,16).replace("T"," "):"",
       xlRound(act),xlRound(w.totalPauseMin||0),n,xlRound(n>0?act/n:act),
       std>0?xlRound(std):"",std>0?xlRound(act-std):"",effOf(act,std),
@@ -6639,16 +7071,20 @@ function doExport(ctx){
     u.lastLogin?String(u.lastLogin).slice(0,16).replace("T"," "):""]);
   addSheet(wb,"עובדים",h12,r12,[16,14,13,14,15,7,11,11,26,30,17],null,"334155");
 
-  const h13=['מחלקה','מנהל','עובדים','פעולות','שעות בפועל','שעות מכירה','יעילות %'];
+  const h13=['מחלקה','מנהל','מספרי סניף','חטיבות','פק"ע בסניפים','עובדים','פעולות','שעות בפועל','שעות מכירה','יעילות %'];
   const r13=departments.map(d=>{
     const mem=users.filter(u=>u.departmentId===d.id&&u.active!==false);
     const ids=new Set(mem.map(u=>u.id));
     const logs=done.filter(w=>ids.has(w.userId));
     const act=logs.reduce((s,w)=>s+Number(w.durationMin||0),0);
     const sale=logs.reduce((s,w)=>s+saleOf(oMap.get(w.orderId),w),0);
-    return[d.name,uMap.get(d.managerId)?.name||"",mem.length,logs.length,xlRound(act/60),xlRound(sale/60),effOf(act,sale)];
+    const brs=deptBranches(d);
+    return[d.name,uMap.get(d.managerId)?.name||"",brs.join(", "),brs.map(c=>branchName(c)).filter(Boolean).join(", "),
+      brs.length?orders.filter(o=>brs.includes(branchCode(o.branch))).length:0,
+      mem.length,logs.length,xlRound(act/60),xlRound(sale/60),effOf(act,sale)];
   });
-  addSheet(wb,"מחלקות",h13,r13,[20,18,10,10,13,13,10],(ri,c,row)=>c===6?effStyle(row[6]):null,"334155");
+  const c13eff=h13.indexOf("יעילות %");
+  addSheet(wb,"מחלקות",h13,r13,[20,18,14,20,13,10,10,13,13,10],(ri,c,row)=>c===c13eff?effStyle(row[c13eff]):null,"334155");
 
   XLSX.writeFile(wb,"דוח_מלא_קו_ייצור_"+todays()+".xlsx");
 }
@@ -6657,7 +7093,7 @@ function doExport(ctx){
 // An empty workbook with exactly the columns the importer reads, plus a guide,
 // a filled example and the lists of legal values taken from this company's own
 // projects and stages. Fill it in, drop it back — no mapping step needed.
-const TPL_ORDERS=['מספר פק"ע','P/N (מק"ט)','תיאור','פרויקט','כמות','מחיר ליחידה','תאריך קבלה','יעד אספקה','שלבים','סטטוס'];
+const TPL_ORDERS=['מספר פק"ע','P/N (מק"ט)','תיאור','פרויקט','סניף','כמות','מחיר ליחידה','תאריך קבלה','יעד אספקה','שלבים','סטטוס'];
 const TPL_SERIALS=['פק"ע','S/N','נמסר'];
 const TPL_DEFECTS=['פק"ע','S/N','כותרת','סוג','חומרה','אחראי','תאריך גילוי','סטטוס','תאריך סגירה','תיאור'];
 const TPL_SHORTS=['פק"ע','פריט','מק"ט רכיב','כמות חסרה','סיבה','אחראי','תאריך הזמנה','התקבל','תאריך קבלה','כמות שהתקבלה','הערה'];
@@ -6682,22 +7118,26 @@ function doTemplate(ctx){
     ["שלבים",'רשימת שלבים מופרדת בפסיקים. אם נשאיר ריק — הפק"ע תקבל את כל השלבים המוגדרים במערכת'],
     ["גיליון ״התקדמות״",'כמה יחידות כבר עברו כל שלב. בלעדיו כל פק"ע נכנסת ב-0% גם אם היא בפועל כמעט גמורה'],
     ["פרויקט","חייב להיות שם של פרויקט קיים (ראה גיליון ״רשימות עזר״); שם לא מוכר יסומן כאזהרה"],
+    ["סניף",`מספר הסניף — החטיבה העסקית שהפק"ע שייכת לה (${BRANCHES.map(b=>b.code+" "+b.name).join(" · ")}). אפשר להשאיר ריק`],
+    ["גיליון ״התקדמות״ ללא סידוריים",'פק"ע שאינה מנוהלת סיריאלית לא צריכה סידוריים — הכמות בשורה נרשמת כחתימה לפי כמות'],
     ["S/N בגיליון תקלות",'אפשר להשאיר ריק — התקלה תירשם ברמת הפק"ע ולא ברמת יחידה'],
     ["כן / לא","עמודות ״נמסר״ ו״התקבל״ מקבלות: כן / לא (או TRUE / FALSE)"],
     ["",""],
     ["שים לב","ייבוא במצב ״החלף הכל״ מוחק את כל הפקודות הקיימות. במצב ״הוסף לקיימים״ הן נוספות לצידן"]
   ];
-  addSheet(wb,"הוראות",["נושא","פירוט"],guide,[34,74],(ri,c)=>ri===0||ri===14?xlTag("1E40AF","DBEAFE"):null,"0F2942");
+  // Highlighted: the opening line and the closing warning — by position in the
+  // array, so adding a row in the middle can never light up the wrong one.
+  addSheet(wb,"הוראות",["נושא","פירוט"],guide,[34,74],(ri,c)=>ri===0||ri===guide.length-1?xlTag("1E40AF","DBEAFE"):null,"0F2942");
 
   const blanks=(headers,n)=>Array.from({length:n},()=>headers.map(()=>""));
-  addSheet(wb,"פקודות עבודה",TPL_ORDERS,blanks(TPL_ORDERS,40),[16,15,30,16,9,12,13,13,34,11]);
+  addSheet(wb,"פקודות עבודה",TPL_ORDERS,blanks(TPL_ORDERS,40),[16,15,30,16,9,9,12,13,13,34,11]);
   addSheet(wb,"סידוריים",TPL_SERIALS,blanks(TPL_SERIALS,60),[16,22,9],null,"1E3A8A");
   addSheet(wb,"תקלות",TPL_DEFECTS,blanks(TPL_DEFECTS,30),[16,20,26,12,11,15,13,11,13,32],null,"7F1D1D");
   addSheet(wb,"חוסרים",TPL_SHORTS,blanks(TPL_SHORTS,30),[16,24,15,12,20,15,13,10,13,13,24],null,"78350F");
   addSheet(wb,"התקדמות",TPL_PROGRESS,blanks(TPL_PROGRESS,40),[16,26,15],null,"064E3B");
 
-  const ex1=[["WO-1001","ALF-PCB","לוח PCB ראשי",projects[0]?.name||"פרויקט אלפא",4,1200,todays(),addDaysISO(todays(),30),stNames.slice(0,3).join(", "),"פתוחה"],
-             ["WO-1002","BET-SNS","חיישן תעשייתי",projects[1]?.name||projects[0]?.name||"פרויקט בטא",2,850,todays(),addDaysISO(todays(),45),"","פתוחה"]];
+  const ex1=[["WO-1001","ALF-PCB","לוח PCB ראשי",projects[0]?.name||"פרויקט אלפא","51",4,1200,todays(),addDaysISO(todays(),30),stNames.slice(0,3).join(", "),"פתוחה"],
+             ["WO-1002","BET-SNS","חיישן תעשייתי",projects[1]?.name||projects[0]?.name||"פרויקט בטא","53",2,850,todays(),addDaysISO(todays(),45),"","פתוחה"]];
   const exSheet=[["גיליון","דוגמה למילוי — העתק את המבנה, לא את התוכן"],
     ["פקודות עבודה",TPL_ORDERS.join(" | ")],
     ["",ex1[0].join(" | ")],["",ex1[1].join(" | ")],
@@ -6843,7 +7283,7 @@ function priScan(rows,serialRows){
     let o=wos.get(wo);
     if(!o){
       o={wo,pn:String(xlGet(r,PRI_H.pn)||"").trim(),desc:String(xlGet(r,PRI_H.desc)||"").trim(),
-        project:priTxt(xlGet(r,PRI_H.project)),branch:priTxt(xlGet(r,PRI_H.branch)),
+        project:priTxt(xlGet(r,PRI_H.project)),branch:branchCode(xlGet(r,PRI_H.branch)),
         qty:priNum(xlGet(r,PRI_H.qty)),price:priNum(xlGet(r,PRI_H.price)),
         release:xlDate(xlGet(r,PRI_H.release)),endDate:xlDate(xlGet(r,PRI_H.endDate)),
         statusRaw:String(xlGet(r,PRI_H.status)||"").trim(),row:i+2,ops:[],sns:[]};
@@ -6982,7 +7422,7 @@ function priBuild(scan,ctx,map,opts){
   // ── orders ────────────────────────────────────────────────────────────
   const orders=[];let closedSkipped=0,noStage=0,guessed=0,serialTotal=0,serialCapped=0,noQty=0,serialFilled=0,fromSheet=0;
   // Progress carried over from the ERP — see the block inside the loop.
-  const logs=[];let progWos=0,progNoSerials=0,progClamped=0;
+  const logs=[];let progWos=0,progQtyWos=0,progNoSerials=0,progClamped=0;
   scan.wos.forEach(w=>{
     const s=priStatus(w.statusRaw);
     if(s.guessed)guessed++;
@@ -7025,7 +7465,12 @@ function priBuild(scan,ctx,map,opts){
     // non-increasing counts down the route, which makes unit #1 the furthest
     // along and keeps the picture consistent from stage to stage.
     if(importProgress&&(s.st==="complete"||w.ops.some(op=>op.reported>0||op.remain>0))){
-      if(!serials.length)progNoSerials++;
+      // What the progress can be spread over: the serials the פק"ע has, or — when
+      // it has none — the quantity it was opened for, recorded as a quantity
+      // signature instead. A פק"ע that is not managed serially used to lose its
+      // ERP progress entirely here and arrive looking untouched.
+      const cap=serials.length||(Number(w.qty)||0);
+      if(!cap)progNoSerials++;
       else{
         const perStage=new Map();
         w.ops.forEach(op=>{
@@ -7036,14 +7481,24 @@ function priBuild(scan,ctx,map,opts){
           let n=op.reported>0?op.reported:((w.qty>0&&op.remain>0&&op.remain<w.qty)?w.qty-op.remain:0);
           n=Math.floor(n);
           if(!(n>0))return;
-          if(n>serials.length)progClamped++;
-          perStage.set(sid,Math.max(perStage.get(sid)||0,Math.min(n,serials.length)));
+          if(n>cap)progClamped++;
+          perStage.set(sid,Math.max(perStage.get(sid)||0,Math.min(n,cap)));
         });
         // A פק"ע Priority calls closed has, by definition, been through its whole
         // route — even when the operation counters in the export are blank.
-        if(s.st==="complete")ids.forEach(sid=>perStage.set(sid,serials.length));
+        if(s.st==="complete")ids.forEach(sid=>perStage.set(sid,cap));
         let k=0;
         perStage.forEach((n,sid)=>{
+          // No serials — one signature for the stage, carrying the count. Which
+          // physical unit did what is not invented, because the file never said.
+          if(!serials.length){
+            logs.push({id:`${oid}q${k++}`,userId:PRI_LOG_USER,userName:PRI_LOG_NAME,
+              serialId:null,serialSn:null,stageId:sid,orderId:oid,
+              startTime:priStamp(w.release),endTime:priStamp(w.release),completed:true,
+              durationMin:0,paused:false,pauseStart:null,totalPauseMin:0,pauseLog:[],
+              bulk:true,bulkGroupId:null,bulkCount:n});
+            return;
+          }
           for(let u=0;u<n;u++){
             const sr=serials[u];
             logs.push({id:`${oid}p${k++}`,userId:PRI_LOG_USER,userName:PRI_LOG_NAME,
@@ -7055,12 +7510,12 @@ function priBuild(scan,ctx,map,opts){
               bulk:false,bulkGroupId:null,bulkCount:null});
           }
         });
-        if(k)progWos++;
+        if(k){progWos++;if(!serials.length)progQtyWos++}
       }
     }
 
     orders.push({id:oid,woNumber:w.wo,pn:w.pn,description:w.desc,qty:w.qty,unitPrice:w.price,
-      projectId:projectOf(w.project),receivedDate:w.release,targetDate:w.endDate,status:s.st,
+      projectId:projectOf(w.project),branch:branchCode(w.branch),receivedDate:w.release,targetDate:w.endDate,status:s.st,
       stageIds:ids,serials,shortages:[],defects:[],deliveredSerials:[],
       // Preview only — stripped before the order reaches the app's state.
       _pri:{statusRaw:w.statusRaw,project:w.project,ops:w.ops.length,
@@ -7106,7 +7561,8 @@ function priBuild(scan,ctx,map,opts){
   if(closedSkipped)addIssue("info",`${closedSkipped} פק"ע סגורות (COC / נסגרה) לא יובאו`);
   if(scan.skipped)addIssue("info",`${scan.skipped} שורות ללא מספר פק"ע — דולגו`);
   if(serialCapped)addIssue("warn",`${serialCapped} פק"ע קיבלו פחות סידוריים מהכמות בגלל התקרה`);
-  if(progNoSerials)addIssue("warn",`${progNoSerials} פק"ע עם התקדמות בקובץ אך ללא סידוריים — ההתקדמות לא נרשמה. סמן ״השלם סידוריים״ כדי לקלוט גם אותה`);
+  if(progQtyWos)addIssue("info",`${progQtyWos} פק"ע ללא סידוריים קיבלו את ההתקדמות שלהן כחתימה לפי כמות — אפשר להמשיך לחתום עליהן בכרטיס הפק"ע`);
+  if(progNoSerials)addIssue("warn",`${progNoSerials} פק"ע עם התקדמות בקובץ אך ללא סידוריים וללא כמות — ההתקדמות לא נרשמה`);
   if(progClamped)addIssue("info",`${progClamped} פעולות דיווחו יותר יחידות ממספר הסידוריים בפק"ע — נרשמו עד מספר הסידוריים`);
   const sn=scan.serials||{};
   if(sn.orphan)addIssue("warn",`${sn.orphan} שורות בגיליון הסידוריים ללא פק"ע מתאימה — דולגו`);
@@ -7115,8 +7571,9 @@ function priBuild(scan,ctx,map,opts){
 
   return{mode:"priority",orders,newStages,newProjects,stds,logs,issues,opStage:Object.fromEntries(stageOf),
     stats:{orders:orders.length,rows:scan.rows,ops:scan.ops.length,mapped:stageOf.size,
+      byBranch:orders.reduce((m,o)=>{const c=branchCode(o.branch)||"—";m[c]=(m[c]||0)+1;return m},{}),
       serials:serialTotal,serialWos:fromSheet,serialFilled,sheetSerials:(scan.serials||{}).rows||0,
-      defects:0,shortages:0,logs:logs.length,progWos,progNoSerials,
+      defects:0,shortages:0,logs:logs.length,progWos,progQtyWos,progNoSerials,
       byStatus:orders.reduce((m,o)=>{m[o.status]=(m[o.status]||0)+1;return m},{}),
       newStages:newStages.length,newProjects:newProjects.length,stds:stds.length,closedSkipped}};
 }
@@ -7167,7 +7624,8 @@ function doImport(file,ctx,cb){
       }
       const qty=xlNum(xlGet(r,"כמות","כמות מוזמנת","qty"));
       if(!qty)issues.push({level:"warn",msg:`פק"ע ${wo}: לא צוינה כמות`});
-      oMap[wo]={id:uid(),woNumber:wo,pn:String(xlGet(r,'P/N (מק"ט)',"P/N","PN",'מק"ט',"מקט")||"").trim(),
+      oMap[wo]={id:uid(),woNumber:wo,branch:branchCode(xlGet(r,"סניף","מספר סניף","branch")),
+        pn:String(xlGet(r,'P/N (מק"ט)',"P/N","PN",'מק"ט',"מקט")||"").trim(),
         description:String(xlGet(r,"תיאור","תיאור מוצר","שם מוצר","description")||"").trim(),qty,
         unitPrice:xlNum(xlGet(r,"מחיר ליחידה","מחיר",PRI_H.price,"מחיר יחידה","unit price")),projectId:pid,
         receivedDate:xlDate(xlGet(r,"תאריך קבלה","תאריך שחרור","received")),
@@ -7256,10 +7714,19 @@ function doImport(file,ctx,cb){
       const sid=stgByName.get(xlNorm(stName));
       if(!sid){issues.push({level:"warn",msg:`התקדמות שורה ${i+2}: השלב ״${stName}״ לא קיים במערכת — דולג`});return}
       if(!(o.stageIds||[]).includes(sid)){issues.push({level:"warn",msg:`התקדמות שורה ${i+2}: השלב ״${stName}״ אינו במסלול של פק"ע ${wo} — דולג`});return}
-      if(!o.serials.length){issues.push({level:"warn",msg:`התקדמות שורה ${i+2}: לפק"ע ${wo} אין סידוריים, ובלעדיהם אי אפשר לרשום התקדמות`});return}
+      const cap=o.serials.length||Number(o.qty||0);
+      if(!cap){issues.push({level:"warn",msg:`התקדמות שורה ${i+2}: לפק"ע ${wo} אין סידוריים ואין כמות — אי אפשר לרשום התקדמות`});return}
       let n=Math.floor(xlNum(qtyRaw));
       if(!(n>0))return;
-      if(n>o.serials.length){issues.push({level:"info",msg:`התקדמות שורה ${i+2}: ${n} יחידות מול ${o.serials.length} סידוריים בפק"ע ${wo} — נרשמו ${o.serials.length}`});n=o.serials.length}
+      if(n>cap){issues.push({level:"info",msg:`התקדמות שורה ${i+2}: ${n} יחידות מול ${cap} ${o.serials.length?"סידוריים":"בכמות"} בפק"ע ${wo} — נרשמו ${cap}`});n=cap}
+      // Not managed serially — the row becomes one quantity signature.
+      if(!o.serials.length){
+        logs.push({id:uid(),userId:PRI_LOG_USER,userName:XL_LOG_NAME,serialId:null,serialSn:null,
+          stageId:sid,orderId:o.id,startTime:priStamp(o.receivedDate),endTime:priStamp(o.receivedDate),
+          completed:true,durationMin:0,paused:false,pauseStart:null,totalPauseMin:0,pauseLog:[],
+          bulk:true,bulkGroupId:null,bulkCount:n});
+        nProg++;return;
+      }
       for(let k=0;k<n;k++){
         const sr=o.serials[k];
         // The same stage listed twice for one פק"ע adds nothing the first row did not.
@@ -7459,6 +7926,19 @@ function ExcelTab({orders,projects,stages,stageBlocks,workLogs,users,customTasks
             ))}
           </div>
 
+          {/* Which divisions the file covers. The branch number comes over with every
+              פק"ע and is what the סניף filter on the orders screen runs on. */}
+          <div style={{background:"var(--c-deep)",border:"1px solid var(--c-border)",borderRadius:10,padding:"9px 13px",marginBottom:12}}>
+            <div style={{fontWeight:700,fontSize:12.5,marginBottom:6}}>סניפים (חטיבות) בקובץ</div>
+            <div style={{display:"flex",gap:7,flexWrap:"wrap"}}>
+              {Object.entries(priRes.stats.byBranch||{}).sort((a,b)=>b[1]-a[1]).map(([c,n])=>{
+                const col=c==="—"?"#8b95a8":branchColor(c);
+                return<span key={c} style={{background:col+"1a",color:col,border:`1px solid ${col}44`,borderRadius:14,padding:"3px 11px",fontWeight:600,fontSize:12}}>{c==="—"?"ללא סניף":branchLabel(c)} · {n}</span>;
+              })}
+            </div>
+            <div style={{fontSize:11.5,color:"var(--c-dim)",marginTop:6}}>מספר הסניף נשמר על כל פק"ע וניתן לסנן לפיו במסך פקודות העבודה. שיוך מספרי סניף למחלקות נעשה בניהול המערכת ← מחלקות.</div>
+          </div>
+
           {/* What the file says about status, before it is imported — this is the
               answer to "where did all the closed ones go" without having to look. */}
           <div style={{background:"var(--c-deep)",border:"1px solid var(--c-border)",borderRadius:10,padding:"9px 13px",marginBottom:12}}>
@@ -7493,7 +7973,7 @@ function ExcelTab({orders,projects,stages,stageBlocks,workLogs,users,customTasks
               <span style={{color:"#10b981",fontWeight:700}}>✓ סידוריים מהקובץ</span> — {priRes.stats.serialWos} פק"ע קיבלו את {priRes.stats.serials.toLocaleString()} הסידוריים שלהן מגיליון ״סידוריים״
             </div>
             <ChkOpt checked={priOpts.fillSerials} onChange={v=>setOpt("fillSerials",v)} color="#f59e0b" label='השלם סידוריים לפק"ע שאינן בגיליון'
-              hint={`${Math.max(priRes.stats.orders-priRes.stats.serialWos,0)} פק"ע עדיין בלי סידוריים, ובלעדיהם אי אפשר לדווח עליהן עבודה. הסידוריים שייווצרו הם זמניים ולא מגיעים מ-Priority`}/>
+              hint={`${Math.max(priRes.stats.orders-priRes.stats.serialWos,0)} פק"ע עדיין בלי סידוריים. לא חובה: פק"ע ללא סידוריים נכנסת למעקב לפי כמות — ההתקדמות שבקובץ נרשמת כחתימה לפי כמות (${priRes.stats.progQtyWos} פק"ע), ואפשר להמשיך לחתום עליה באפליקציה. סמנו רק אם רוצים לנהל אותן יחידה-יחידה; הסידוריים שייווצרו זמניים ואינם מגיעים מ-Priority`}/>
             {priOpts.fillSerials&&(
               <div style={{display:"flex",alignItems:"center",gap:8,fontSize:12,color:"var(--c-muted)",padding:"2px 0 6px 0",marginRight:24}}>
                 <span>עד</span>
@@ -9289,7 +9769,9 @@ function App(){
   // import just removed — their logs go with them, here and on the server, or the
   // next sync pulls back progress for units that no longer exist.
   const importWorkLogs=useCallback((logs,dropOrderIds)=>{
-    const add=(logs||[]).filter(w=>w&&w.serialId&&w.stageId);
+    // A quantity signature has no serial by design — it is the count that carries
+    // the progress — so it is admitted on the same terms as a per-unit record.
+    const add=(logs||[]).filter(w=>w&&w.stageId&&(w.serialId||isQtyLog(w)));
     const drop=(dropOrderIds&&dropOrderIds.length)?new Set(dropOrderIds):null;
     if(!add.length&&!drop)return;
     setWorkLogs(prev=>{
@@ -9563,23 +10045,39 @@ function App(){
         pns.forEach(([pn,desc,price,proj,qty],pi)=>{
           if((month+pi)%3!==0&&month!==0)return; // spread orders across months
           const oId=`demo_o_${month}_${pi}`;
-          const serials=mkSn(`${pn}_${month}`,qty);
+          const branch=BRANCHES[(month+pi)%BRANCHES.length].code;
+          // Every fourth demo פק"ע is deliberately not managed serially, so the
+          // quantity sign-off is visible in the demo data as well.
+          const byQty=pi%4===3;
+          const serials=byQty?[]:mkSn(`${pn}_${month}`,qty);
           serials.forEach(s=>snMap[s.id]=s);
           const stageIds=["s1","s2","s3","s4","s5","s6"].slice(0,4+(pi%3));
           const targetDate=new Date(baseDate);targetDate.setMonth(targetDate.getMonth()+1+pi%2);
           const defects=Math.random()>0.4?[{
             id:`def_${oId}`,title:defectTitles[pi%defectTitles.length],
-            serialId:serials[0]?.id,type:defectTypes[pi%6],
+            serialId:serials[0]?.id||"",type:defectTypes[pi%6],
             severity:defectSev[pi%4],description:"פגם שזוהה בבדיקה",
             responsible:W[WIDS[pi%WIDS.length]],discoveredDate:new Date(baseDate.getTime()+7*864e5).toISOString().slice(0,10),
             status:month<10?"closed":"open",closedDate:month<10?new Date(baseDate.getTime()+14*864e5).toISOString().slice(0,10):null
           }]:[];
           const shortages=pi%4===0?[{id:`sh_${oId}`,item:`רכיב ${pn}-R${pi}`,sku:`SKU-${1000+pi}`,missing:qty,orderedDate:baseDate.toISOString().slice(0,10),received:month<9,receivedDate:month<9?new Date(baseDate.getTime()+10*864e5).toISOString().slice(0,10):null}]:[];
-          orders.push({id:oId,wo_number:`WO-25${String(month+1).padStart(2,"0")}${String(pi+1).padStart(2,"0")}`,pn,description:desc,qty,unit_price:price,project_id:proj,received_date:baseDate.toISOString().slice(0,10),target_date:targetDate.toISOString().slice(0,10),stage_ids:stageIds,block_id:null,serials,shortages,defects,delivered_serials:month<11?serials.map(s=>s.id):[],status:month<11?"complete":"open",updated_at:new Date().toISOString()});
+          orders.push({id:oId,wo_number:`WO-25${String(month+1).padStart(2,"0")}${String(pi+1).padStart(2,"0")}`,pn,description:desc,qty,unit_price:price,branch,project_id:proj,received_date:baseDate.toISOString().slice(0,10),target_date:targetDate.toISOString().slice(0,10),stage_ids:stageIds,block_id:null,serials,shortages,defects,delivered_serials:month<11?serials.map(s=>s.id):[],status:month<11?"complete":"open",updated_at:new Date().toISOString()});
 
           // Work logs for this order
           const completedMonths=Math.min(month,10);
-          if(completedMonths>0){
+          if(completedMonths>0&&byQty){
+            const doneQty=Math.ceil(qty*(completedMonths/10));
+            stageIds.forEach((sid,stIdx)=>{
+              const n=Math.max(1,doneQty-stIdx);          // later stages trail the earlier ones
+              const startT=new Date(baseDate.getTime()+stIdx*864e5+(8*3600000));
+              wlogs.push({id:`wl_${oId}_q_${sid}`,user_id:WIDS[stIdx%WIDS.length],user_name:W[WIDS[stIdx%WIDS.length]],
+                serial_id:null,serial_sn:null,stage_id:sid,order_id:oId,
+                start_time:startT.toISOString(),end_time:startT.toISOString(),completed:true,
+                duration_min:0,paused:false,pause_start:null,total_pause_min:0,pause_log:[],
+                bulk:true,bulk_group_id:null,bulk_count:Math.min(qty,n)});
+            });
+          }
+          if(completedMonths>0&&!byQty){
             serials.slice(0,Math.ceil(serials.length*(completedMonths/10))).forEach((sr,si)=>{
               stageIds.forEach((sid,stIdx)=>{
                 const wId=WIDS[(si+stIdx)%WIDS.length];
@@ -9723,7 +10221,7 @@ function App(){
       <main className="main-content" style={{maxWidth:1440,margin:"0 auto",padding:"16px 14px",paddingBottom:showInstall?"100px":"calc(16px + env(safe-area-inset-bottom,0px))"}}>
         {tab==="dashboard"&&<Dashboard orders={filteredOrders} projects={filteredProjects} stages={stages} users={visibleUsers} workLogs={filteredWorkLogs} departments={visibleDepartments} customTasks={customTasks}/>}
         {tab==="team"&&isLead&&<TeamDashboard users={getUsers()} workLogs={filteredWorkLogs} orders={filteredOrders} stages={stages} customTasks={customTasks} departments={departments} onAddTask={handleAddTask} onDeleteTask={handleDeleteTask} onMarkPartialTask={handleMarkPartialTask} onMarkDoneTask={handleMarkDoneTask} dailyPlans={dailyPlans} onAddPlan={handleAddPlan} onDeletePlan={handleDeletePlan} onTogglePlanDone={handleTogglePlanDone}/>}
-        {tab==="orders"&&<Orders orders={filteredOrders} projects={filteredProjects} stages={stages} stageBlocks={stageBlocks} updO={updO} workLogs={filteredWorkLogs} onWorkLog={handleStartWork} workdayHours={workdayHours} setWorkdayHours={setWorkdayHoursPersist} pnStandards={pnStandards}/>}
+        {tab==="orders"&&<Orders orders={filteredOrders} projects={filteredProjects} stages={stages} stageBlocks={stageBlocks} departments={departments} updO={updO} workLogs={filteredWorkLogs} onWorkLog={handleStartWork} onDeleteLog={handleDeleteLog} workdayHours={workdayHours} setWorkdayHours={setWorkdayHoursPersist} pnStandards={pnStandards}/>}
         {tab==="shortages"&&<Shortages orders={filteredOrders} updO={updO} projects={filteredProjects}/>}
         {tab==="mywork"&&<MyWork orders={filteredOrders} stages={stages} workLogs={filteredWorkLogs} onStartWork={handleStartWork} onEndWork={handleEndWork} onPauseWork={handlePauseWork} onResumeWork={handleResumeWork} customTasks={customTasks} onAddTask={handleAddTask} onStartTask={handleStartTask} onEndTask={handleEndTask} onPauseTask={handlePauseTask} onResumeTask={handleResumeTask} onDeleteTask={handleDeleteTask} onMarkPartialTask={handleMarkPartialTask} onMarkDoneTask={handleMarkDoneTask} users={getUsers()} dailyPlans={dailyPlans} onMarkPlanDone={handleMarkPlanDone}/>}
         {tab==="workers"&&(isAdmin||isDeptMgr)&&<WorkersDashboard users={visibleUsers} workLogs={filteredWorkLogs} orders={filteredOrders} stages={stages} customTasks={customTasks} onAddTask={handleAddTask} onDeleteLog={handleDeleteLog} onDeleteTask={handleDeleteTask} onMarkPartialTask={handleMarkPartialTask} onMarkDoneTask={handleMarkDoneTask} dailyPlans={dailyPlans} onAddPlan={handleAddPlan} onDeletePlan={handleDeletePlan} onTogglePlanDone={handleTogglePlanDone}/>}
@@ -9736,7 +10234,7 @@ function App(){
       </main>
       <FastScroll/>
       {showInstall&&<InstallBanner onInstall={handleInstall} onDismiss={()=>setShowInstall(false)} lm={lm}/>}
-      {showAdmin&&isAdmin&&<AdminPanel projects={projects} stages={stages} onClose={()=>setShowAdmin(false)} lightMode={lightMode} departments={departments} updD={updD}/>}
+      {showAdmin&&isAdmin&&<AdminPanel projects={projects} stages={stages} orders={orders} onClose={()=>setShowAdmin(false)} lightMode={lightMode} departments={departments} updD={updD}/>}
       {showAlerts&&<AlertsPanel orders={filteredOrders} stages={stages} workLogs={filteredWorkLogs} users={visibleUsers} onClose={()=>setShowAlerts(false)} dismissedAlerts={dismissedAlerts} onDismissAll={ids=>setDismissedAlerts(prev=>[...new Set([...prev,...ids])])}/>}
       {showLiveBoard&&(isAdmin||isDeptMgr)&&(canUseFeature("live_board")?<LiveFactoryBoard orders={filteredOrders} workLogs={filteredWorkLogs} stages={stages} customTasks={customTasks} users={visibleUsers} departments={visibleDepartments} onClose={()=>setShowLiveBoard(false)} lightMode={lightMode}/>:<Modal onClose={()=>setShowLiveBoard(false)}><UpgradePrompt feature="לוח חי"/></Modal>)}
       {showReport&&(isAdmin||isDeptMgr)&&(canUseFeature("pdf_reports")?<MonthlyReportModal orders={filteredOrders} workLogs={filteredWorkLogs} stages={stages} projects={filteredProjects} users={visibleUsers} onClose={()=>setShowReport(false)}/>:<Modal onClose={()=>setShowReport(false)}><UpgradePrompt feature="דוחות PDF"/></Modal>)}
