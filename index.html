@@ -7,7 +7,7 @@
 <meta name="theme-color" content="#0a0e1a" id="tcm"/>
 <meta name="apple-mobile-web-app-capable" content="yes"/>
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent"/>
-<meta name="apple-mobile-web-app-title" content="ניהול קו ייצור"/>
+<meta name="apple-mobile-web-app-title" content="OmniView"/>
 <meta name="mobile-web-app-capable" content="yes"/>
 <link rel="manifest" href="manifest.json"/>
 <link rel="apple-touch-icon" href="app-icon-192.png"/>
@@ -16,17 +16,17 @@
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin/>
 <link href="https://fonts.googleapis.com/css2?family=Heebo:wght@400;500;600;700;800;900&display=swap" rel="stylesheet"/>
 <meta name="description" content="מערכת SaaS לניהול רצפת ייצור — מעקב הזמנות, שלבי עבודה, מספרים סידוריים, ביצועי עובדים ודוחות בזמן אמת"/>
-<meta name="keywords" content="ניהול ייצור, מפעל, קו ייצור, מעקב הזמנות, SaaS, production management"/>
-<meta name="author" content="Production Line Manager"/>
+<meta name="keywords" content="OmniView, אומניוויו, ניהול ייצור, מפעל, רצפת ייצור, מעקב הזמנות, SaaS, shop floor management"/>
+<meta name="author" content="OmniView"/>
 <meta property="og:type" content="website"/>
-<meta property="og:title" content="ניהול קו ייצור — מערכת ניהול מפעל חכמה"/>
+<meta property="og:title" content="OmniView — מערכת ניהול רצפת ייצור"/>
 <meta property="og:description" content="מעקב הזמנות, שלבי עבודה, מספרים סידוריים, ביצועי עובדים ודוחות — הכל במקום אחד"/>
 <meta property="og:image" content="app-icon-512.png"/>
 <meta property="og:locale" content="he_IL"/>
 <meta name="twitter:card" content="summary"/>
-<meta name="twitter:title" content="ניהול קו ייצור"/>
+<meta name="twitter:title" content="OmniView"/>
 <meta name="twitter:description" content="מערכת SaaS לניהול רצפת ייצור במפעלים"/>
-<title>⚙️ ניהול קו ייצור</title>
+<title>OmniView — ניהול רצפת ייצור</title>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.2/babel.min.js"></script>
@@ -137,12 +137,13 @@ button{font-family:inherit;cursor:pointer}
 #splash::before{content:"";position:absolute;width:520px;height:520px;border-radius:50%;background:radial-gradient(circle,rgba(59,130,246,.16),transparent 70%);filter:blur(8px);animation:splashGlow 4.5s ease-in-out infinite}
 #splash.hide{opacity:0;visibility:hidden;pointer-events:none}
 .splash-logo-wrap{position:relative;width:104px;height:104px;display:flex;align-items:center;justify-content:center;animation:splashFloat 3.2s ease-in-out infinite}
-.splash-logo-wrap svg{width:88px;height:88px;filter:drop-shadow(0 10px 28px rgba(6,182,212,.4));position:relative;z-index:2}
+.splash-logo-wrap svg{width:104px;height:79px;filter:drop-shadow(0 10px 28px rgba(6,182,212,.4));position:relative;z-index:2}
 .splash-ring{position:absolute;inset:-13px;border-radius:50%;background:conic-gradient(from 0deg,transparent 0 58%,#3b82f6 78%,#06b6d4 92%,transparent 100%);-webkit-mask:radial-gradient(closest-side,transparent calc(100% - 3px),#000 calc(100% - 3px));mask:radial-gradient(closest-side,transparent calc(100% - 3px),#000 calc(100% - 3px));animation:splashSpin 1.15s linear infinite}
 .splash-ring.r2{inset:-13px;opacity:.35;animation:splashSpin 2.6s linear infinite reverse}
-.splash-flow{stroke-dasharray:62;stroke-dashoffset:62;animation:splashDraw 1s ease-out .25s forwards}
+.splash-o{opacity:0;transform-box:fill-box;transform-origin:center;animation:splashPop .5s cubic-bezier(.2,.8,.3,1) .05s forwards}
+.splash-flow{stroke-dasharray:135;stroke-dashoffset:135;animation:splashDraw .7s ease-out .28s forwards}
 .splash-node{opacity:0;transform-box:fill-box;transform-origin:center;animation:splashNode .35s ease-out forwards}
-.splash-node.n1{animation-delay:.5s}.splash-node.n2{animation-delay:.7s}.splash-node.n3{animation-delay:.9s}
+.splash-node.n1{animation-delay:.45s}.splash-node.n2{animation-delay:.82s}.splash-node.n3{animation-delay:.9s}
 .splash-title{margin-top:28px;font-size:24px;font-weight:800;letter-spacing:-.02em;background:linear-gradient(90deg,#ffffff,#bcd9ff);-webkit-background-clip:text;background-clip:text;color:transparent;opacity:0;animation:splashUp .6s cubic-bezier(.2,.7,.3,1) .3s forwards}
 .splash-sub{margin-top:8px;font-size:13px;font-weight:500;color:#7e8aa3;opacity:0;animation:splashUp .6s cubic-bezier(.2,.7,.3,1) .45s forwards}
 .splash-bar{margin-top:24px;width:178px;height:3px;border-radius:4px;background:rgba(255,255,255,.07);overflow:hidden;position:relative;opacity:0;animation:splashUp .6s cubic-bezier(.2,.7,.3,1) .6s forwards}
@@ -154,6 +155,7 @@ button{font-family:inherit;cursor:pointer}
 @keyframes splashBar{0%{left:-42%}55%{left:62%}100%{left:108%}}
 @keyframes splashDraw{to{stroke-dashoffset:0}}
 @keyframes splashNode{from{opacity:0;transform:scale(0)}to{opacity:1;transform:scale(1)}}
+@keyframes splashPop{from{opacity:0;transform:scale(.72)}to{opacity:1;transform:none}}
 /* ── In-app loading screen (reuses splash animation) ─────────────────────── */
 .app-loading{position:fixed;inset:0;z-index:9000;display:flex;flex-direction:column;align-items:center;justify-content:center;background:radial-gradient(125% 90% at 50% -10%,#16203a 0%,#0c1122 45%,#070a14 100%);direction:rtl;overflow:hidden}
 .app-loading::before{content:"";position:absolute;width:520px;height:520px;border-radius:50%;background:radial-gradient(circle,rgba(59,130,246,.16),transparent 70%);filter:blur(8px);animation:splashGlow 4.5s ease-in-out infinite}
@@ -161,7 +163,7 @@ button{font-family:inherit;cursor:pointer}
   .app-loading::before{animation:none!important}
   .splash-logo-wrap,#splash::before,.splash-bar i{animation:none!important}
   .splash-flow{stroke-dashoffset:0!important;animation:none!important}
-  .splash-node,.splash-title,.splash-sub,.splash-bar{opacity:1!important;animation:none!important;transform:none!important}
+  .splash-o,.splash-node,.splash-title,.splash-sub,.splash-bar{opacity:1!important;animation:none!important;transform:none!important}
   .splash-ring{animation-duration:2s!important}
 }
 </style>
@@ -171,22 +173,29 @@ button{font-family:inherit;cursor:pointer}
   <div class="splash-logo-wrap">
     <div class="splash-ring"></div>
     <div class="splash-ring r2"></div>
-    <svg viewBox="0 0 40 40" aria-hidden="true">
+    <svg aria-hidden="true" viewBox="0 0 132 100">
       <defs>
-        <linearGradient id="splashLogoG" x1="0" y1="0" x2="1" y2="1">
-          <stop offset="0" stop-color="#3b82f6"/><stop offset=".55" stop-color="#2da6e0"/><stop offset="1" stop-color="#06b6d4"/>
-        </linearGradient>
+      <linearGradient id="ovBlueS" gradientUnits="userSpaceOnUse" x1="10" y1="90" x2="86" y2="14"><stop offset="0" stop-color="#0b3f9e"/><stop offset=".45" stop-color="#1471dd"/><stop offset="1" stop-color="#49b6ea"/></linearGradient>
+      <linearGradient id="ovChromeS" x1="0" y1="1" x2=".8" y2="0"><stop offset="0" stop-color="#6f7d8a"/><stop offset=".4" stop-color="#dfe7ec"/><stop offset=".72" stop-color="#97a5b1"/><stop offset="1" stop-color="#eef3f6"/></linearGradient>
+      <linearGradient id="ovTealS" gradientUnits="userSpaceOnUse" x1="76" y1="86" x2="126" y2="10"><stop offset="0" stop-color="#0e6a8a"/><stop offset=".5" stop-color="#22a5be"/><stop offset="1" stop-color="#5fd8dc"/></linearGradient>
+      <linearGradient id="ovNeedleS" x1="0" y1="1" x2="1" y2="0"><stop offset="0" stop-color="#2aa9c4"/><stop offset="1" stop-color="#0d5f86"/></linearGradient>
       </defs>
-      <rect x="2" y="2" width="36" height="36" rx="11.5" fill="url(#splashLogoG)"/>
-      <rect x="2" y="2" width="36" height="17" rx="11.5" fill="#fff" opacity=".10"/>
-      <path class="splash-flow" d="M10 27.5 L17 20.5 L23 23.5 L29.5 13.5" fill="none" stroke="#fff" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/>
-      <path class="splash-flow" d="M24.8 13.5 H29.5 V18.2" fill="none" stroke="#fff" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/>
-      <circle class="splash-node n1" cx="10" cy="27.5" r="2.5" fill="#fff"/>
-      <circle class="splash-node n2" cx="17" cy="20.5" r="2.5" fill="#fff"/>
-      <circle class="splash-node n3" cx="23" cy="23.5" r="2.5" fill="#fff"/>
-    </svg>
+      <g class="splash-o">
+      <path d="M86.37 40.42 A42 42 0 1 1 56.16 11.25 L53.26 22.89 A30 30 0 1 0 74.84 43.73 Z" fill="url(#ovBlueS)"/>
+      <path d="M74.84 43.73 A30 30 0 1 1 53.26 22.89 L52.05 27.74 A25 25 0 1 0 70.03 45.11 Z" fill="url(#ovChromeS)"/>
+      </g>
+      <g class="splash-node n1">
+      <path d="M68 52 L61.88 53.95 L61.88 50.05 Z" fill="#8b98a5"/><path d="M46 74 L44.05 67.88 L47.95 67.88 Z" fill="#8b98a5"/><path d="M24 52 L30.12 50.05 L30.12 53.95 Z" fill="#8b98a5"/><path d="M46 30 L47.95 36.12 L44.05 36.12 Z" fill="#8b98a5"/>
+      <circle cx="46" cy="52" r="17" fill="none" stroke="#a7b3be" stroke-width="1.6"/><circle cx="46" cy="52" r="13.4" fill="none" stroke="#c3ccd4" stroke-width=".9"/>
+      <path d="M59.44 38.56 L49.39 55.39 L42.61 48.61 Z" fill="url(#ovNeedleS)"/><path d="M32.56 65.44 L49.39 55.39 L42.61 48.61 Z" fill="#8d9ba8"/>
+      <circle cx="46" cy="52" r="3.2" fill="#fff"/>
+      </g>
+      <path class="splash-flow" d="M70 17 L90 78 L120 16" fill="none" stroke="url(#ovTealS)" stroke-width="13" stroke-linejoin="miter" stroke-linecap="butt"/>
+      <path class="splash-node n2" d="M124.5 6.5 L127.2 25 L108.3 15.9 Z" fill="url(#ovTealS)"/>
+      <path class="splash-node n3" d="M86 44 L91 52 L98 36 L104 26" fill="none" stroke="#1c7fd6" stroke-width="4.5" stroke-linejoin="round" stroke-linecap="round"/>
+      </svg>
   </div>
-  <div class="splash-title">ניהול קו ייצור</div>
+  <div class="splash-title">OmniView</div>
   <div class="splash-sub">מערכת ניהול רצפת ייצור</div>
   <div class="splash-bar"><i></i></div>
 </div>
@@ -1288,20 +1297,27 @@ const useAuth=()=>React.useContext(AuthCtx);
 
 // ── Shared UI ──────────────────────────────────────────────────────────────
 const Logo=({size=32})=>(
-  <svg width={size} height={size} viewBox="0 0 40 40" style={{flexShrink:0,display:"block"}}>
+  <svg width={size*1.32} height={size} style={{flexShrink:0,display:"block"}} viewBox="0 0 132 100">
     <defs>
-      <linearGradient id="pmlLogoG" x1="0" y1="0" x2="1" y2="1">
-        <stop offset="0" stopColor="#3b82f6"/><stop offset=".55" stopColor="#2da6e0"/><stop offset="1" stopColor="#06b6d4"/>
-      </linearGradient>
+    <linearGradient id="ovBlueL" gradientUnits="userSpaceOnUse" x1="10" y1="90" x2="86" y2="14"><stop offset="0" stopColor="#0b3f9e"/><stop offset=".45" stopColor="#1471dd"/><stop offset="1" stopColor="#49b6ea"/></linearGradient>
+    <linearGradient id="ovChromeL" x1="0" y1="1" x2=".8" y2="0"><stop offset="0" stopColor="#6f7d8a"/><stop offset=".4" stopColor="#dfe7ec"/><stop offset=".72" stopColor="#97a5b1"/><stop offset="1" stopColor="#eef3f6"/></linearGradient>
+    <linearGradient id="ovTealL" gradientUnits="userSpaceOnUse" x1="76" y1="86" x2="126" y2="10"><stop offset="0" stopColor="#0e6a8a"/><stop offset=".5" stopColor="#22a5be"/><stop offset="1" stopColor="#5fd8dc"/></linearGradient>
+    <linearGradient id="ovNeedleL" x1="0" y1="1" x2="1" y2="0"><stop offset="0" stopColor="#2aa9c4"/><stop offset="1" stopColor="#0d5f86"/></linearGradient>
     </defs>
-    <rect x="2" y="2" width="36" height="36" rx="11.5" fill="url(#pmlLogoG)"/>
-    <rect x="2" y="2" width="36" height="17" rx="11.5" fill="#fff" opacity=".10"/>
-    <path d="M10 27.5 L17 20.5 L23 23.5 L29.5 13.5" fill="none" stroke="#fff" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round" opacity=".97"/>
-    <path d="M24.8 13.5 H29.5 V18.2" fill="none" stroke="#fff" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round" opacity=".97"/>
-    <circle cx="10" cy="27.5" r="2.5" fill="#fff"/>
-    <circle cx="17" cy="20.5" r="2.5" fill="#fff"/>
-    <circle cx="23" cy="23.5" r="2.5" fill="#fff"/>
-  </svg>
+    <g>
+    <path d="M86.37 40.42 A42 42 0 1 1 56.16 11.25 L53.26 22.89 A30 30 0 1 0 74.84 43.73 Z" fill="url(#ovBlueL)"/>
+    <path d="M74.84 43.73 A30 30 0 1 1 53.26 22.89 L52.05 27.74 A25 25 0 1 0 70.03 45.11 Z" fill="url(#ovChromeL)"/>
+    </g>
+    <g>
+    <path d="M68 52 L61.88 53.95 L61.88 50.05 Z" fill="#8b98a5"/><path d="M46 74 L44.05 67.88 L47.95 67.88 Z" fill="#8b98a5"/><path d="M24 52 L30.12 50.05 L30.12 53.95 Z" fill="#8b98a5"/><path d="M46 30 L47.95 36.12 L44.05 36.12 Z" fill="#8b98a5"/>
+    <circle cx="46" cy="52" r="17" fill="none" stroke="#a7b3be" strokeWidth="1.6"/><circle cx="46" cy="52" r="13.4" fill="none" stroke="#c3ccd4" strokeWidth=".9"/>
+    <path d="M59.44 38.56 L49.39 55.39 L42.61 48.61 Z" fill="url(#ovNeedleL)"/><path d="M32.56 65.44 L49.39 55.39 L42.61 48.61 Z" fill="#8d9ba8"/>
+    <circle cx="46" cy="52" r="3.2" fill="#fff"/>
+    </g>
+    <path d="M70 17 L90 78 L120 16" fill="none" stroke="url(#ovTealL)" strokeWidth="13" strokeLinejoin="miter" strokeLinecap="butt"/>
+    <path d="M124.5 6.5 L127.2 25 L108.3 15.9 Z" fill="url(#ovTealL)"/>
+    <path d="M86 44 L91 52 L98 36 L104 26" fill="none" stroke="#1c7fd6" strokeWidth="4.5" strokeLinejoin="round" strokeLinecap="round"/>
+    </svg>
 );
 const Btn=({children,color="#374151",onClick,style={},disabled,small})=>(
   <button onClick={onClick} disabled={disabled} style={{background:disabled?"#374151":color,color:"#fff",border:"none",borderRadius:8,padding:small?"6px 12px":"9px 16px",fontWeight:600,fontSize:small?12:14,opacity:disabled?.5:1,transition:"opacity .15s, filter .15s",whiteSpace:"nowrap",...style}}
@@ -1416,22 +1432,29 @@ const AppLoading=()=>(
     <div className="splash-logo-wrap">
       <div className="splash-ring"></div>
       <div className="splash-ring r2"></div>
-      <svg viewBox="0 0 40 40" aria-hidden="true">
+      <svg aria-hidden="true" viewBox="0 0 132 100">
         <defs>
-          <linearGradient id="loadLogoG" x1="0" y1="0" x2="1" y2="1">
-            <stop offset="0" stopColor="#3b82f6"/><stop offset=".55" stopColor="#2da6e0"/><stop offset="1" stopColor="#06b6d4"/>
-          </linearGradient>
+        <linearGradient id="ovBlueA" gradientUnits="userSpaceOnUse" x1="10" y1="90" x2="86" y2="14"><stop offset="0" stopColor="#0b3f9e"/><stop offset=".45" stopColor="#1471dd"/><stop offset="1" stopColor="#49b6ea"/></linearGradient>
+        <linearGradient id="ovChromeA" x1="0" y1="1" x2=".8" y2="0"><stop offset="0" stopColor="#6f7d8a"/><stop offset=".4" stopColor="#dfe7ec"/><stop offset=".72" stopColor="#97a5b1"/><stop offset="1" stopColor="#eef3f6"/></linearGradient>
+        <linearGradient id="ovTealA" gradientUnits="userSpaceOnUse" x1="76" y1="86" x2="126" y2="10"><stop offset="0" stopColor="#0e6a8a"/><stop offset=".5" stopColor="#22a5be"/><stop offset="1" stopColor="#5fd8dc"/></linearGradient>
+        <linearGradient id="ovNeedleA" x1="0" y1="1" x2="1" y2="0"><stop offset="0" stopColor="#2aa9c4"/><stop offset="1" stopColor="#0d5f86"/></linearGradient>
         </defs>
-        <rect x="2" y="2" width="36" height="36" rx="11.5" fill="url(#loadLogoG)"/>
-        <rect x="2" y="2" width="36" height="17" rx="11.5" fill="#fff" opacity=".10"/>
-        <path className="splash-flow" d="M10 27.5 L17 20.5 L23 23.5 L29.5 13.5" fill="none" stroke="#fff" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round"/>
-        <path className="splash-flow" d="M24.8 13.5 H29.5 V18.2" fill="none" stroke="#fff" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round"/>
-        <circle className="splash-node n1" cx="10" cy="27.5" r="2.5" fill="#fff"/>
-        <circle className="splash-node n2" cx="17" cy="20.5" r="2.5" fill="#fff"/>
-        <circle className="splash-node n3" cx="23" cy="23.5" r="2.5" fill="#fff"/>
-      </svg>
+        <g className="splash-o">
+        <path d="M86.37 40.42 A42 42 0 1 1 56.16 11.25 L53.26 22.89 A30 30 0 1 0 74.84 43.73 Z" fill="url(#ovBlueA)"/>
+        <path d="M74.84 43.73 A30 30 0 1 1 53.26 22.89 L52.05 27.74 A25 25 0 1 0 70.03 45.11 Z" fill="url(#ovChromeA)"/>
+        </g>
+        <g className="splash-node n1">
+        <path d="M68 52 L61.88 53.95 L61.88 50.05 Z" fill="#8b98a5"/><path d="M46 74 L44.05 67.88 L47.95 67.88 Z" fill="#8b98a5"/><path d="M24 52 L30.12 50.05 L30.12 53.95 Z" fill="#8b98a5"/><path d="M46 30 L47.95 36.12 L44.05 36.12 Z" fill="#8b98a5"/>
+        <circle cx="46" cy="52" r="17" fill="none" stroke="#a7b3be" strokeWidth="1.6"/><circle cx="46" cy="52" r="13.4" fill="none" stroke="#c3ccd4" strokeWidth=".9"/>
+        <path d="M59.44 38.56 L49.39 55.39 L42.61 48.61 Z" fill="url(#ovNeedleA)"/><path d="M32.56 65.44 L49.39 55.39 L42.61 48.61 Z" fill="#8d9ba8"/>
+        <circle cx="46" cy="52" r="3.2" fill="#fff"/>
+        </g>
+        <path className="splash-flow" d="M70 17 L90 78 L120 16" fill="none" stroke="url(#ovTealA)" strokeWidth="13" strokeLinejoin="miter" strokeLinecap="butt"/>
+        <path className="splash-node n2" d="M124.5 6.5 L127.2 25 L108.3 15.9 Z" fill="url(#ovTealA)"/>
+        <path className="splash-node n3" d="M86 44 L91 52 L98 36 L104 26" fill="none" stroke="#1c7fd6" strokeWidth="4.5" strokeLinejoin="round" strokeLinecap="round"/>
+        </svg>
     </div>
-    <div className="splash-title">ניהול קו ייצור</div>
+    <div className="splash-title">OmniView</div>
     <div className="splash-sub">טוען נתונים…</div>
     <div className="splash-bar"><i></i></div>
   </div>
@@ -1850,8 +1873,8 @@ function LoginScreen({onLogin,lightMode,toggleLight}){
       <div style={{background:lm?"#ffffff":"#131829",borderRadius:20,padding:"clamp(24px,6vw,44px) clamp(20px,6vw,40px)",maxWidth:420,width:"100%",border:`1px solid ${lm?"#dde1e8":"#1e2a42"}`,boxShadow:lm?"0 8px 40px #0001":"0 20px 60px #000a"}}>
         <div style={{textAlign:"center",marginBottom:32}}>
           <div style={{display:"flex",justifyContent:"center",marginBottom:14}}><Logo size={60}/></div>
-          <div style={{fontSize:25,fontWeight:800,color:lm?"#1a1f2e":"#e2e8f0",letterSpacing:"-.03em"}}>ניהול קו ייצור</div>
-          <div style={{fontSize:11,fontWeight:600,color:lm?"#94a3b8":"#5a6478",letterSpacing:".18em",marginTop:2}}>PRODUCTION CONTROL</div>
+          <div style={{fontSize:27,fontWeight:800,color:lm?"#1a1f2e":"#e2e8f0",letterSpacing:"-.03em"}}>OmniView</div>
+          <div style={{fontSize:11,fontWeight:600,color:lm?"#94a3b8":"#5a6478",letterSpacing:".18em",marginTop:2}}>SHOP FLOOR MANAGEMENT</div>
           <div style={{fontSize:13,color:lm?"#5a6478":"#8b95a8",marginTop:10}}>{mode==="login"?"כניסה למערכת":"הרשמת חברה חדשה"}</div>
         </div>
 
@@ -6627,7 +6650,7 @@ tbody tr:nth-child(even){background:#f4f8fd}
 </div>
 ${m.workers.length?`<h2>🧾 פירוט פעולות לפי עובד ולפי יום</h2>${workerBlocks}`:""}
 <div class="foot">
-  <span>דוח זה הופק אוטומטית ממערכת ניהול קו ייצור v${esc(APP_VERSION)}</span>
+  <span>דוח זה הופק אוטומטית ממערכת OmniView v${esc(APP_VERSION)}</span>
   <span>${esc(reportPeriodLabel(m))} · ${T.actions} פעולות · ${T.workers} עובדים</span>
 </div>
 </div></body></html>`;
@@ -8277,10 +8300,10 @@ function Navbar({tab,setTab,tabs,lightMode,toggleLight,sync,onAdmin,onLogout,ale
     <div className="nav-wrapper" style={{background:navBg,borderBottom:`1px solid ${navBorder}`,position:"sticky",top:0,zIndex:50,transition:"background .3s"}}>
       <div style={{maxWidth:1440,margin:"0 auto",padding:"0 16px",display:"flex",alignItems:"center",gap:0,height:52}}>
         <div style={{display:"flex",alignItems:"center",gap:8,flexShrink:0,paddingLeft:10}}>
-          <Logo size={28}/>
+          <Logo size={34}/>
           <div style={{display:"flex",flexDirection:"column",lineHeight:1.05}}>
-            <span style={{fontWeight:800,fontSize:14,color:lm?"#1a1f2e":"#e2e8f0",whiteSpace:"nowrap",letterSpacing:"-.02em"}}>קו ייצור</span>
-            <span style={{fontSize:8.5,color:navMuted,fontWeight:600,letterSpacing:".14em"}}>PRODUCTION</span>
+            <span style={{fontWeight:800,fontSize:14,color:lm?"#1a1f2e":"#e2e8f0",whiteSpace:"nowrap",letterSpacing:"-.02em"}}>OmniView</span>
+            <span style={{fontSize:8.5,color:navMuted,fontWeight:600,letterSpacing:".14em"}}>SHOP FLOOR</span>
           </div>
         </div>
         <div className="desk-nav-wrap">
@@ -8954,7 +8977,7 @@ td{padding:7px 10px;border:1px solid #e5e7eb}tr:nth-child(even){background:#f9fa
 .kpi-v{font-size:24px;font-weight:800;color:#2563eb}.kpi-l{font-size:11px;color:#6b7280}
 .footer{margin-top:40px;padding-top:16px;border-top:1px solid #e5e7eb;font-size:11px;color:#9ca3af}
 </style></head><body>
-<h1>⚙️ דוח חודשי — ניהול קו ייצור</h1>
+<h1>דוח חודשי — OmniView</h1>
 <p style="color:#6b7280;margin-bottom:20px">תקופה: ${new Date(y,m-1).toLocaleString("he-IL",{month:"long",year:"numeric"})} | הופק: ${new Date().toLocaleDateString("he-IL")}</p>
 <div>
   <div class="kpi"><div class="kpi-v">${fOrders.length}</div><div class="kpi-l">פקעות שנפתחו</div></div>
@@ -8970,7 +8993,7 @@ ${fOrders.map(o=>`<tr><td>${o.woNumber}</td><td>${o.description||"—"}</td><td>
 <table><thead><tr><th>עובד</th><th>פעולות</th><th>שעות</th></tr></thead><tbody>
 ${Object.values(workerStats).sort((a,b)=>b.min-a.min).map(w=>`<tr><td>${w.name}</td><td>${w.units}</td><td>${Math.round(w.min/60)}</td></tr>`).join("")}
 </tbody></table>
-<div class="footer">דוח זה הופק אוטומטית ממערכת ניהול קו ייצור v${APP_VERSION}</div>
+<div class="footer">דוח זה הופק אוטומטית ממערכת OmniView v${APP_VERSION}</div>
 </body></html>`;
 
       const blob=new Blob([html],{type:"text/html;charset=utf-8"});

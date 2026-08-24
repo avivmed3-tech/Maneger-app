@@ -1,5 +1,5 @@
-const CACHE='pml-v31';
-const ASSETS=['./','./index.html','./manifest.json','./app-icon-192.png','./app-icon-512.png'];
+const CACHE='omniview-v32';
+const ASSETS=['./','./index.html','./manifest.json','./app-icon-192.png','./app-icon-512.png','./app-icon-maskable-512.png'];
 
 self.addEventListener('install',e=>{
   e.waitUntil(caches.open(CACHE).then(c=>c.addAll(ASSETS)));
@@ -42,7 +42,7 @@ self.addEventListener('message',e=>{
       body:e.data.body,
       icon:'./app-icon-192.png',
       badge:'./app-icon-192.png',
-      tag:e.data.tag||'pml-notify',
+      tag:e.data.tag||'omniview-notify',
       renotify:true,
       data:{url:e.data.url||'/'}
     });
