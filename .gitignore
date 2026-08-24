@@ -3,3 +3,6 @@
 # against index.html, which stays the single source of truth.
 app.js
 node_modules/
+
+# Staged by vercel-build.js at deploy time — the served copy, not the source.
+dist/

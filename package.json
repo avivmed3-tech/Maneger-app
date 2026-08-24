@@ -1,0 +1,12 @@
+{
+  "name": "maneger-app",
+  "version": "1.0.0",
+  "private": true,
+  "description": "מערכת ניהול קו ייצור — PWA",
+  "scripts": {
+    "build": "node vercel-build.js"
+  },
+  "devDependencies": {
+    "@babel/standalone": "7.23.2"
+  }
+}
