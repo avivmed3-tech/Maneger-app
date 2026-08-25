@@ -83,12 +83,16 @@ function main(){
 
   // Swap the inline block for the compiled file, and drop the Babel download with
   // it — the only reason it was ever on the page was to compile that block.
-  let out=html.slice(0,start)+`<script src="./app.js?v=${hash}"></script>`+html.slice(end+"</script>".length);
+  // `defer` matches the React/ReactDOM tags in <head>: deferred scripts execute
+  // in document order, so React is always defined before this runs.
+  let out=html.slice(0,start)+`<script defer src="./app.js?v=${hash}"></script>`+html.slice(end+"</script>".length);
   // Matched on "babel" in the src rather than on the exact CDN URL, so bumping the
   // version or swapping the host does not silently leave the 3 MB download in place.
   const babelTag=out.match(/[ \t]*<script[^>]+src="[^"]*babel[^"]*"[^>]*><\/script>\n?/i);
   if(!babelTag)throw new Error("could not find the babel-standalone script tag to remove");
-  out=out.replace(babelTag[0],"");
+  // Babel's slot in <head> becomes a preload for app.js, so its download starts
+  // alongside React's instead of when the parser reaches the end of the body.
+  out=out.replace(babelTag[0],`<link rel="preload" as="script" href="./app.js?v=${hash}"/>\n`);
 
   if(CHECK_ONLY){
     fs.writeFileSync(path.join(tmp,"index.html"),out);

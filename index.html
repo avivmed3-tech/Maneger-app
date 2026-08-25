@@ -14,7 +14,14 @@
 <link rel="icon" type="image/png" sizes="192x192" href="app-icon-192.png"/>
 <link rel="preconnect" href="https://fonts.googleapis.com"/>
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin/>
-<link href="https://fonts.googleapis.com/css2?family=Heebo:wght@400;500;600;700;800;900&display=swap" rel="stylesheet"/>
+<!-- The first Supabase call happens right after boot; opening the connection now
+     hides the DNS+TLS handshake behind the script downloads. -->
+<link rel="preconnect" href="https://lwiurzkiojctwzllpnmr.supabase.co" crossorigin/>
+<!-- Loaded without blocking first paint: media="print" keeps the stylesheet off
+     the render path, onload flips it live. display=swap in the URL means text is
+     never invisible while Heebo arrives — the system fallback shows first. -->
+<link href="https://fonts.googleapis.com/css2?family=Heebo:wght@400;500;600;700;800;900&display=swap" rel="stylesheet" media="print" onload="this.onload=null;this.media='all'"/>
+<noscript><link href="https://fonts.googleapis.com/css2?family=Heebo:wght@400;500;600;700;800;900&display=swap" rel="stylesheet"/></noscript>
 <meta name="description" content="מערכת SaaS לניהול רצפת ייצור — מעקב הזמנות, שלבי עבודה, מספרים סידוריים, ביצועי עובדים ודוחות בזמן אמת"/>
 <meta name="keywords" content="OmniView, אומניוויו, ניהול ייצור, מפעל, רצפת ייצור, מעקב הזמנות, SaaS, shop floor management"/>
 <meta name="author" content="OmniView"/>
@@ -27,10 +34,16 @@
 <meta name="twitter:title" content="OmniView"/>
 <meta name="twitter:description" content="מערכת SaaS לניהול רצפת ייצור במפעלים"/>
 <title>OmniView — ניהול רצפת ייצור</title>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.2/babel.min.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/xlsx-js-style@1.2.0/dist/xlsx.bundle.js"></script>
+<!-- defer on everything: the splash paints as soon as the HTML and inline CSS
+     are parsed, instead of waiting for these downloads. Deferred scripts run in
+     document order (React before ReactDOM before the app code), and Babel's
+     text/babel pass runs on DOMContentLoaded — after all deferred scripts — so
+     the un-built fallback keeps working too. The XLSX library is not here at
+     all any more: it is ~1 MB used only by Excel import/export, so the app
+     fetches it on demand — see loadXLSX(). -->
+<script defer src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+<script defer src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+<script defer src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.2/babel.min.js"></script>
 <style>
 *{box-sizing:border-box;margin:0;padding:0;-webkit-tap-highlight-color:transparent}
 :root{
@@ -7037,6 +7050,29 @@ ${m.workers.length?`<h2>🧾 פירוט פעולות לפי עובד ולפי י
 </div></body></html>`;
 }
 
+// ── XLSX on demand ─────────────────────────────────────────────────────────
+// The Excel library (xlsx-js-style, ~1 MB) used to be a render-blocking
+// <script> in <head>, paid by every device on every load — including the
+// factory tablets that never export anything. Now it is fetched the first
+// time an Excel feature is actually about to run (and warmed in the
+// background when a screen with Excel buttons mounts, so the click itself
+// doesn't wait). One in-flight promise, shared by every caller; a failed
+// load clears it so the next click can retry.
+let _xlsxPromise=null;
+function loadXLSX(){
+  if(window.XLSX)return Promise.resolve(window.XLSX);
+  if(_xlsxPromise)return _xlsxPromise;
+  _xlsxPromise=new Promise((resolve,reject)=>{
+    const s=document.createElement("script");
+    s.src="https://cdn.jsdelivr.net/npm/xlsx-js-style@1.2.0/dist/xlsx.bundle.js";
+    s.onload=()=>window.XLSX?resolve(window.XLSX):(_xlsxPromise=null,reject(new Error("XLSX did not initialize")));
+    s.onerror=()=>{_xlsxPromise=null;s.remove();reject(new Error("XLSX load failed"))};
+    document.head.appendChild(s);
+  });
+  return _xlsxPromise;
+}
+const XLSX_LOAD_ERR="טעינת רכיב ה-Excel נכשלה — בדקו את החיבור לרשת ונסו שוב";
+
 // Same numbers as the printed report, as a workbook — for whoever wants to slice
 // the period further in Excel.
 function exportTeamReportXlsx(m){
@@ -7065,6 +7101,9 @@ function exportTeamReportXlsx(m){
 function TeamReports({users,workLogs,orders,stages,stageBlocks,projects,customTasks,dailyPlans,departments,pnStandards}){
   const {currentUser}=useAuth();
   const {toast}=useToast();
+  // This screen has an "ייצוא לאקסל" button — warm the on-demand Excel library
+  // in the background so that click is instant. Failures surface on the click.
+  useEffect(()=>{loadXLSX().catch(()=>{})},[]);
   const isAdmin=currentUser?.role==="admin";
   const myDept=(departments||[]).find(d=>d.id===currentUser?.departmentId||d.managerId===currentUser?.id);
   // A department manager's report really is the department's; a team lead's covers
@@ -7206,7 +7245,7 @@ function TeamReports({users,workLogs,orders,stages,stageBlocks,projects,customTa
           <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
             <Btn small color="#3b82f6" onClick={doPrint} disabled={!T.actions&&!T.tasks&&!model.workers.length}>🖨️ הדפס</Btn>
             <Btn small color="#0ea5e9" onClick={printWindow}>🗔 פתח בחלון חדש</Btn>
-            <Btn small color="#10b981" onClick={()=>exportTeamReportXlsx(model)}>📊 ייצוא לאקסל</Btn>
+            <Btn small color="#10b981" onClick={()=>loadXLSX().then(()=>exportTeamReportXlsx(model)).catch(()=>toast(XLSX_LOAD_ERR,"error"))}>📊 ייצוא לאקסל</Btn>
             <Btn small color="#8b5cf6" onClick={doDownload}>⬇️ שמור HTML</Btn>
           </div>
         </div>
@@ -8234,6 +8273,10 @@ const ChkOpt=({checked,onChange,label,hint,color="#10b981"})=>(
 function ExcelTab({orders,projects,stages,stageBlocks,workLogs,users,customTasks,dailyPlans,departments,pnStandards,updO,updP,updS,importPnStds,importWorkLogs,canImport}){
   const {toast}=useToast();
   const {currentUser}=useAuth();
+  // Warm the Excel library while the user is still reading the screen, so the
+  // first export/import click doesn't wait for the ~1 MB download. Errors are
+  // swallowed here — the click path shows them and retries.
+  useEffect(()=>{loadXLSX().catch(()=>{})},[]);
   const [res,setRes]=useState(null);const[mode,setMode]=useState("replace");const[drag,setDrag]=useState(false);
   const [showIssues,setShowIssues]=useState(false);
   // ── Priority route export ──
@@ -8251,7 +8294,7 @@ function ExcelTab({orders,projects,stages,stageBlocks,workLogs,users,customTasks
     [pri,priMap,priOpts,projects,stages,pnStandards]);
   const cur=priRes||res;
 
-  const handleFile=file=>{if(!file)return;doImport(file,{projects,stages},(data,err)=>{
+  const handleFile=file=>{if(!file)return;loadXLSX().catch(()=>{toast(XLSX_LOAD_ERR,"error");return null}).then(x=>{if(!x)return;doImport(file,{projects,stages},(data,err)=>{
     if(err){setRes(null);setPri(null);return toast(err,"error")}
     setShowIssues(false);
     if(data.mode==="priority"){
@@ -8263,7 +8306,7 @@ function ExcelTab({orders,projects,stages,stageBlocks,workLogs,users,customTasks
     }
     setPri(null);setRes(data);
     toast(`נקראו ${data.stats.orders} פק"ע · ${data.stats.serials} סידוריים`,"success");
-  })};
+  })})};
   const clearAll=()=>{setRes(null);setPri(null)};
 
   // Replacing the order list has to remove the old rows from the server too,
@@ -8343,7 +8386,7 @@ function ExcelTab({orders,projects,stages,stageBlocks,workLogs,users,customTasks
           <span>📋 {orders.length} פק"ע</span><span>🏷️ {orders.reduce((s,o)=>s+(o.serials||[]).length,0)} סידוריים</span>
           <span>⏱️ {workLogs.filter(w=>w.completed).length} פעולות</span><span>👥 {users.length} עובדים</span>
         </div>
-        <Btn color="var(--c-accent)" onClick={()=>{doExport(exportCtx);toast("הדוח יורד...","success")}}>📥 הורד Excel מלא</Btn>
+        <Btn color="var(--c-accent)" onClick={()=>loadXLSX().then(()=>{doExport(exportCtx);toast("הדוח יורד...","success")}).catch(()=>toast(XLSX_LOAD_ERR,"error"))}>📥 הורד Excel מלא</Btn>
       </Card>
 
       <Card style={{marginBottom:14,border:"1px solid #10b98144"}}>
@@ -8357,7 +8400,7 @@ function ExcelTab({orders,projects,stages,stageBlocks,workLogs,users,customTasks
             <span key={n} style={{fontSize:11.5,background:"var(--c-deep)",border:"1px solid var(--c-border)",borderRadius:14,padding:"3px 11px",color:"var(--c-muted)"}}>{n}</span>
           ))}
         </div>
-        <Btn color="#10b981" onClick={()=>{doTemplate({projects,stages,stageBlocks});toast("התבנית יורדת...","success")}}>📄 הורד תבנית למילוי</Btn>
+        <Btn color="#10b981" onClick={()=>loadXLSX().then(()=>{doTemplate({projects,stages,stageBlocks});toast("התבנית יורדת...","success")}).catch(()=>toast(XLSX_LOAD_ERR,"error"))}>📄 הורד תבנית למילוי</Btn>
       </Card>
 
       {canImport?(
@@ -10739,7 +10782,10 @@ ReactDOM.createRoot(document.getElementById("root")).render(<ToastProvider><App/
 // ── Dismiss boot splash once the app has mounted (with a graceful minimum) ──
 (function(){
   const sp=document.getElementById("splash");if(!sp)return;
-  const MIN_MS=1100;
+  // Just enough time for the logo animation to register without flashing —
+  // this floor is *added* to real load time on fast devices, so it stays low;
+  // slow devices blow past it anyway and are never delayed by it.
+  const MIN_MS=500;
   const elapsed=Date.now()-(window.__splashStart||Date.now());
   const wait=Math.max(0,MIN_MS-elapsed);
   requestAnimationFrame(()=>setTimeout(()=>{
