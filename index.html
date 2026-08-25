@@ -320,7 +320,15 @@ function savedSessionCompany(){
   }catch{return DEFAULT_COMPANY_ID}
 }
 let _companyId=savedSessionCompany();
-function setCompanyId(id){_companyId=id||DEFAULT_COMPANY_ID}
+function setCompanyId(id){
+  const next=id||DEFAULT_COMPANY_ID;
+  // Each company's rows carry their own timestamps, so a watermark taken in one
+  // says nothing about the other — and carried across, it would narrow the very
+  // first sweep after a switch to a window that misses everything. Cleared here
+  // rather than beside each switch, so a switch added later cannot forget to.
+  if(next!==_companyId)LOG_WATERMARK="";
+  _companyId=next;
+}
 function getCompanyId(){return _companyId}
 function sbHeaders(){return{...SB_H,"x-company-id":_companyId}}
 // The company a row belongs to: the one it came from, or — for a row created in
@@ -420,32 +428,116 @@ const sbStrip=(table,rows)=>{
   if(!drop||!drop.size)return rows;
   return rows.map(r=>{const c={...r};drop.forEach(k=>{delete c[k]});return c});
 };
+// How many pages of one table are read at the same time. Six is what a browser
+// will keep open to a single host over HTTP/1.1 anyway, and it is enough to hide
+// nearly all of the latency without turning a load into a burst the database has
+// to queue.
+const SB_PARALLEL=6;
+// One page of a paged read. `withCount` also asks PostgREST for the total, which
+// it answers on Content-Range as "0-999/39983". A "*" there — or no header at all,
+// which is what a proxy that strips it looks like — is reported as -1 so the caller
+// can fall back to walking the pages instead of guessing how many there are.
+async function sbPage(table,params,from,size,withCount){
+  const headers={...sbHeaders(),"Range-Unit":"items","Range":`${from}-${from+size-1}`};
+  if(withCount)headers["Prefer"]="count=exact";
+  const r=await fetch(`${SB_URL}/rest/v1/${table}?${params}`,{headers});
+  if(!r.ok)throw new Error(await r.text());
+  const rows=await r.json();
+  const tail=String(r.headers.get("content-range")||"").split("/")[1];
+  const total=Number(tail);
+  return{rows:Array.isArray(rows)?rows:[],total:(tail&&tail!=="*"&&isFinite(total))?total:-1};
+}
+// The original walk, kept for when the total is unavailable: paging advances by
+// however many rows actually came back, so whatever ceiling the server applies is
+// discovered rather than assumed. A page shorter than the longest one seen is the
+// end of the data; a page of zero rows ends it too, so a table whose size is an
+// exact multiple of the ceiling still terminates.
+async function sbGetAllSeq(table,params,cap,firstRows,size){
+  const out=[...firstRows];
+  let from=size,widest=size;
+  while(from<cap){
+    const {rows}=await sbPage(table,params,from,SB_PAGE,false);
+    if(!rows.length)break;
+    for(const x of rows)out.push(x);
+    from+=rows.length;
+    if(rows.length<widest)break;
+    widest=Math.max(widest,rows.length);
+  }
+  return out;
+}
 const SB={
   async get(table,params=""){
     const r=await fetch(`${SB_URL}/rest/v1/${table}?${params}`,{headers:{...sbHeaders(),"Range":"0-9999"}});
     if(!r.ok)throw new Error(await r.text());return r.json();
   },
-  // Reads every row, a page at a time. Needs a total ordering in `params` or the
-  // pages can overlap — every caller here orders by created_at with id as the
-  // tiebreak, because a bulk import writes thousands of rows on the same timestamp.
+  // Reads every row. Needs a total ordering in `params` or the pages can overlap —
+  // every caller here orders by created_at with id as the tiebreak, because a bulk
+  // import writes thousands of rows on the same timestamp.
   //
-  // Paging advances by however many rows actually came back, so whatever ceiling
-  // the server applies is discovered rather than assumed. A page shorter than the
-  // longest one seen is the end of the data; a page of zero rows ends it too, so a
-  // table whose size is an exact multiple of the ceiling still terminates.
+  // The pages go out in parallel, and that is the single biggest thing separating
+  // a two-second open from a thirty-second one. PostgREST caps a page at a
+  // thousand rows, so work_logs at ~40,000 rows is forty pages — and read one
+  // after another, each of the forty waited out a full request/response cycle
+  // before the next was even sent. Nothing about them is sequential: the offsets
+  // are known in advance, so they can all be in flight at once.
+  //
+  // The first page doubles as the probe. Its length is whatever ceiling the server
+  // actually applies — discovered rather than assumed, because assuming it is what
+  // once truncated every table at a thousand rows — and its Content-Range carries
+  // the total, which is what turns "keep asking until a short page" into "here are
+  // the N pages, fetch them". A server that will not give a total falls back to the
+  // original one-at-a-time walk: the fast path is an optimisation, never the thing
+  // correctness rests on.
   async getAll(table,params="",cap=400000){
+    const first=await sbPage(table,params,0,SB_PAGE,true);
+    if(!first.rows.length)return[];
+    const size=first.rows.length;
+    if(first.total<0)return sbGetAllSeq(table,params,cap,first.rows,size);
+    const total=Math.min(first.total,cap);
+    if(size>=total)return first.rows;
+
+    const offsets=[];
+    for(let from=size;from<total;from+=size)offsets.push(from);
+    const pages=new Array(offsets.length);
+    let next=0;
+    // A fixed pool rather than one fetch per page: forty simultaneous requests
+    // would be throttled by the browser and would hand the database forty
+    // concurrent index scans, which is slower than a steady few.
+    //
+    // A page that fails is caught rather than thrown out of the worker. Promise.all
+    // keeps only the first rejection, so a second failing page would surface as an
+    // unhandled rejection in the console; recording it here also stops the workers
+    // that have not started yet, instead of finishing a read whose result is about
+    // to be discarded. The error is re-thrown below, so a caller still sees exactly
+    // what it saw before: any failed page fails the whole read.
+    let failure=null;
+    const worker=async()=>{
+      while(!failure){
+        const i=next++;
+        if(i>=offsets.length)return;
+        try{pages[i]=(await sbPage(table,params,offsets[i],size,false)).rows}
+        catch(e){if(!failure)failure=e;return}
+      }
+    };
+    await Promise.all(Array.from({length:Math.min(SB_PARALLEL,offsets.length)},worker));
+    if(failure)throw failure;
+
+    // Offsets are counted against a live table, so a row inserted or deleted while
+    // the pages were in flight shifts everything after it: the same row can land in
+    // two pages, or one can slip between them. De-duplicating by id makes the first
+    // harmless — and first-seen order is preserved, so the positional walk in
+    // sameRows still holds. The second is what the periodic full sweep reconciles,
+    // exactly as it always did for a row deleted on another device.
+    const seen=new Set();
     const out=[];
-    let from=0,widest=0;
-    while(from<cap){
-      const r=await fetch(`${SB_URL}/rest/v1/${table}?${params}`,
-        {headers:{...sbHeaders(),"Range-Unit":"items","Range":`${from}-${from+SB_PAGE-1}`}});
-      if(!r.ok)throw new Error(await r.text());
-      const rows=await r.json();
-      if(!Array.isArray(rows)||!rows.length)break;
-      for(const x of rows)out.push(x);
-      from+=rows.length;
-      if(rows.length<widest)break;
-      widest=Math.max(widest,rows.length);
+    for(const page of [first.rows,...pages]){
+      for(const row of (page||[])){
+        if(row&&row.id!=null){
+          if(seen.has(row.id))continue;
+          seen.add(row.id);
+        }
+        out.push(row);
+      }
     }
     return out;
   },
@@ -696,6 +788,11 @@ const pnStdToDb=p=>({id:p.id,pn:p.pn||"",stage_minutes:p.stageMin||{},total_min:
 // rows with the same created_at / name / מק"ט.
 const ORDER_BY={
   orders:"order=created_at.asc,id.asc",work_logs:"order=created_at.asc,id.asc",
+  // The delta read filters on updated_at, so it pages on updated_at too: ordering
+  // it by created_at instead makes the database walk the whole table and discard
+  // everything that did not move. Any total order will do here — the rows are
+  // merged by id, not by position.
+  work_logs_changed:"order=updated_at.asc,id.asc",
   projects:"order=name.asc,id.asc",stages:"order=stage_order.asc,id.asc",
   stage_blocks:"order=created_at.asc,id.asc",custom_tasks:"order=created_at.asc,id.asc",
   departments:"order=name.asc,id.asc",daily_plans:"order=created_at.asc,id.asc",
@@ -713,10 +810,56 @@ const ORDER_BY={
 //
 // What this does *not* catch is a finished row deleted on another device; the
 // periodic full sweep is what reconciles that.
+// How far back the sweep looks when it has nothing better to go on. This used to
+// be the whole answer, and on real data it is a terrible one: a bulk import stamps
+// a day's worth of rows at once, so "the last two days" matched 24,400 of the
+// 39,983 rows — twelve megabytes re-read every fifteen seconds to discover that
+// nothing had changed. It survives only as the fallback for a database whose
+// updated_at migration has not been run.
 const HOT_LOG_DAYS=2;
+// The newest updated_at this browser has read *and applied*. The sweep asks for
+// everything at or after it, which is exactly the set of rows that can have moved.
+//
+// ">=" and not ">": a batch upsert writes its 200 rows inside one transaction, so
+// they share a timestamp to the microsecond, and a strict ">" would step over the
+// rest of the batch the watermark was taken from. The overlap that costs is one
+// batch; the window it replaces was two days.
+let LOG_WATERMARK="";
+// Cleared the first time the server refuses a query on updated_at, so a project
+// that has not run the migration falls back to the window above instead of failing
+// to sync at all.
+let LOG_HAS_UPDATED_AT=true;
+// The watermark is only ever moved by a caller that actually *applied* what it
+// read. A sweep whose data is thrown away — which happens whenever a local edit
+// lands mid-fetch — must leave it where it was, or those rows would be skipped by
+// every later sweep and not reappear until the next full read.
+function commitLogWatermark(data){
+  const w=data&&data.logWatermark;
+  if(w&&w>LOG_WATERMARK)LOG_WATERMARK=w;
+}
+const maxUpdatedAt=rows=>{
+  let m="";
+  for(const r of (rows||[])){const u=r&&r.updated_at;if(u&&u>m)m=u}
+  return m;
+};
+// Every row touched since the watermark, or — with no watermark yet, or no column
+// to hang one on — the fixed window. Falling back is a slow path, never a wrong
+// one: a wider question always contains the narrower one's answer.
+async function dbLoadChangedLogs(cf){
+  if(LOG_HAS_UPDATED_AT&&LOG_WATERMARK){
+    try{
+      return await SB.getAll("work_logs",cf+`updated_at=gte.${encodeURIComponent(LOG_WATERMARK)}&`+ORDER_BY.work_logs_changed);
+    }catch(e){
+      if(!/updated_at/i.test(String((e&&e.message)||e)))throw e;
+      LOG_HAS_UPDATED_AT=false;
+      console.warn("[SB] work_logs.updated_at לא קיים במסד — הסנכרון המצטבר חוזר לחלון הזמן הישן");
+    }
+  }
+  const since=new Date(Date.now()-HOT_LOG_DAYS*86400000).toISOString();
+  return SB.getAll("work_logs",cf+`created_at=gte.${encodeURIComponent(since)}&`+ORDER_BY.work_logs);
+}
 async function dbLoadHotLogs(cid,openIds){
   const cf=`company_id=eq.${cid}&`;
-  const since=new Date(Date.now()-HOT_LOG_DAYS*86400000).toISOString();
   const watched=[...new Set((openIds||[]).filter(Boolean))];
   const byIdQueries=[];
   for(let i=0;i<watched.length;i+=SB_CHUNK){
@@ -725,7 +868,7 @@ async function dbLoadHotLogs(cid,openIds){
   }
   const parts=await Promise.all([
     SB.getAll("work_logs",cf+"completed=is.false&"+ORDER_BY.work_logs),
-    SB.getAll("work_logs",cf+`created_at=gte.${encodeURIComponent(since)}&`+ORDER_BY.work_logs),
+    dbLoadChangedLogs(cf),
     ...byIdQueries,
   ]);
   const rows=[...new Map(parts.flat().map(r=>[r.id,r])).values()];
@@ -756,7 +899,12 @@ async function dbLoadAll(hot){
     SB.getAll("pn_standards",cf+ORDER_BY.pn_standards).catch(()=>null),
   ]);
   // In hot mode `logs` is {rows, gone} rather than the whole table.
-  const freshLogs=(hot?logs.rows:logs).map(dbToLog);
+  const rawLogs=hot?logs.rows:logs;
+  // Only a candidate — see commitLogWatermark. Sound either way: a full read covers
+  // the whole table, and a hot read covers everything from the current watermark on,
+  // so in both cases the rows behind this timestamp have all been seen.
+  const logWatermark=maxUpdatedAt(rawLogs);
+  const freshLogs=rawLogs.map(dbToLog);
   let workLogs=freshLogs;
   if(hot){
     const gone=new Set(logs.gone);
@@ -779,7 +927,8 @@ async function dbLoadAll(hot){
     stages:stages.map(dbToStage),stageBlocks:blocks.map(dbToBlock),
     workLogs,customTasks:tasks.map(dbToTask),
     departments:depts.map(dbToDept),dailyPlans:plans.map(dbToPlan),
-    pnStandards:pnStds?pnStds.map(dbToPnStd):null
+    pnStandards:pnStds?pnStds.map(dbToPnStd):null,
+    logWatermark
   };
   // Everything just read is, by definition, what the server holds — so the first
   // save after a load sends the one row that changed, not the whole database.
@@ -1250,23 +1399,57 @@ const effLabel=e=>e>=110?"מצטיין":e>=95?"בתקן":e>=80?"מתחת לתק�
 const gapColor=g=>g<=-0.5?"#10b981":g<0.5?"#3b82f6":"#f59e0b";
 
 // ── LocalStorage cache (גיבוי מקומי לעבודה offline) ──────────────────────
+// What did not fit last time, and at what size — `workLogs` → 39983. Remembered
+// across loads, not just within one: 39,983 progress records serialise to ~19 MB,
+// the quota is a few, and so every load re-discovered the same refusal the same
+// expensive way — a 19 MB JSON.stringify on the main thread, right in the middle
+// of the boot, purely to be told no again.
+//
+// The size is what makes it safe to remember. A key is skipped only while the value
+// is at least as big as the one that was refused, so a collection that has since
+// been trimmed gets a fresh try instead of being written off forever.
+const LS_FULL_KEY="ls_full";
+function loadLsFull(){
+  try{
+    const raw=JSON.parse(localStorage.getItem(LS_PREFIX+LS_FULL_KEY)||"[]");
+    return new Map((Array.isArray(raw)?raw:[])
+      .filter(e=>Array.isArray(e)&&typeof e[0]==="string"&&isFinite(e[1])));
+  }catch{return new Map()}
+}
 const LS={
   get:k=>{try{const v=localStorage.getItem(LS_PREFIX+k);return v?JSON.parse(v):null}catch{return null}},
-  // A cache write that does not fit is remembered rather than retried. Tens of
-  // thousands of progress records serialise to megabytes, and re-stringifying that
-  // on every click only to be refused again costs far more than the cache is worth.
-  // Supabase stays the source of truth; what is lost is the offline copy of that one
-  // key, and whatever last fitted is left in place rather than deleted.
+  // Supabase stays the source of truth; what a refused write loses is the offline
+  // copy of that one key, and whatever last fitted is left in place rather than
+  // deleted.
   set:(k,v)=>{
-    if(LS._full.has(k))return false;
-    try{localStorage.setItem(LS_PREFIX+k,JSON.stringify(v));return true}
+    const n=Array.isArray(v)?v.length:Infinity;
+    const failedAt=LS._full.get(k);
+    if(failedAt!==undefined&&n>=failedAt)return false;
+    try{
+      localStorage.setItem(LS_PREFIX+k,JSON.stringify(v));
+      if(failedAt!==undefined){LS._full.delete(k);LS._remember()}
+      return true;
+    }
     catch(e){
-      LS._full.add(k);
+      LS._full.set(k,n);LS._remember();
       console.warn(`אחסון מקומי מלא — ״${k}״ לא נשמר במכשיר לגיבוי לא־מקוון. הנתונים ממשיכים להישמר בענן כרגיל.`,e&&e.name);
       return false;
     }
   },
-  _full:new Set()
+  _full:loadLsFull(),
+  // Tiny, and written only when the set actually changes — which is to say almost
+  // never. If even this cannot be stored the behaviour simply falls back to what it
+  // was before: rediscovered once per load.
+  // Only sized refusals are written down. A value with no length to compare
+  // against could never be retried once remembered, and these are the small keys —
+  // a session, a flag — that fail only under momentary pressure. Those stay blocked
+  // for this load and get another chance on the next, exactly as before.
+  _remember(){
+    try{
+      const durable=[...LS._full].filter(([,n])=>isFinite(n));
+      localStorage.setItem(LS_PREFIX+LS_FULL_KEY,JSON.stringify(durable));
+    }catch{}
+  }
 };
 function getUsers(){try{const u=localStorage.getItem(LS_PREFIX+"users");return u?JSON.parse(u):FALLBACK_USERS}catch{return FALLBACK_USERS}}
 async function saveUsers(users){
@@ -9731,6 +9914,7 @@ function App(){
         LS.set("session_company",_companyId);
         // This was a full read; the sweeps that follow can go incremental.
         lastFullSweepRef.current=Date.now();
+        commitLogWatermark(data);
       }
       if(users?.length){LS.set("users",users)}
 
@@ -9785,6 +9969,7 @@ function App(){
               if(d2.pnStandards){setPnStandards(d2.pnStandards);LS.set("pnStandards",d2.pnStandards)}
               if(u2?.length)LS.set("users",u2);
               LS.set("session_company",realCid);
+              commitLogWatermark(d2);
             }
           }else{localStorage.removeItem(LS_PREFIX+"session");setCurrentUser(null)}
         }
@@ -10080,6 +10265,9 @@ function App(){
   ];
   const applyRemote=(data)=>{
     if(!data)return 0;
+    // Reaching here is what makes the rows "applied": the caller has already checked
+    // that no local edit is in flight, so the watermark may safely move past them.
+    commitLogWatermark(data);
     let changed=0;
     for(const [key,ref,setter,lsKey] of remoteSlots){
       const rows=data[key];
@@ -10677,6 +10865,7 @@ function App(){
       if(data.customTasks){setCustomTasks(data.customTasks);LS.set("customTasks",data.customTasks)}
       if(data.pnStandards?.length){setPnStandards(data.pnStandards);LS.set("pnStandards",data.pnStandards)}
       if(freshUsers?.length){LS.set("users",freshUsers)}
+      commitLogWatermark(data);
       setSync("ok");
       toast(skipped.length?`נתוני דמו נטענו. ${skipped.length} משתמשי דמו דולגו — שם המשתמש תפוס בחברה אחרת (${skipped.join(", ")})`:"נתוני דמו נטענו בהצלחה!","success",skipped.length?7000:undefined);
     }catch(e){console.error(e);setSync("error");toast("שגיאה: "+sbErrMsg(e),"error")}
