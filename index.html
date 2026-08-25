@@ -558,14 +558,64 @@ const deptsForBranch=(departments,code)=>{
 // The branch numbers of a department, cleaned and de-duplicated.
 const deptBranches=d=>[...new Set(((d&&d.branches)||[]).map(branchCode).filter(Boolean))];
 
+// ── מי רואה איזה סניף ─────────────────────────────────────────────────────
+// The number is already the business division; a department is already given the
+// numbers it works for. Put those two facts together and the number stops being a
+// label and becomes a permission: assign סניף 53 to מחלקת תק"ש and its people stop
+// seeing the other three divisions' work — with nobody maintaining a list per
+// person, because the department they are already in says it.
+//
+// A person's own record can widen that, never narrow it: numbers their department
+// was not given, פק"ע that carry no number at all, or "כל הסניפים" for someone
+// whose job really does span the plant. Narrowing below the department is what the
+// department is *for* — a second place to take it away would only ever disagree
+// with the first.
+//
+// null means "no restriction", and that null is why nothing changes until this is
+// configured: before any department is given a number every scope is null, and no
+// list anywhere is filtered.
+function userBranchScope(user,departments){
+  if(!user||user.role==="admin")return null;
+  if(user.branchAccess==="all")return null;
+  const codes=new Set(deptBranches((departments||[]).find(d=>d.id===user.departmentId)));
+  (Array.isArray(user.branchAccess)?user.branchAccess:[]).forEach(c=>{const k=branchCode(c);if(k)codes.add(k)});
+  const none=user.branchNone===true;
+  if(!codes.size&&!none)return null;
+  return{codes,none};
+}
+// Does a scope admit this פק"ע? A null scope admits everything, and a פק"ע that
+// carries no number is admitted only by the explicit "ללא סניף" permission —
+// otherwise every un-stamped row from before the column existed would leak past
+// every restriction.
+const branchScopeAllows=(scope,order)=>{
+  if(!scope)return true;
+  const c=branchCode(order&&order.branch);
+  return c?scope.codes.has(c):scope.none;
+};
+// The numbers that come from the department, as opposed to the ones added by hand
+// on the person's own record — the admin screen shows the two apart, so it is
+// clear which of them moving the person to another department would change.
+const inheritedBranches=(user,departments)=>deptBranches((departments||[]).find(d=>d.id===(user&&user.departmentId)));
+// One line of "what this person may see", for the user list and the Excel export.
+const branchScopeLabel=(user,departments)=>{
+  const sc=userBranchScope(user,departments);
+  if(!sc)return "כל הסניפים";
+  const codes=sortBranches([...sc.codes]);
+  return [codes.length?codes.map(branchLabel).join(" · "):"",sc.none?"ללא סניף":""].filter(Boolean).join(" · ");
+};
+
 // ── DB row converters (DB → App format) ────────────────────────────────────
 const dbToUser=r=>({id:r.id,username:r.username,password_hash:r.password_hash,passwordPlain:r.password_plain||"",role:r.role,name:r.name,
   projectAccess:r.project_access,stageAccess:r.stage_access,
+  branchAccess:r.branch_access==="all"?"all":(Array.isArray(r.branch_access)?r.branch_access.map(branchCode).filter(Boolean):[]),
+  branchNone:r.branch_none===true,
   canEdit:r.can_edit,canView:r.can_view,active:r.active,hourlyRate:r.hourly_rate,saleRate:r.sale_rate||0,
   departmentId:r.department_id||"",managerId:r.manager_id||"",
   companyId:r.company_id||DEFAULT_COMPANY_ID,loginAttempts:r.login_attempts||0,lockedUntil:r.locked_until,lastLogin:r.last_login});
 const userToDb=u=>({id:u.id,username:u.username,password_hash:u.password_hash||u.passwordHash||"",password_plain:u.passwordPlain||null,
   role:u.role,name:u.name,project_access:u.projectAccess,stage_access:u.stageAccess,
+  branch_access:u.branchAccess==="all"?"all":sortBranches(Array.isArray(u.branchAccess)?u.branchAccess:[]),
+  branch_none:u.branchNone===true,
   can_edit:u.canEdit,can_view:u.canView,active:u.active!==false,hourly_rate:Number(u.hourlyRate||0),sale_rate:Number(u.saleRate||0),
   department_id:u.departmentId||null,manager_id:u.managerId||null,
   company_id:rowCid(u)});
@@ -3493,6 +3543,15 @@ function MyWork({orders,stages,workLogs,onStartWork,onEndWork,onPauseWork,onResu
   const [bulkMode,setBulkMode]=useState(false);
   const [bulkSelected,setBulkSelected]=useState([]);
   const [onlyPlan,setOnlyPlan]=useState(false); // show only the units assigned in my daily plan
+  // ── Queue filters — פק"ע · מק"ט · שלב · סניף ──────────────────────────
+  // A worker whose access covers several stages gets every פק"ע in the plant that
+  // is waiting on any of them, in one list. That is the right list — it is just
+  // not the right *question* when the answer wanted is "what is left on this
+  // מק"ט", or "only my division", or "only the שלב I am set up for right now".
+  const [fText,setFText]=useState("");   // פק"ע number / מק"ט / description
+  const [fPn,setFPn]=useState("all");
+  const [fStage,setFStage]=useState("all");
+  const [fBranch,setFBranch]=useState("all");
   const [showTaskForm,setShowTaskForm]=useState(false);
   const [taskName,setTaskName]=useState("");
   const [taskDesc,setTaskDesc]=useState("");
@@ -3594,7 +3653,6 @@ function MyWork({orders,stages,workLogs,onStartWork,onEndWork,onPauseWork,onResu
     return{id:o.id,order:o,units,planned:units.filter(u=>u.planned).length};
   }).filter(q=>q.units.length>0).sort((a,b)=>b.planned-a.planned),
     [accessible,stageMap,doneIdx,runIdx,myAccessSet,myPlans]);
-  const visibleQueues=useMemo(()=>onlyPlan?orderQueues.map(q=>({...q,units:q.units.filter(u=>u.planned)})).filter(q=>q.units.length>0):orderQueues,[onlyPlan,orderQueues]);
   // ── פק"ע שאינן מנוהלות סיריאלית ───────────────────────────────────────
   // These never reach the queue above and never could: that queue is built from
   // units, and a פק"ע with no serial numbers has none. It is still work, and it is
@@ -3609,6 +3667,72 @@ function MyWork({orders,stages,workLogs,onStartWork,onEndWork,onPauseWork,onResu
     const cap=Number(o.qty)||0;
     return (o.stageIds||[]).some(sid=>myAccessSet.has(sid)&&qtySigned(myQtyIdx,workLogs,o.id,sid)<cap);
   }),[accessible,myAccessSet,myQtyIdx,workLogs]);
+  // ── What the filters may offer ──────────────────────────────────────────
+  // Every option is drawn from the queue itself and carries its own count, so a
+  // value that would empty the screen is never in the list to be picked. Both
+  // lists feed it — the unit queue and the quantity-reported פק"ע — because a
+  // filter that hid one of them would look like the work had disappeared.
+  const queueOpts=useMemo(()=>{
+    const pn=new Map(),br=new Map(),st=new Map();
+    const bump=(m,k,n)=>m.set(k,(m.get(k)||0)+n);
+    orderQueues.forEach(q=>{
+      bump(pn,(q.order.pn||"").trim(),q.units.length);
+      bump(br,branchCode(q.order.branch),q.units.length);
+      q.units.forEach(u=>bump(st,u.next.id,1));
+    });
+    qtyOrders.forEach(o=>{
+      bump(pn,(o.pn||"").trim(),1);
+      bump(br,branchCode(o.branch),1);
+      (o.stageIds||[]).forEach(sid=>{if(myAccessSet.has(sid))bump(st,sid,1)});
+    });
+    const blankLast=(a,b)=>(a[0]?0:1)-(b[0]?0:1);
+    return{
+      pn:[...pn].sort((a,b)=>blankLast(a,b)||String(a[0]).localeCompare(String(b[0]),"he",{numeric:true})),
+      // Same order the number reads in everywhere else: 51 · 52 · 53 · 57, then
+      // anything non-numeric, then "ללא סניף".
+      br:[...br].sort((a,b)=>{
+        const bl=blankLast(a,b);if(bl)return bl;
+        const na=Number(a[0]),nb=Number(b[0]);
+        return(isFinite(na)&&isFinite(nb))?na-nb:String(a[0]).localeCompare(String(b[0]),"he",{numeric:true});
+      }),
+      st:[...st].sort((a,b)=>(stageMap.get(a[0])?.order||0)-(stageMap.get(b[0])?.order||0))
+    };
+  },[orderQueues,qtyOrders,myAccessSet,stageMap]);
+  const filterOn=fText.trim()!==""||fPn!=="all"||fStage!=="all"||fBranch!=="all";
+  const clearFilters=()=>{setFText("");setFPn("all");setFStage("all");setFBranch("all");setBulkSelected([])};
+  // The three פק"ע-level filters. The שלב filter is not here: it is a property of
+  // the unit, not of the פק"ע, so it is applied a row further in.
+  const orderMatches=useCallback(o=>{
+    if(fPn!=="all"&&(fPn==="none"?(o.pn||"").trim()!=="":(o.pn||"").trim()!==fPn))return false;
+    if(fBranch!=="all"){
+      const c=branchCode(o.branch);
+      if(fBranch==="none"?!!c:c!==fBranch)return false;
+    }
+    const q=fText.trim().toLowerCase();
+    if(q&&!String(o.woNumber||"").toLowerCase().includes(q)
+        &&!String(o.pn||"").toLowerCase().includes(q)
+        &&!String(o.description||"").toLowerCase().includes(q))return false;
+    return true;
+  },[fPn,fBranch,fText]);
+  const visibleQueues=useMemo(()=>orderQueues
+    .filter(q=>orderMatches(q.order))
+    .map(q=>{
+      let units=q.units;
+      if(onlyPlan)units=units.filter(u=>u.planned);
+      if(fStage!=="all")units=units.filter(u=>u.next.id===fStage);
+      return units===q.units?q:{...q,units,planned:units.filter(u=>u.planned).length};
+    })
+    .filter(q=>q.units.length>0),[orderQueues,onlyPlan,fStage,orderMatches]);
+  // The quantity list answers to the same filters. A שלב filter keeps only the
+  // פק"ע that still have something unsigned on *that* stage, which is the rule
+  // the list already follows for the worker's stages as a whole.
+  const visibleQtyOrders=useMemo(()=>qtyOrders.filter(o=>{
+    if(!orderMatches(o))return false;
+    if(fStage==="all")return true;
+    if(!myAccessSet.has(fStage)||!(o.stageIds||[]).includes(fStage))return false;
+    return qtySigned(myQtyIdx,workLogs,o.id,fStage)<(Number(o.qty)||0);
+  }),[qtyOrders,orderMatches,fStage,myAccessSet,myQtyIdx,workLogs]);
+  const visibleUnitCount=useMemo(()=>visibleQueues.reduce((n,q)=>n+q.units.length,0),[visibleQueues]);
   // Admin view: the same two figures were recomputed inline in the markup on every
   // render — including the pending-unit count, which walks every serial of every
   // פק"ע against its whole route.
@@ -3845,6 +3969,47 @@ function MyWork({orders,stages,workLogs,onStartWork,onEndWork,onPauseWork,onResu
         )}
       </Card>
 
+      {/* Queue filters — פק"ע · מק"ט · שלב · סניף */}
+      {(orderQueues.length>0||qtyOrders.length>0)&&(
+        <Card style={{padding:"11px 13px",marginBottom:10}}>
+          <div style={{display:"flex",gap:9,flexWrap:"wrap",alignItems:"flex-end"}}>
+            <div style={{display:"flex",flexDirection:"column",gap:3,flex:"1 1 170px"}}>
+              <label style={{fontSize:11,color:"var(--c-dim)"}}>חיפוש פק"ע / מק"ט</label>
+              <input value={fText} onChange={e=>{setFText(e.target.value);setBulkSelected([])}} placeholder={'מספר פק"ע, מק"ט או תיאור...'}/>
+            </div>
+            <div style={{display:"flex",flexDirection:"column",gap:3}}>
+              <label style={{fontSize:11,color:"var(--c-dim)"}}>מק"ט</label>
+              <select value={fPn} onChange={e=>{setFPn(e.target.value);setBulkSelected([])}} style={{padding:"7px 8px",fontSize:12,minWidth:135}}>
+                <option value="all">כל המק"טים</option>
+                {queueOpts.pn.map(([v,n])=><option key={v||"__none"} value={v||"none"}>{v||'ללא מק"ט'} · {n}</option>)}
+              </select>
+            </div>
+            <div style={{display:"flex",flexDirection:"column",gap:3}}>
+              <label style={{fontSize:11,color:"var(--c-dim)"}}>שלב</label>
+              <select value={fStage} onChange={e=>{setFStage(e.target.value);setBulkSelected([])}} style={{padding:"7px 8px",fontSize:12,minWidth:135}} title="רק השלבים שיש לך הרשאה אליהם">
+                <option value="all">כל השלבים שלי</option>
+                {queueOpts.st.map(([sid,n])=><option key={sid} value={sid}>{stageMap.get(sid)?.name||sid} · {n}</option>)}
+              </select>
+            </div>
+            <div style={{display:"flex",flexDirection:"column",gap:3}}>
+              <label style={{fontSize:11,color:"var(--c-dim)"}}>סניף (חטיבה)</label>
+              <select value={fBranch} onChange={e=>{setFBranch(e.target.value);setBulkSelected([])}} style={{padding:"7px 8px",fontSize:12,minWidth:135}} title='מספר הסניף מגיע מה-ERP ומייצג את החטיבה העסקית'>
+                <option value="all">כל הסניפים</option>
+                {queueOpts.br.map(([v,n])=><option key={v||"__none"} value={v||"none"}>{v?branchLabel(v):"ללא סניף"} · {n}</option>)}
+              </select>
+            </div>
+            {filterOn&&<Btn small onClick={clearFilters}>✕ נקה סינון</Btn>}
+          </div>
+          {filterOn&&(
+            <div style={{fontSize:11.5,color:"var(--c-dim)",marginTop:8}}>
+              {(visibleQueues.length||visibleQtyOrders.length)
+                ?<>מציג {visibleUnitCount} יחידות ב-{visibleQueues.length} פק"ע{visibleQtyOrders.length>0?` · ועוד ${visibleQtyOrders.length} פק"ע לדיווח לפי כמות`:""}</>
+                :<span style={{color:"#f59e0b"}}>אין עבודה שמתאימה לסינון — נסה לנקות אותו</span>}
+            </div>
+          )}
+        </Card>
+      )}
+
       {/* Bulk mode toggle + "my plan only" filter */}
       <div style={{display:"flex",gap:8,marginBottom:10,flexWrap:"wrap",alignItems:"center"}}>
         <Btn color={bulkMode?"#ef4444":"#374151"} small onClick={()=>{setBulkMode(p=>!p);setBulkSelected([])}}>{bulkMode?"✕ בטל מצב קבוצתי":"📦 הפעלת טיימר קבוצתי"}</Btn>
@@ -3887,14 +4052,14 @@ function MyWork({orders,stages,workLogs,onStartWork,onEndWork,onPauseWork,onResu
           </div>
         </Card>
       )}/>
-      {qtyOrders.length>0&&(
+      {visibleQtyOrders.length>0&&(
         <Card style={{marginBottom:12,border:"1px solid #10b98133"}}>
-          <div style={{fontWeight:700,fontSize:15,color:"#10b981",marginBottom:5}}>✍️ דיווח לפי כמות ({qtyOrders.length})</div>
+          <div style={{fontWeight:700,fontSize:15,color:"#10b981",marginBottom:5}}>✍️ דיווח לפי כמות ({visibleQtyOrders.length}{filterOn&&visibleQtyOrders.length!==qtyOrders.length?` מתוך ${qtyOrders.length}`:""})</div>
           <div style={{fontSize:11.5,color:"var(--c-dim)",lineHeight:1.7,marginBottom:10}}>
             פק"ע שאינן מנוהלות סיריאלית — אין בהן יחידות להתחיל עליהן טיימר, ולכן מדווחים בהן כמה יחידות עברו כל שלב.
             אפשר לחתום רק על השלבים שבהרשאות שלך, כל חתימה נרשמת על שמך, ואפשר לבטל חתימה שלך אם טעית.
           </div>
-          <VirtualList items={qtyOrders} estimate={64} gap={7} renderRow={o=>{
+          <VirtualList items={visibleQtyOrders} estimate={64} gap={7} renderRow={o=>{
             const open=openQty===o.id;
             const cap=Number(o.qty)||0;
             const mineLeft=(o.stageIds||[]).reduce((n,sid)=>myAccessSet.has(sid)
@@ -3922,7 +4087,9 @@ function MyWork({orders,stages,workLogs,onStartWork,onEndWork,onPauseWork,onResu
           }}/>
         </Card>
       )}
-      {!myActiveLog&&!activeTask&&visibleQueues.length===0&&qtyOrders.length===0&&(onlyPlan
+      {!myActiveLog&&!activeTask&&visibleQueues.length===0&&visibleQtyOrders.length===0&&(filterOn
+        ?<EmptyState icon="🔍" title="אין עבודה שמתאימה לסינון" subtitle="נקה את הסינון כדי לראות את כל העבודה שממתינה לך" action={clearFilters} actionLabel="✕ נקה סינון"/>
+        :onlyPlan
         ?<EmptyState icon="📅" title="אין יחידות פתוחות בתוכנית שלך" subtitle="כל מה שהוקצה לך להיום בוצע — עבור ל'כל היחידות הממתינות' כדי לראות עבודה נוספת"/>
         :<EmptyState icon="🎉" title="אין עבודה ממתינה!" subtitle="כל היחידות הושלמו"/>)}
     </div>
@@ -4918,6 +5085,55 @@ function BranchPicker({value=[],onChange,options=[],inp,border,muted}){
   );
 }
 
+// ── גישה לסניפים של משתמש ────────────────────────────────────────────────
+// Two grants side by side, and which is which has to be obvious: the numbers the
+// person has because of the department they are in — shown, not editable, because
+// they are edited on the department and moving the person moves them — and the
+// numbers granted to this one person on top. The line at the bottom answers the
+// only question an admin actually has here, which is how much of the plant this
+// adds up to.
+function BranchAccessBox({user,departments,orders,options,onChange,inp,border,muted,text,lm}){
+  const inh=inheritedBranches(user,departments);
+  const all=user.branchAccess==="all";
+  const extra=Array.isArray(user.branchAccess)?user.branchAccess:[];
+  const scope=userBranchScope(user,departments);
+  const total=(orders||[]).length;
+  const seen=scope?(orders||[]).filter(o=>branchScopeAllows(scope,o)).length:total;
+  return(
+    <div style={{border:`1px solid ${lm?"#c8cdd6":"#283650"}`,borderRadius:6,background:lm?"#f7f8fa":"#0a0e1a",padding:8}}>
+      <div style={{fontSize:11,color:muted,marginBottom:7,lineHeight:2}}>
+        {inh.length
+          ?<>מהמחלקה: {inh.map(c=>(
+            <span key={c} style={{background:branchColor(c)+"1f",color:branchColor(c),border:`1px solid ${branchColor(c)}44`,borderRadius:12,padding:"2px 8px",marginLeft:4,fontWeight:700,whiteSpace:"nowrap"}}>🏢 {branchLabel(c)}</span>
+          ))}</>
+          :'למחלקה של המשתמש לא שויך מספר סניף — בלי הרשאה ידנית כאן הוא רואה את כל הפק"ע'}
+      </div>
+      <label style={{display:"flex",alignItems:"center",gap:6,fontSize:12,cursor:"pointer",color:text,marginBottom:7}}>
+        <input type="checkbox" style={{width:"auto"}} checked={all} onChange={e=>onChange({branchAccess:e.target.checked?"all":[]})}/>
+        <b>כל הסניפים</b><span style={{fontSize:11,color:muted}}>— בלי קשר למחלקה</span>
+      </label>
+      {!all&&(<>
+        <div style={{fontSize:11,color:muted,marginBottom:5}}>סניפים נוספים למשתמש הזה בלבד:</div>
+        {/* The department's own numbers are not offered again here — picking one
+            would change nothing, and seeing it unticked reads as "not allowed"
+            when it already is. */}
+        <BranchPicker value={extra} onChange={v=>onChange({branchAccess:v})} options={(options||[]).filter(c=>!inh.includes(c))} inp={inp} border={border} muted={muted}/>
+        <label style={{display:"flex",alignItems:"center",gap:6,fontSize:12,cursor:"pointer",color:text,marginTop:8}}>
+          <input type="checkbox" style={{width:"auto"}} checked={user.branchNone===true} onChange={e=>onChange({branchNone:e.target.checked})}/>
+          גם פק"ע ללא מספר סניף
+        </label>
+      </>)}
+      <div style={{fontSize:10.5,color:muted,marginTop:8,paddingTop:7,borderTop:`1px solid ${border}`,lineHeight:1.7}}>
+        {user.role==="admin"
+          ?'🛡️ מנהל מערכת — רואה תמיד את כל הסניפים'
+          :scope
+          ?<>רואה <b style={{color:text}}>{seen}</b> מתוך {total} פק"ע · {branchScopeLabel(user,departments)}</>
+          :<>אין הגבלת סניף — רואה את כל {total} הפק"ע</>}
+      </div>
+    </div>
+  );
+}
+
 function AdminPanel({projects,stages,orders=[],onClose,lightMode,departments,updD}){
   const {toast}=useToast();
   const {currentUser}=useAuth();
@@ -4955,7 +5171,7 @@ function AdminPanel({projects,stages,orders=[],onClose,lightMode,departments,upd
   const [addMode,setAddMode]=useState(false);
   const [revealPw,setRevealPw]=useState({}); // userId -> bool (show password in list)
   const [editShowPw,setEditShowPw]=useState(false);
-  const [newUser,setNewUser]=useState({username:"",password:"",name:"",role:"worker",projectAccess:"all",stageAccess:"all",canEdit:false,canView:true,active:true,hourlyRate:0,saleRate:0,departmentId:"",managerId:""});
+  const [newUser,setNewUser]=useState({username:"",password:"",name:"",role:"worker",projectAccess:"all",stageAccess:"all",branchAccess:[],branchNone:false,canEdit:false,canView:true,active:true,hourlyRate:0,saleRate:0,departmentId:"",managerId:""});
   // Departments form
   const [deptName,setDeptName]=useState("");
   const [deptColor,setDeptColor]=useState("#3b82f6");
@@ -5019,7 +5235,7 @@ function AdminPanel({projects,stages,orders=[],onClose,lightMode,departments,upd
     saveUsers(updated);setUsersLocal(updated);
     UNDO.record({user:currentUser,action:"הוספת משתמש",target:newUser.username,details:newUser.name,
       changes:[{coll:"users",before:[],after:[u.id]}]});
-    setNewUser({username:"",password:"",name:"",role:"worker",projectAccess:"all",stageAccess:"all",canEdit:false,canView:true,active:true,hourlyRate:0,saleRate:0,departmentId:"",managerId:""});
+    setNewUser({username:"",password:"",name:"",role:"worker",projectAccess:"all",stageAccess:"all",branchAccess:[],branchNone:false,canEdit:false,canView:true,active:true,hourlyRate:0,saleRate:0,departmentId:"",managerId:""});
     setAddMode(false);
   };
   const saveUser=async()=>{
@@ -5140,6 +5356,12 @@ function AdminPanel({projects,stages,orders=[],onClose,lightMode,departments,upd
                       ))}
                     </div>
                   </div>
+                  {/* Branch (division) access — see userBranchScope */}
+                  <div style={{marginBottom:10}}>
+                    <label style={{fontSize:11,color:muted,display:"block",marginBottom:3}}>גישה לסניפים (חטיבות)</label>
+                    <BranchAccessBox user={newUser} departments={departments} orders={orders} options={branchOpts}
+                      onChange={patch=>setNewUser(p=>({...p,...patch}))} inp={inp} border={border} muted={muted} text={text} lm={lm}/>
+                  </div>
                   <div style={{display:"flex",gap:8}}><Btn color="#10b981" onClick={addUser}>✅ הוסף</Btn><Btn onClick={()=>setAddMode(false)}>ביטול</Btn></div>
                 </div>
               )}
@@ -5159,6 +5381,7 @@ function AdminPanel({projects,stages,orders=[],onClose,lightMode,departments,upd
                         </span>
                         <span>פרויקטים: {u.projectAccess==="all"?"הכל":Array.isArray(u.projectAccess)?u.projectAccess.length:"1"}</span>
                         <span>שלבים: {u.stageAccess==="all"?"הכל":Array.isArray(u.stageAccess)?u.stageAccess.length:"1"}</span>
+                        <span title='אילו פק"ע המשתמש רואה — לפי מספר הסניף של המחלקה שלו ותוספות ידניות'>🏢 סניפים: {u.role==="admin"?"הכל":branchScopeLabel(u,departments)}</span>
                       </div>
                     </div>
                     <div style={{display:"flex",gap:4}}>
@@ -5196,6 +5419,10 @@ function AdminPanel({projects,stages,orders=[],onClose,lightMode,departments,upd
                 <div style={{marginTop:12}}>
                   <label style={{fontSize:11,color:muted,display:"block",marginBottom:5}}>מספרי סניף (חטיבות) — אפשר לבחור יותר מאחד</label>
                   <BranchPicker value={newDeptBranches} onChange={setNewDeptBranches} options={branchOpts} inp={inp} border={border} muted={muted}/>
+                  <div style={{fontSize:10.5,color:muted,marginTop:6,lineHeight:1.7}}>
+                    👁️ המספרים האלה הם גם הרשאת צפייה: מרגע ששויך סניף למחלקה, עובדי המחלקה רואים רק את הפק"ע של אותם סניפים.
+                    אפשר להרחיב לעובד יחיד בעריכת המשתמש (״גישה לסניפים״). בלי שיוך — כולם רואים הכל, כמו קודם.
+                  </div>
                 </div>
               </div>
               {(departments||[]).length===0?<EmptyState icon="🏢" title="אין מחלקות עדיין" subtitle="צור מחלקה ראשונה כדי להתחיל לארגן את הצוות"/>:(
@@ -5214,6 +5441,10 @@ function AdminPanel({projects,stages,orders=[],onClose,lightMode,departments,upd
                                 style={{fontSize:11,background:branchColor(c)+"1f",color:branchColor(c),border:`1px solid ${branchColor(c)}44`,padding:"2px 9px",borderRadius:12,fontWeight:700}}>🏢 {branchLabel(c)}</span>
                             ))}
                             {!deptBranches(d).length&&<span style={{fontSize:11,color:muted}}>ללא מספר סניף</span>}
+                            {deptBranches(d).length>0&&(
+                              <span title='עובדי המחלקה רואים רק את הפק"ע של הסניפים האלה — אלא אם הורחבה להם ההרשאה אישית'
+                                style={{fontSize:10.5,color:muted}}>👁️ {(orders||[]).filter(o=>deptBranches(d).includes(branchCode(o.branch))).length} מתוך {(orders||[]).length} פק"ע</span>
+                            )}
                           </div>
                           <div style={{display:"flex",gap:8,alignItems:"center"}}>
                             <select style={{...inp,width:"auto",minWidth:150,padding:"5px 10px",paddingRight:"28px",fontSize:12}} value={d.managerId||""} onChange={e=>setDeptMgr(d.id,e.target.value)}>
@@ -5347,6 +5578,12 @@ function AdminPanel({projects,stages,orders=[],onClose,lightMode,departments,upd
                   </label>
                 )})}
               </div>
+            </div>
+            {/* Branch (division) access — see userBranchScope */}
+            <div style={{marginBottom:12}}>
+              <label style={{fontSize:11,color:muted,display:"block",marginBottom:3}}>גישה לסניפים (חטיבות)</label>
+              <BranchAccessBox user={editUser} departments={departments} orders={orders} options={branchOpts}
+                onChange={patch=>setEditUser(p=>({...p,...patch}))} inp={inp} border={border} muted={muted} text={text} lm={lm}/>
             </div>
             <div style={{display:"flex",gap:8}}><Btn color="#10b981" onClick={saveUser}>✅ שמור</Btn><Btn onClick={()=>setEditUser(null)}>ביטול</Btn></div>
           </div>
@@ -7153,13 +7390,14 @@ function doExport(ctx){
   addSheet(wb,"בלוקים",h11,r11,[22,22,10],null,"0E7490");
 
   // ── 12: עובדים ומחלקות ──────────────────────────────────────────────────
-  const h12=['שם','שם משתמש','תפקיד','מחלקה','מנהל ישיר','פעיל','תעריף שעתי','תעריף מכירה','הרשאת פרויקטים','הרשאת שלבים','כניסה אחרונה'];
+  const h12=['שם','שם משתמש','תפקיד','מחלקה','מנהל ישיר','פעיל','תעריף שעתי','תעריף מכירה','הרשאת פרויקטים','הרשאת שלבים','הרשאת סניפים','כניסה אחרונה'];
   const r12=users.map(u=>[u.name||"",u.username||"",ROLES[u.role]?.label||u.role||"",dMap.get(u.departmentId)||"",uMap.get(u.managerId)?.name||"",
     u.active!==false?"כן":"לא",Number(u.hourlyRate||0),Number(u.saleRate||0),
     u.projectAccess==="all"?"כל הפרויקטים":(Array.isArray(u.projectAccess)?u.projectAccess.map(id=>pMap.get(id)||id).join(", "):pMap.get(u.projectAccess)||""),
     u.stageAccess==="all"?"כל השלבים":(Array.isArray(u.stageAccess)?u.stageAccess.map(id=>sMap.get(id)?.name||id).join(", "):""),
+    u.role==="admin"?"כל הסניפים":branchScopeLabel(u,departments),
     u.lastLogin?String(u.lastLogin).slice(0,16).replace("T"," "):""]);
-  addSheet(wb,"עובדים",h12,r12,[16,14,13,14,15,7,11,11,26,30,17],null,"334155");
+  addSheet(wb,"עובדים",h12,r12,[16,14,13,14,15,7,11,11,26,30,24,17],null,"334155");
 
   const h13=['מחלקה','מנהל','מספרי סניף','חטיבות','פק"ע בסניפים','עובדים','פעולות','שעות בפועל','שעות מכירה','יעילות %'];
   const r13=departments.map(d=>{
@@ -9776,14 +10014,25 @@ function App(){
     workLogs.forEach(w=>{if(w.orderId&&scopeIdSet.has(w.userId))s.add(w.orderId)});
     return s;
   },[workLogs,scopeIdSet]);
+  // Which business divisions this person may see at all — their department's
+  // branch numbers, plus whatever their own record adds. null when nothing is
+  // configured, which is every install until a department is given a number.
+  const branchScope=useMemo(()=>userBranchScope(currentUser,departments),[currentUser,departments]);
   // An order is visible if: the user is an admin, it is defined work for someone the
   // user oversees (or themselves), or anyone in their scope has logged work on it.
+  //
+  // The branch scope is checked first and it is a veto, not another way in: a פק"ע
+  // of a division that is not this person's stays out of every list even when the
+  // stage on it is theirs and even when they have already reported work on it —
+  // otherwise the one thing that would carry work across the divisions is the very
+  // thing the restriction exists to stop.
   const orderVisible=useCallback((o)=>{
     if(currentUser?.role==="admin")return true;
+    if(!branchScopeAllows(branchScope,o))return false;
     if(relevanceIdx.some(({u,stageSet})=>userHasProjectAccess(u,o.projectId)&&(o.stageIds||[]).some(sid=>stageSet.has(sid))))return true;
     if(scopeLoggedOrderIds&&scopeLoggedOrderIds.has(o.id))return true;
     return false;
-  },[currentUser,relevanceIdx,scopeLoggedOrderIds]);
+  },[currentUser,relevanceIdx,scopeLoggedOrderIds,branchScope]);
 
   const filteredOrders=useMemo(()=>orders.filter(orderVisible),[orders,orderVisible]);
   // The project ids that survived the order filter, collected in one pass — the

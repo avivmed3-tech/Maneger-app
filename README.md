@@ -14,7 +14,7 @@
 | `app-icon.svg` | הלוגו על אריח ריבועי; ממנו נוצרים קובצי ה-PNG |
 | `build.js` | הידור מוקדם של ה-JSX ל-`app.js` |
 | `vercel-build.js` | שלב ה-build של Vercel — מריץ את `build.js` ומכין את `dist/` |
-| `SETUP.md` | הנחיות הגדרת Google Sheet |
+| `SETUP.md` | הקמת Supabase, עדכוני סכימה ותיעוד הגרסאות |
 
 ## לוגו
 
