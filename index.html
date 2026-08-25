@@ -1003,6 +1003,45 @@ const qtySigned=(qtyIdx,workLogs,orderId,stageId)=>{
   if(qtyIdx){const st=qtyIdx.get(orderId);return st?(st.get(stageId)||0):0}
   return(workLogs||[]).reduce((n,w)=>(isQtyLog(w)&&w.orderId===orderId&&w.stageId===stageId)?n+Number(w.bulkCount||0):n,0);
 };
+// ── A quantity *run* — the same report, with a timer on it ────────────────
+// The signature above answers "how many passed" after the fact and carries no
+// duration, so a פק"ע without serial numbers could never say how long a stage
+// actually took — every זמן תקן comparison in the app simply had nothing to
+// compare for it. A run is the same record taken from the other end: the worker
+// says how many units they are about to do, presses התחל, and from there gets
+// the very timer a serial unit gets — start, הפסקה, סיימתי.
+//
+// While it runs it is an open log with a count and no serial. Closing it writes
+// the measured minutes and flips `completed`, which is exactly what turns it into
+// the quantity signature above — so progress counts it once, at the end, and the
+// minutes land in זמן בפועל beside every serial record.
+const isQtyRun=w=>!!w&&!w.completed&&!w.serialId&&!!w.orderId&&!!w.stageId&&Number(w.bulkCount)>0;
+// orderId → stageId → units with a timer on them right now. Built in one pass for
+// the same reason the signature index is: the worker's list asks this per stage
+// per פק"ע, and a scan of the whole log table each time is what makes it crawl.
+function buildQtyRunIndex(workLogs){
+  const m=new Map();
+  (workLogs||[]).forEach(w=>{
+    if(!isQtyRun(w))return;
+    let st=m.get(w.orderId);if(!st){st=new Map();m.set(w.orderId,st)}
+    st.set(w.stageId,(st.get(w.stageId)||0)+Number(w.bulkCount||0));
+  });
+  return m;
+}
+const useQtyRunIndex=workLogs=>useMemo(()=>buildQtyRunIndex(workLogs),[workLogs]);
+// Units already on someone's bench for a stage, so the screen never offers the
+// same units to be started twice. Callers without an index pay for a scan.
+const qtyRunning=(runIdx,workLogs,orderId,stageId)=>{
+  if(runIdx){const st=runIdx.get(orderId);return st?(st.get(stageId)||0):0}
+  return(workLogs||[]).reduce((n,w)=>(isQtyRun(w)&&w.orderId===orderId&&w.stageId===stageId)?n+Number(w.bulkCount||0):n,0);
+};
+// How a quantity report names its units in the history and the audit trail. The
+// tag is a constant because the audit screen reads it back: work-log entries there
+// are matched to their record by S/N, which a quantity report has not got.
+const QTY_UNIT_TAG="(לפי כמות)";
+// What a log calls the units it covers. A serial log has its S/N; a quantity log
+// has a count instead — and every list that used to print the one prints the other.
+const logUnitLabel=w=>(w&&w.serialSn)||((w&&!w.serialId&&Number(w.bulkCount)>0)?`${w.bulkCount} יח' ${QTY_UNIT_TAG}`:"—");
 // A פק"ע tracked by quantity: no serial numbers, but a quantity to work through.
 const isQtyOrder=order=>!((order&&order.serials||[]).length)&&Number(order&&order.qty)>0;
 // The units an order's progress is measured against — its serials, or its quantity
@@ -2485,7 +2524,12 @@ function OrderForm({initial,projects,stages,stageBlocks,branchOpts=[],department
 //
 // A signature is capped at what is left, so a stage can never show more units than
 // the פק"ע has, and each one can be taken back on its own from the list below it.
-function QtySignOff({order,stages,workLogs,onSignOff,onDeleteLog,compact}){
+//
+// `onStartRun` — given only on the worker's own screen — adds the other way to
+// report the same thing: instead of signing after the fact, start a timer on a
+// batch and let it be measured (see isQtyRun). Both write the identical record;
+// the timed one just knows how long it took.
+function QtySignOff({order,stages,workLogs,onSignOff,onDeleteLog,compact,onStartRun,runBlocked}){
   const {canEdit,currentUser}=useAuth();
   // Who signs what. Managers and editors sign anywhere. A worker signs the stages
   // they are allowed to work on — the very same permission that decides which
@@ -2504,6 +2548,11 @@ function QtySignOff({order,stages,workLogs,onSignOff,onDeleteLog,compact}){
   const [minutes,setMinutes]=useState({});        // stageId → optional measured time
   const [openHist,setOpenHist]=useState("");
   const signedOf=sid=>Math.min(qty,qtySigned(qtyIdx,workLogs,order.id,sid));
+  // Units of this stage a timer is running on right now — not signed yet, but
+  // spoken for, so they are not offered to be started a second time.
+  const qtyRunIdx=useQtyRunIndex(workLogs);
+  const runningOf=sid=>qtyRunning(qtyRunIdx,workLogs,order.id,sid);
+  const runsOf=sid=>(workLogs||[]).filter(w=>isQtyRun(w)&&w.orderId===order.id&&w.stageId===sid);
   const histOf=sid=>(workLogs||[]).filter(w=>isQtyLog(w)&&w.orderId===order.id&&w.stageId===sid)
     .sort((a,b)=>String(b.endTime||b.startTime||"").localeCompare(String(a.endTime||a.startTime||"")));
   const totalSigned=oStages.reduce((n,st)=>n+signedOf(st.id),0);
@@ -2523,6 +2572,17 @@ function QtySignOff({order,stages,workLogs,onSignOff,onDeleteLog,compact}){
       // land in זמן בפועל and poison every standard-time comparison in the app.
       durationMin:min,paused:false,pauseStart:null,totalPauseMin:0,pauseLog:[],
       bulk:true,bulkGroupId:null,bulkCount:count});
+    setAmount(p=>({...p,[st.id]:""}));
+    setMinutes(p=>({...p,[st.id]:""}));
+  };
+  // Open a timed run instead of signing: the count is capped at what is neither
+  // signed nor already running, so two workers cannot start the same units.
+  const startRun=(st,n)=>{
+    if(!onStartRun)return;
+    const free=Math.max(0,qty-signedOf(st.id)-runningOf(st.id));
+    const count=Math.min(Math.floor(Number(n)||0),free);
+    if(!(count>0))return;
+    onStartRun(st,count);
     setAmount(p=>({...p,[st.id]:""}));
     setMinutes(p=>({...p,[st.id]:""}));
   };
@@ -2549,8 +2609,9 @@ function QtySignOff({order,stages,workLogs,onSignOff,onDeleteLog,compact}){
           </div>
         </div>
         <div style={{fontSize:12,color:"var(--c-dim)",lineHeight:1.7,marginBottom:12}}>
-          לפק"ע הזו אין מספרים סידוריים, ולכן העבודה מדווחת בכמויות: לכל שלב חותמים כמה יחידות עברו אותו.
-          החתימות נספרות בדיוק כמו דיווח סיריאלי — סרגלי ההתקדמות, יחידות שהושלמו והצפי לסיום מתעדכנים מהן, וכל חתימה נשמרת עם השם והשעה וניתנת לביטול.
+          לפק"ע הזו אין מספרים סידוריים, ולכן העבודה מדווחת בכמויות: לכל שלב מדווחים כמה יחידות עברו אותו.
+          יש שתי דרכים, ושתיהן נספרות אותו הדבר: <b style={{color:"#f59e0b"}}>▶️ התחל עבודה</b> על כמות — נפתח טיימר עם הפסקה וסיום בדיוק כמו ביחידה סיריאלית, והזמן שנמדד נכנס לחישובי זמן תקן;
+          או <b style={{color:"#10b981"}}>✍️ חתום</b> — חתימה מיידית על עבודה שכבר בוצעה. סרגלי ההתקדמות, יחידות שהושלמו והצפי לסיום מתעדכנים משתיהן, וכל דיווח נשמר עם השם והשעה וניתן לביטול.
         </div>
       </>)}
       {compact&&(
@@ -2573,10 +2634,16 @@ function QtySignOff({order,stages,workLogs,onSignOff,onDeleteLog,compact}){
                 const done=signedOf(st.id),left=Math.max(0,qty-done);
                 const pct=qty?Math.round(done/qty*100):0;
                 const hist=histOf(st.id);
+                const running=runningOf(st.id);          // units with a timer on them now
+                const free=Math.max(0,left-running);     // what is still free to start
                 return(
                   <React.Fragment key={st.id}>
                     <tr>
-                      <td style={{fontWeight:700,color:st.color}}>{st.name}</td>
+                      <td style={{fontWeight:700,color:st.color}}>
+                        {st.name}
+                        {running>0&&<div style={{fontSize:10.5,fontWeight:600,color:"#f59e0b",marginTop:2}}
+                          title={runsOf(st.id).map(w=>`${w.userName||"—"} · ${w.bulkCount} יח'`).join(" · ")}>⏱️ {running} יח' בעבודה כרגע</div>}
+                      </td>
                       <td style={{fontWeight:700,color:done?"#10b981":"var(--c-dim)"}}>{done}</td>
                       <td style={{color:left?"#f59e0b":"var(--c-dim)"}}>{left}</td>
                       <td><div style={{minWidth:100}}><PBar pct={pct} h={7}/></div></td>
@@ -2586,13 +2653,20 @@ function QtySignOff({order,stages,workLogs,onSignOff,onDeleteLog,compact}){
                             <span title="השלב הזה אינו בהרשאות שלך — הדיווח עליו נעשה ע״י מי שמורשה לו" style={{fontSize:12,color:"var(--c-dim)"}}>🔒 לא בהרשאות שלך</span>
                           ):left>0?(
                             <div style={{display:"flex",gap:5,alignItems:"center",flexWrap:"wrap"}}>
-                              <input type="number" min="1" max={left} value={amount[st.id]??""} placeholder={String(left)}
+                              <input type="number" min="1" max={left} value={amount[st.id]??""} placeholder={String(onStartRun?(free||left):left)}
                                 onChange={e=>setAmount(p=>({...p,[st.id]:e.target.value}))}
                                 style={{width:70,padding:"5px 7px",fontSize:12}} title={`עד ${left} יחידות`}/>
+                              {/* Start the timer on that many units — the same עבודה a serial unit
+                                  gets. Offered before the signature, because a measured report is
+                                  worth more than one typed in afterwards. */}
+                              {onStartRun&&(free>0
+                                ?<Btn small color="#f59e0b" disabled={!!runBlocked} onClick={()=>startRun(st,amount[st.id]||free)}
+                                   title={runBlocked||`התחלת עבודה על ${amount[st.id]||free} יחידות — ייפתח טיימר עם הפסקה וסיום, בדיוק כמו ביחידה סיריאלית`}>▶️ התחל עבודה</Btn>
+                                :<span style={{fontSize:11,color:"#f59e0b"}} title="כל היחידות שנותרו בשלב הזה כבר בעבודה">⏱️ הכל בעבודה</span>)}
                               <input type="number" min="0" value={minutes[st.id]??""} placeholder="דק' (רשות)"
                                 onChange={e=>setMinutes(p=>({...p,[st.id]:e.target.value}))}
                                 style={{width:96,padding:"5px 7px",fontSize:12}} title="זמן העבודה בפועל על האצווה — לא חובה. אם יוזן, ייכנס לחישובי זמן בפועל מול התקן"/>
-                              <Btn small color="#10b981" onClick={()=>sign(st,amount[st.id]||left)}>✍️ חתום</Btn>
+                              <Btn small color="#10b981" onClick={()=>sign(st,amount[st.id]||left)} title="חתימה מיידית, בלי טיימר — לעבודה שכבר בוצעה">✍️ חתום</Btn>
                               {(!amount[st.id]||Number(amount[st.id])>=left)&&left>1&&<span style={{fontSize:11,color:"var(--c-dim)"}}>הכל ({left})</span>}
                             </div>
                           ):<span style={{fontSize:12,color:"#10b981",fontWeight:700}}>✅ הושלם</span>}
@@ -3539,9 +3613,15 @@ function MyWork({orders,stages,workLogs,onStartWork,onEndWork,onPauseWork,onResu
   // whole screen.
   const myAccessSet=useMemo(()=>new Set(myAccess),[myAccess]);
   const myActiveLogs=useMemo(()=>workLogs.filter(w=>w.userId===currentUser.id&&!w.completed),[workLogs,currentUser]);
-  const myActiveLog=myActiveLogs[0];
+  // The card below shows one open log, and it has to be the one actually ticking:
+  // a paused unit is allowed to sit while something else is started (that is what
+  // ⏸️ is for), and picking the oldest would leave the running work off screen with
+  // no way to reach its ⏸️ / ✅.
+  const myActiveLog=useMemo(()=>myActiveLogs.find(w=>!w.paused)||myActiveLogs[0],[myActiveLogs]);
   const [bulkMode,setBulkMode]=useState(false);
   const [bulkSelected,setBulkSelected]=useState([]);
+  // Units actually finished on an open quantity run — blank means "all of them".
+  const [runDone,setRunDone]=useState("");
   const [onlyPlan,setOnlyPlan]=useState(false); // show only the units assigned in my daily plan
   // ── Queue filters — פק"ע · מק"ט · שלב · סניף ──────────────────────────
   // A worker whose access covers several stages gets every פק"ע in the plant that
@@ -3590,6 +3670,25 @@ function MyWork({orders,stages,workLogs,onStartWork,onEndWork,onPauseWork,onResu
     onStartWork({id:uid(),userId:currentUser.id,userName:currentUser.name,serialId,stageId,orderId,serialSn:serial?.sn||"",startTime:nowISO(),endTime:null,completed:false,durationMin:0,paused:false,pauseStart:null,totalPauseMin:0,pauseLog:[]});
   };
 
+  // ── התחלת עבודה על פק"ע ללא סידוריים ───────────────────────────────────
+  // Same act as pressing ▶️ on a unit, one level up: pick how many units of the
+  // stage you are about to do and the timer starts on them. From here the screen
+  // treats it exactly like a unit — the same active card, the same הפסקה, the same
+  // סיימתי — and what it books at the end is a quantity report that carries the
+  // minutes it actually took, so a פק"ע without serial numbers finally produces
+  // זמן בפועל to set against זמן תקן.
+  const startQtyRun=(order,stage,count)=>{
+    if(myActiveLog&&!myActiveLog.paused){toast("יש לך עבודה פעילה. סיים או עצור לפני שמתחיל חדשה.","warning");return}
+    const n=Math.max(1,Math.floor(Number(count)||0));
+    onStartWork({id:uid(),userId:currentUser.id,userName:currentUser.name,
+      // No serial — the count is the unit. That, plus an open log, is a run.
+      serialId:null,serialSn:null,stageId:stage.id,orderId:order.id,
+      startTime:nowISO(),endTime:null,completed:false,durationMin:0,
+      paused:false,pauseStart:null,totalPauseMin:0,pauseLog:[],
+      bulk:true,bulkGroupId:null,bulkCount:n});
+    toast(`התחלת עבודה על ${n} יחידות · ${stage.name}`,"success");
+  };
+
   const startBulk=(oId)=>{
     if(myActiveLog&&!myActiveLog.paused){toast("יש עבודה פעילה","warning");return}
     const order=orders.find(o=>o.id===oId);
@@ -3611,12 +3710,31 @@ function MyWork({orders,stages,workLogs,onStartWork,onEndWork,onPauseWork,onResu
     let dur=Math.round((Date.now()-start.getTime())/60000);
     dur-=(myActiveLog.totalPauseMin||0);
     if(myActiveLog.paused&&myActiveLog.pauseStart)dur-=Math.round((Date.now()-new Date(myActiveLog.pauseStart).getTime())/60000);
-    onEndWork(myActiveLog.id,Math.max(0,dur));
-    // If bulk, end all
-    myActiveLogs.filter(w=>w.bulk&&w.id!==myActiveLog.id).forEach(w=>{
+    // A quantity run books whatever was actually finished — the count it was opened
+    // for unless the worker corrected it down, never more than that.
+    let patch=null;
+    if(isQtyRun(myActiveLog)){
+      const started=Number(myActiveLog.bulkCount)||0;
+      const n=runDone===""?started:Math.max(0,Math.min(started,Math.floor(Number(runDone)||0)));
+      if(!(n>0)){toast("כמה יחידות סיימת? אם לא סיימת אף אחת — בטל את הרישום במקום לסיים אותו.","warning");return}
+      if(n!==started)patch={bulkCount:n};
+      setRunDone("");
+    }
+    onEndWork(myActiveLog.id,Math.max(0,dur),patch);
+    // A group that was started together ends together — that group only, so an
+    // unrelated batch left open on the side is not closed with it.
+    if(myActiveLog.bulkGroupId)myActiveLogs.filter(w=>w.id!==myActiveLog.id&&w.bulkGroupId===myActiveLog.bulkGroupId).forEach(w=>{
       let d2=Math.round((Date.now()-new Date(w.startTime).getTime())/60000)-(w.totalPauseMin||0);
       onEndWork(w.id,Math.max(0,d2));
     });
+  };
+  // Started by mistake: a run that reported nothing can be dropped outright, the
+  // way an unwanted unit timer is undone from the journal.
+  const cancelRun=()=>{
+    if(!myActiveLog||!isQtyRun(myActiveLog)||!onDeleteLog)return;
+    if(!confirm(`לבטל את ההתחלה על ${myActiveLog.bulkCount} יחידות? לא יירשם דיווח ולא ייספר זמן.`))return;
+    setRunDone("");
+    onDeleteLog([myActiveLog.id]);
   };
 
   const togglePause=()=>{
@@ -3662,6 +3780,7 @@ function MyWork({orders,stages,workLogs,onStartWork,onEndWork,onPauseWork,onResu
   // same rule the unit queue follows.
   const [openQty,setOpenQty]=useState("");
   const myQtyIdx=useQtyIndex(workLogs);
+  const myQtyRunIdx=useQtyRunIndex(workLogs);
   const qtyOrders=useMemo(()=>accessible.filter(o=>{
     if(!isQtyOrder(o))return false;
     const cap=Number(o.qty)||0;
@@ -3763,7 +3882,7 @@ function MyWork({orders,stages,workLogs,onStartWork,onEndWork,onPauseWork,onResu
               wk.logs.forEach(w=>{
                 const key=w.bulkGroupId||w.id;if(seen2.has(key))return;seen2.add(key);
                 if(w.bulkGroupId){const group=wk.logs.filter(g=>g.bulkGroupId===w.bulkGroupId);items.push({...w,_sns:group.map(g=>g.serialSn),_count:group.length})}
-                else{items.push({...w,_sns:[w.serialSn],_count:1})}
+                else{items.push({...w,_sns:[logUnitLabel(w)],_count:1})}
               });
               if(anyActive){workerWork[uid2]={name:wk.name,items}}else{workerBreak[uid2]={name:wk.name,items}}
             });
@@ -3776,8 +3895,8 @@ function MyWork({orders,stages,workLogs,onStartWork,onEndWork,onPauseWork,onResu
                 <KpiBox i="📋" v={totalPending} label="יחידות ממתינות" c="#3b82f6"/>
                 <KpiBox i="📦" v={orders.filter(o=>(o.serials||[]).length>0&&(o.serials||[]).some(sr=>!(o.stageIds||[]).every(sid=>doneIdx.has(logKey(sr.id,sid))))).length} label={'פק"ע בתהליך'} c="#06b6d4"/>
               </div>
-              {ww>0&&(<Card style={{marginBottom:12,border:"2px solid #f59e0b33"}}><div style={{fontWeight:700,fontSize:15,color:"#f59e0b",marginBottom:10}}>🔄 עובדים בעבודה ({ww})</div><div style={{display:"flex",flexDirection:"column",gap:8}}>{Object.values(workerWork).flatMap(wk=>wk.items.map(w=>{const stage=stages.find(s2=>s2.id===w.stageId);const order=orders.find(o=>o.id===w.orderId);return(<div key={w.id} style={{background:"var(--c-deep)",borderRadius:10,padding:"10px 14px",border:"1px solid #f59e0b22",display:"flex",justifyContent:"space-between",alignItems:"center",flexWrap:"wrap",gap:8}}><div><span style={{fontWeight:700,fontSize:14}}>{w.userName}</span><span style={{fontSize:12,color:"#60a5fa",marginRight:8}}>← {order?.woNumber||""}</span>{w._count>1?<span style={{fontSize:11,background:"#3b82f622",color:"#60a5fa",padding:"2px 8px",borderRadius:10}}>{w._count} יחידות</span>:<span style={{fontSize:12,color:"#7eb8ff"}}>{w.serialSn}</span>}<span style={{fontSize:11,color:stage?.color||"var(--c-muted)",marginRight:6}}>/ {stage?.name||""}</span>{isStaleWork(w.startTime,w.totalPauseMin)&&<span title="העבודה פתוחה מעל 12 שעות — כנראה לא נלחץ 'סיימתי'" style={{fontSize:11,background:"#ef444422",color:"#ef4444",padding:"2px 8px",borderRadius:10,marginRight:6,fontWeight:700}}>⚠️ לא נסגר</span>}</div><ActiveTimer startTime={w.startTime} pauseMin={w.totalPauseMin||0}/></div>)}))}</div></Card>)}
-              {bw>0&&(<Card style={{marginBottom:12,border:"1px solid #8b95a833"}}><div style={{fontWeight:700,fontSize:15,color:"#8b95a8",marginBottom:10}}>⏸️ בהפסקה ({bw})</div><div style={{display:"flex",flexDirection:"column",gap:6}}>{Object.values(workerBreak).flatMap(wk=>wk.items.map(w=>{const stage=stages.find(s2=>s2.id===w.stageId);return(<div key={w.id} style={{background:"var(--c-deep)",borderRadius:8,padding:"8px 12px",display:"flex",justifyContent:"space-between",alignItems:"center",opacity:.7}}><div><span style={{fontWeight:600}}>{w.userName}</span>{w._count>1?<span style={{fontSize:11,color:"var(--c-dim)",marginRight:8}}>{w._count} יחידות / {stage?.name||""}</span>:<span style={{fontSize:12,color:"var(--c-dim)",marginRight:8}}>{w.serialSn} / {stage?.name||""}</span>}</div><span style={{fontSize:12,color:"#8b95a8"}}>⏸️</span></div>)}))}</div></Card>)}
+              {ww>0&&(<Card style={{marginBottom:12,border:"2px solid #f59e0b33"}}><div style={{fontWeight:700,fontSize:15,color:"#f59e0b",marginBottom:10}}>🔄 עובדים בעבודה ({ww})</div><div style={{display:"flex",flexDirection:"column",gap:8}}>{Object.values(workerWork).flatMap(wk=>wk.items.map(w=>{const stage=stages.find(s2=>s2.id===w.stageId);const order=orders.find(o=>o.id===w.orderId);return(<div key={w.id} style={{background:"var(--c-deep)",borderRadius:10,padding:"10px 14px",border:"1px solid #f59e0b22",display:"flex",justifyContent:"space-between",alignItems:"center",flexWrap:"wrap",gap:8}}><div><span style={{fontWeight:700,fontSize:14}}>{w.userName}</span><span style={{fontSize:12,color:"#60a5fa",marginRight:8}}>← {order?.woNumber||""}</span>{w._count>1?<span style={{fontSize:11,background:"#3b82f622",color:"#60a5fa",padding:"2px 8px",borderRadius:10}}>{w._count} יחידות</span>:<span style={{fontSize:12,color:"#7eb8ff"}}>{logUnitLabel(w)}</span>}<span style={{fontSize:11,color:stage?.color||"var(--c-muted)",marginRight:6}}>/ {stage?.name||""}</span>{isStaleWork(w.startTime,w.totalPauseMin)&&<span title="העבודה פתוחה מעל 12 שעות — כנראה לא נלחץ 'סיימתי'" style={{fontSize:11,background:"#ef444422",color:"#ef4444",padding:"2px 8px",borderRadius:10,marginRight:6,fontWeight:700}}>⚠️ לא נסגר</span>}</div><ActiveTimer startTime={w.startTime} pauseMin={w.totalPauseMin||0}/></div>)}))}</div></Card>)}
+              {bw>0&&(<Card style={{marginBottom:12,border:"1px solid #8b95a833"}}><div style={{fontWeight:700,fontSize:15,color:"#8b95a8",marginBottom:10}}>⏸️ בהפסקה ({bw})</div><div style={{display:"flex",flexDirection:"column",gap:6}}>{Object.values(workerBreak).flatMap(wk=>wk.items.map(w=>{const stage=stages.find(s2=>s2.id===w.stageId);return(<div key={w.id} style={{background:"var(--c-deep)",borderRadius:8,padding:"8px 12px",display:"flex",justifyContent:"space-between",alignItems:"center",opacity:.7}}><div><span style={{fontWeight:600}}>{w.userName}</span>{w._count>1?<span style={{fontSize:11,color:"var(--c-dim)",marginRight:8}}>{w._count} יחידות / {stage?.name||""}</span>:<span style={{fontSize:12,color:"var(--c-dim)",marginRight:8}}>{logUnitLabel(w)} / {stage?.name||""}</span>}</div><span style={{fontSize:12,color:"#8b95a8"}}>⏸️</span></div>)}))}</div></Card>)}
               {activeTasks2.length>0&&(<Card style={{marginBottom:12,border:"1px solid #a78bfa33"}}><div style={{fontWeight:700,fontSize:15,color:"#a78bfa",marginBottom:10}}>📌 עובדים על משימות</div><div style={{display:"flex",flexDirection:"column",gap:6}}>{activeTasks2.map(t=>(<div key={t.id} style={{background:"var(--c-deep)",borderRadius:10,padding:"10px 14px",border:t.paused?"1px solid #8b95a833":"1px solid #a78bfa22",display:"flex",justifyContent:"space-between",alignItems:"center",flexWrap:"wrap",gap:6}}><div><span style={{fontWeight:700}}>{t.userName}</span><span style={{fontSize:12,color:"#a78bfa",marginRight:8}}>← {t.name}</span>{t.paused&&<span style={{fontSize:11,color:"#8b95a8"}}>⏸️</span>}</div>{!t.paused?<ActiveTimer startTime={t.startTime} pauseMin={t.totalPauseMin||0}/>:<span style={{fontSize:14,color:"#8b95a8"}}>⏸️</span>}</div>))}</div></Card>)}
               {ww===0&&bw===0&&activeTasks2.length===0&&(<Card style={{marginBottom:12}}><EmptyState icon="😴" title="אין עבודה פעילה כרגע" subtitle="בחר יחידה מהרשימה למטה כדי להתחיל עבודה"/></Card>)}
 
@@ -3853,17 +3972,36 @@ function MyWork({orders,stages,workLogs,onStartWork,onEndWork,onPauseWork,onResu
           <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",flexWrap:"wrap",gap:10}}>
             <div>
               <div style={{fontSize:12,color:myActiveLog.paused?"#8b95a8":"#f59e0b",fontWeight:700,marginBottom:4}}>{myActiveLog.paused?"⏸️ בהפסקה":"⏱️ עובד כרגע:"}{myActiveLogs.length>1&&<span style={{marginRight:6,fontSize:11,background:"#3b82f622",color:"#60a5fa",padding:"2px 8px",borderRadius:12}}>×{myActiveLogs.length} יחידות</span>}</div>
-              <div style={{fontWeight:700,fontSize:16}}>{myActiveLog.serialSn}{myActiveLogs.length>1&&` + ${myActiveLogs.length-1}`}</div>
-              <div style={{fontSize:13,color:"var(--c-muted)"}}>{stages.find(s=>s.id===myActiveLog.stageId)?.name}</div>
+              <div style={{fontWeight:700,fontSize:16}}>
+                {isQtyRun(myActiveLog)
+                  ?<>{myActiveLog.bulkCount} יחידות · {orders.find(o=>o.id===myActiveLog.orderId)?.woNumber||'פק"ע'}</>
+                  :<>{myActiveLog.serialSn}{myActiveLogs.length>1&&` + ${myActiveLogs.length-1}`}</>}
+              </div>
+              <div style={{fontSize:13,color:"var(--c-muted)"}}>
+                {stages.find(s=>s.id===myActiveLog.stageId)?.name}
+                {isQtyRun(myActiveLog)&&<span style={{fontSize:11,color:"#10b981",marginRight:6}}>· דיווח לפי כמות (ללא סידוריים)</span>}
+              </div>
               <div style={{fontSize:12,color:"var(--c-dim)",marginTop:4}}>התחלה: {new Date(myActiveLog.startTime).toLocaleTimeString("he-IL",{hour:"2-digit",minute:"2-digit"})}</div>
               {(myActiveLog.totalPauseMin>0||(myActiveLog.pauseLog||[]).length>0)&&<div style={{fontSize:11,color:"#8b95a8",marginTop:2}}>הפסקות: {fmtTime(myActiveLog.totalPauseMin||0)} ({(myActiveLog.pauseLog||[]).length} פעמים)</div>}
               {!myActiveLog.paused&&<ActiveTimer startTime={myActiveLog.startTime} pauseMin={myActiveLog.totalPauseMin||0}/>}
               {isStaleWork(myActiveLog.startTime,myActiveLog.totalPauseMin)&&<div style={{fontSize:12,color:"#ef4444",fontWeight:700,marginTop:4}}>⚠️ העבודה פתוחה מעל 12 שעות — אם סיימת, לחץ "סיימתי"</div>}
               {myActiveLog.paused&&<div style={{fontSize:22,fontWeight:800,color:"#8b95a8",marginTop:6}}>⏸️ מושהה</div>}
+              {/* A batch does not always come out whole. What gets signed is what was
+                  really finished — the started count unless it is corrected here. */}
+              {isQtyRun(myActiveLog)&&(
+                <div style={{display:"flex",alignItems:"center",gap:6,flexWrap:"wrap",marginTop:8}}>
+                  <span style={{fontSize:11.5,color:"var(--c-dim)"}}>יחידות שסיימתי בפועל:</span>
+                  <input type="number" min="0" max={myActiveLog.bulkCount} value={runDone} placeholder={String(myActiveLog.bulkCount)}
+                    onChange={e=>setRunDone(e.target.value)} style={{width:72,padding:"5px 7px",fontSize:12}}
+                    title="ברירת המחדל היא הכמות שהתחלת. סיימת פחות? עדכן כאן — זו הכמות שתיחתם, והשאר יישאר פתוח לדיווח נוסף"/>
+                  <span style={{fontSize:11,color:"var(--c-dim)"}}>מתוך {myActiveLog.bulkCount}</span>
+                </div>
+              )}
             </div>
             <div style={{display:"flex",flexDirection:"column",gap:8}}>
               <Btn color={myActiveLog.paused?"#3b82f6":"#f97316"} onClick={togglePause} style={{fontSize:14,padding:"10px 20px"}}>{myActiveLog.paused?"▶️ חזור לעבודה":"⏸️ הפסקה"}</Btn>
               <Btn color="#10b981" onClick={endWork} style={{fontSize:16,padding:"12px 24px"}}>✅ סיימתי</Btn>
+              {isQtyRun(myActiveLog)&&onDeleteLog&&<button onClick={cancelRun} style={{background:"none",border:"none",color:"#ef4444",fontSize:11.5,cursor:"pointer",fontFamily:"inherit"}}>🗑️ בטל התחלה</button>}
             </div>
           </div>
         </Card>
@@ -4056,14 +4194,17 @@ function MyWork({orders,stages,workLogs,onStartWork,onEndWork,onPauseWork,onResu
         <Card style={{marginBottom:12,border:"1px solid #10b98133"}}>
           <div style={{fontWeight:700,fontSize:15,color:"#10b981",marginBottom:5}}>✍️ דיווח לפי כמות ({visibleQtyOrders.length}{filterOn&&visibleQtyOrders.length!==qtyOrders.length?` מתוך ${qtyOrders.length}`:""})</div>
           <div style={{fontSize:11.5,color:"var(--c-dim)",lineHeight:1.7,marginBottom:10}}>
-            פק"ע שאינן מנוהלות סיריאלית — אין בהן יחידות להתחיל עליהן טיימר, ולכן מדווחים בהן כמה יחידות עברו כל שלב.
-            אפשר לחתום רק על השלבים שבהרשאות שלך, כל חתימה נרשמת על שמך, ואפשר לבטל חתימה שלך אם טעית.
+            פק"ע שאינן מנוהלות סיריאלית — אין בהן מספר סידורי לבחור, ולכן בוחרים כמות: לוחצים <b style={{color:"#f59e0b"}}>▶️ התחל עבודה</b> ומקבלים את אותו טיימר של יחידה סיריאלית (הפסקה, סיימתי),
+            כך שגם על העבודה הזו יוצאים נתוני זמן בפועל מול זמן תקן. לעבודה שכבר בוצעה אפשר גם לחתום מיד ב-<b style={{color:"#10b981"}}>✍️ חתום</b>, בלי טיימר.
+            אפשר לדווח רק על השלבים שבהרשאות שלך, כל דיווח נרשם על שמך, ואפשר לבטל דיווח שלך אם טעית.
           </div>
           <VirtualList items={visibleQtyOrders} estimate={64} gap={7} renderRow={o=>{
             const open=openQty===o.id;
             const cap=Number(o.qty)||0;
             const mineLeft=(o.stageIds||[]).reduce((n,sid)=>myAccessSet.has(sid)
               ?n+Math.max(0,cap-Math.min(cap,qtySigned(myQtyIdx,workLogs,o.id,sid))):n,0);
+            // Of those, the units somebody already has a timer running on.
+            const mineRunning=(o.stageIds||[]).reduce((n,sid)=>myAccessSet.has(sid)?n+qtyRunning(myQtyRunIdx,workLogs,o.id,sid):n,0);
             const br=branchCode(o.branch);
             return(
               <div key={o.id} style={{background:"var(--c-deep)",borderRadius:10,border:`1px solid ${open?"#10b98155":"var(--c-border)"}`,padding:"9px 12px"}}>
@@ -4076,11 +4217,14 @@ function MyWork({orders,stages,workLogs,onStartWork,onEndWork,onPauseWork,onResu
                     {mineLeft>0
                       ?<span style={{fontSize:11,background:"#f59e0b1a",color:"#f59e0b",border:"1px solid #f59e0b44",padding:"2px 8px",borderRadius:12}}>נותרו {mineLeft} דיווחים שלך</span>
                       :<span style={{fontSize:11,color:"#10b981"}}>✅ השלבים שלך נחתמו</span>}
+                    {mineRunning>0&&<span style={{fontSize:11,color:"#f59e0b"}} title="יחידות שיש עליהן טיימר פתוח כרגע — ייחתמו בסיום העבודה">⏱️ {mineRunning} בעבודה</span>}
                   </div>
                   <span style={{fontSize:12,color:open?"#10b981":"var(--c-dim)",fontWeight:600}}>{open?"▲ סגור":"▼ דווח כמות"}</span>
                 </div>
                 {open&&<div style={{marginTop:10}}>
-                  <QtySignOff order={o} stages={stages} workLogs={workLogs} onSignOff={onStartWork} onDeleteLog={onDeleteLog} compact/>
+                  <QtySignOff order={o} stages={stages} workLogs={workLogs} onSignOff={onStartWork} onDeleteLog={onDeleteLog} compact
+                    onStartRun={(st,n)=>startQtyRun(o,st,n)}
+                    runBlocked={myActiveLog&&!myActiveLog.paused?"יש לך עבודה פעילה — סיים או עצור אותה לפני שמתחיל חדשה":""}/>
                 </div>}
               </div>
             );
@@ -4254,7 +4398,7 @@ function WorkersDashboard({users,workLogs,orders,stages,customTasks,onAddTask,on
                 const sns=group.map(l=>l.serialSn).join(", ");
                 rows.push({...w,_sns:sns,_count:group.length,_grouped:true});
               }else{
-                rows.push({...w,_sns:w.serialSn,_count:1,_grouped:false});
+                rows.push({...w,_sns:logUnitLabel(w),_count:1,_grouped:false});
               }
             });
             return rows.slice(0,50).map(w=>{
@@ -4563,7 +4707,7 @@ function TeamDashboard({users,workLogs,orders,stages,customTasks,departments,onA
                       <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",gap:8}}>
                         <div style={{minWidth:0}}>
                           <div style={{fontSize:12,fontWeight:600,color:stage?.color||"var(--c-text)"}}>{stage?.name||"—"}</div>
-                          <div style={{fontSize:10.5,color:"var(--c-dim)",whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>{order?.woNumber||""} · {act.serialSn}{myActive.length>1?` +${myActive.length-1}`:""}</div>
+                          <div style={{fontSize:10.5,color:"var(--c-dim)",whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>{order?.woNumber||""} · {logUnitLabel(act)}{myActive.length>1?` +${myActive.length-1}`:""}</div>
                         </div>
                         {!act.paused?<ActiveTimer startTime={act.startTime} pauseMin={act.totalPauseMin||0}/>:<span style={{color:"#f59e0b",fontWeight:700}}>⏸️</span>}
                       </div>
@@ -4603,7 +4747,7 @@ function TeamDashboard({users,workLogs,orders,stages,customTasks,departments,onA
                 {recent.map(w=>{const stage=stages.find(s=>s.id===w.stageId);return(
                   <tr key={w.id}>
                     <td style={{fontWeight:600}}>{w.userName}</td>
-                    <td style={{color:"#7eb8ff",fontSize:12}}>{w.serialSn}</td>
+                    <td style={{color:"#7eb8ff",fontSize:12}}>{logUnitLabel(w)}</td>
                     <td><span style={{color:stage?.color||"var(--c-muted)"}}>{stage?.name||"—"}</span></td>
                     <td>{fmtTime(w.durationMin)}</td>
                     <td style={{fontSize:11,color:"var(--c-dim)"}}>{w.endTime?new Date(w.endTime).toLocaleString("he-IL",{day:"2-digit",month:"2-digit",hour:"2-digit",minute:"2-digit"}):""}</td>
@@ -7281,7 +7425,7 @@ function doExport(ctx){
     const std=act>0?stdStageMin(stdIdx.get(pnKey(o?.pn)),w.stageId)*n:0;
     return[day,day?HEB_DAYS[new Date(day+"T00:00:00").getDay()]:"",w.userName||"",ROLES[u?.role]?.label||"",dMap.get(u?.departmentId)||"",
       o?.woNumber||"",o?.pn||"",isQtyLog(w)?`לפי כמות ×${n}`:(w.serialSn||""),st?.name||"",pMap.get(o?.projectId)||"",
-      isQtyLog(w)?"חתימה לפי כמות":w.bulk?"קבוצתי":act>0?"עבודה":"חתימה",
+      isQtyLog(w)?(act>0?"עבודה לפי כמות":"חתימה לפי כמות"):w.bulk?"קבוצתי":act>0?"עבודה":"חתימה",
       w.startTime?w.startTime.slice(0,16).replace("T"," "):"",w.endTime?w.endTime.slice(0,16).replace("T"," "):"",
       xlRound(act),xlRound(w.totalPauseMin||0),n,xlRound(n>0?act/n:act),
       std>0?xlRound(std):"",std>0?xlRound(act-std):"",effOf(act,std),
@@ -8424,7 +8568,7 @@ function AlertsPanel({orders,stages,workLogs,users,onClose,dismissedAlerts,onDis
       a.push({id:`def_${o.id}_${d.id}`,sev:d.severity==="critical"?0:1,icon:d.severity==="critical"?"🔴":"🟠",text:`תקלה ${d.severity==="critical"?"קריטית":"גבוהה"}: ${d.title}`,sub:`פק"ע ${o.woNumber}${d.discoveredDate?` | ${fmt(d.discoveredDate)}`:""}`,color:d.severity==="critical"?"#dc2626":"#f97316"})}));
     orders.filter(o=>o.targetDate&&new Date(o.targetDate)<new Date()).forEach(o=>{const d=daysBetween(o.targetDate,todays());if(d>0)a.push({id:`late_${o.id}`,sev:1,icon:"🚨",text:`פק"ע ${o.woNumber} באיחור ${d} ימים`,sub:`יעד: ${fmt(o.targetDate)}`,color:"#ef4444"})});
     const sMap=new Map((stages||[]).map(s=>[s.id,s]));
-    workLogs.filter(w=>!w.completed).forEach(w=>{const m=Math.round((Date.now()-new Date(w.startTime).getTime())/60000);if(m>120)a.push({id:`stuck_${w.id}`,sev:2,icon:"⏳",text:`${w.userName} תקוע ${fmtTime(m)} על ${w.serialSn}`,sub:sMap.get(w.stageId)?.name||"",color:"#f59e0b"})});
+    workLogs.filter(w=>!w.completed).forEach(w=>{const m=Math.round((Date.now()-new Date(w.startTime).getTime())/60000);if(m>120)a.push({id:`stuck_${w.id}`,sev:2,icon:"⏳",text:`${w.userName} תקוע ${fmtTime(m)} על ${logUnitLabel(w)}`,sub:sMap.get(w.stageId)?.name||"",color:"#f59e0b"})});
     orders.forEach(o=>{const sn=(o.serials||[]).length,df=(o.defects||[]).filter(d=>d.status!=="closed").length;if(sn>0&&df/sn>.2)a.push({id:`yield_${o.id}`,sev:2,icon:"📉",text:`Yield נמוך ב-${o.woNumber}: ${df}/${sn} תקלות`,sub:`${Math.round(df/sn*100)}% שיעור תקלות`,color:"#f97316"})});
     // The newest completed log per פק"ע, in one pass over the logs. Asked per order
     // this was a filter of the whole log table *and a sort of the result* for every
@@ -8822,7 +8966,7 @@ function LiveFactoryBoard({orders,workLogs,stages,customTasks,users,departments,
   const liveItems=u=>{
     const lv=liveByUser[u.id];const out=[];if(!lv)return out;
     const seen=new Set();
-    lv.logs.forEach(w=>{const k=w.bulkGroupId||w.id;if(seen.has(k))return;seen.add(k);const grp=w.bulkGroupId?lv.logs.filter(g=>g.bulkGroupId===w.bulkGroupId):[w];const stage=sMapLive.get(w.stageId);const order=oMapLive.get(w.orderId);const el=now-new Date(w.startTime).getTime()-(w.totalPauseMin||0)*60000;out.push({key:"w"+k,icon:"🔧",label:stage?.name||"—",color:stage?.color||"#60a5fa",meta:(order?.woNumber||"")+(grp.length>1?` ×${grp.length}`:w.serialSn?" "+w.serialSn:""),time:w.paused?"⏸️":fmtElapsed(Math.max(0,el))})});
+    lv.logs.forEach(w=>{const k=w.bulkGroupId||w.id;if(seen.has(k))return;seen.add(k);const grp=w.bulkGroupId?lv.logs.filter(g=>g.bulkGroupId===w.bulkGroupId):[w];const stage=sMapLive.get(w.stageId);const order=oMapLive.get(w.orderId);const el=now-new Date(w.startTime).getTime()-(w.totalPauseMin||0)*60000;out.push({key:"w"+k,icon:"🔧",label:stage?.name||"—",color:stage?.color||"#60a5fa",meta:(order?.woNumber||"")+(grp.length>1?` ×${grp.length}`:(logUnitLabel(w)!=="—"?" "+logUnitLabel(w):"")),time:w.paused?"⏸️":fmtElapsed(Math.max(0,el))})});
     lv.tasks.forEach((t,j)=>{const el=t.startTime?now-new Date(t.startTime).getTime()-(t.totalPauseMin||0)*60000:0;out.push({key:"t"+j,icon:"📌",label:t.name,color:"#a78bfa",meta:"משימה",time:t.paused?"⏸️":fmtElapsed(Math.max(0,el))})});
     return out;
   };
@@ -9312,6 +9456,10 @@ function HistoryPanel({onClose,orders,updO,workLogs,onDeleteLog,onUndoWorkLog,cu
     if(entry.reverted)return false;
     const je=journalById.get(entry.id);
     if(je)return!je.reverted;
+    // Both branches below find the work log by its S/N. A quantity report has none —
+    // it is taken back from the פק"ע's own history (🕘 in דיווח לפי כמות), or, while
+    // it is still running, from "בטל התחלה" on the worker's card.
+    if(String(entry.target||"").includes(QTY_UNIT_TAG))return false;
     if(entry.action.includes("סיום עבודה")||entry.action.includes("חתימת מנהל"))return true;
     if(entry.action.includes("התחלת עבודה"))return true;
     if(entry.canUndo&&entry.action.includes("ייבוא"))return true;
@@ -10172,13 +10320,15 @@ function App(){
       if(log.completed&&log.orderId)setTimeout(()=>checkAutoDelivery(log.orderId,next),100);
       return next});
     addAuditEntry({userId:currentUser.id,username:currentUser.username,name:currentUser.name,
-      action:isQtyLog(log)?"חתימה לפי כמות":log.completed?"חתימת מנהל":"התחלת עבודה",
-      target:isQtyLog(log)?`${log.bulkCount} יחידות`:log.serialSn,
+      action:isQtyLog(log)?"חתימה לפי כמות":isQtyRun(log)?"התחלת עבודה לפי כמות":log.completed?"חתימת מנהל":"התחלת עבודה",
+      target:logUnitLabel(log),
       details:stages.find(s=>s.id===log.stageId)?.name||""});
   };
-  const handleEndWork=(logId,duration)=>{
+  // `patch` is how a quantity run closes on fewer units than it started with —
+  // the count is part of the record, so it is written with the completion.
+  const handleEndWork=(logId,duration,patch)=>{
     setWorkLogs(prev=>{
-      const next=prev.map(w=>w.id===logId?{...w,completed:true,endTime:nowISO(),durationMin:duration}:w);
+      const next=prev.map(w=>w.id===logId?{...w,...(patch||{}),completed:true,endTime:nowISO(),durationMin:duration}:w);
       persist(null,null,null,next);
       const log=next.find(w=>w.id===logId);
       if(log?.orderId)setTimeout(()=>checkAutoDelivery(log.orderId,next),100);
@@ -10187,7 +10337,7 @@ function App(){
       return next;
     });
     const log=workLogs.find(w=>w.id===logId);
-    if(log)addAuditEntry({userId:currentUser.id,username:currentUser.username,name:currentUser.name,action:"סיום עבודה",target:log.serialSn,details:`${fmtTime(duration)} — ${stages.find(s=>s.id===log.stageId)?.name||""}`});
+    if(log)addAuditEntry({userId:currentUser.id,username:currentUser.username,name:currentUser.name,action:"סיום עבודה",target:logUnitLabel({...log,...(patch||{})}),details:`${fmtTime(duration)} — ${stages.find(s=>s.id===log.stageId)?.name||""}`});
   };
   const handlePauseWork=(logId)=>{
     setWorkLogs(prev=>{const next=prev.map(w=>w.id===logId?{...w,paused:true,pauseStart:nowISO(),pauseLog:[...(w.pauseLog||[]),{start:nowISO()}]}:w);persist(null,null,null,next);return next});
