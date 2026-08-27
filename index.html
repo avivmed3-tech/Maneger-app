@@ -2388,12 +2388,33 @@ function Dashboard({orders,projects,stages,users,workLogs,departments,customTask
 
   // Helper: is serial done
   const doneIdx=useDoneIndex(workLogs);
+  const qtyIdx=useQtyIndex(workLogs);
   const isSerDone=(o,s)=>{const st=o.stageIds||[];return st.length>0&&st.every(sid=>doneIdx.has(logKey(s.id,sid)))};
 
-  // KPIs
-  const totalSerials=fOrders.reduce((s,o)=>s+(o.serials||[]).length,0);
-  const completedSerials=fOrders.reduce((s,o)=>s+(o.serials||[]).filter(sr=>isSerDone(o,sr)).length,0);
-  const actualRev=fOrders.reduce((s,o)=>{const done=(o.serials||[]).filter(sr=>isSerDone(o,sr)).length;return s+done*Number(o.unitPrice||0)},0);
+  // ── יחידות ────────────────────────────────────────────────────────────────
+  // A unit is a unit whether or not it carries a serial number. Counting only
+  // serial numbers made this row contradict the status row above it: the statuses
+  // count each פק"ע by the quantity it was opened for, so the same factory read
+  // 111,107 units there and 11,760 here. Both now come from the same pair the
+  // פק"ע list and the late list use — orderUnits for how many there are, and
+  // orderDoneCount for how many cleared the whole route: serial by serial where
+  // there are serials, from the quantity signatures where there are not.
+  //
+  // "הושלמו" is what the floor reported in this app, which is a different fact
+  // from the ERP's "הסתיימה" in the status row: an imported פק"ע can be closed in
+  // Priority with not one unit ever reported here. The note under the status row
+  // says so, rather than leaving the two numbers to look like a bug.
+  const unitStats=useMemo(()=>{
+    let total=0,done=0,rev=0,forecast=0;
+    fOrders.forEach(o=>{
+      const units=orderUnits(o);
+      const d=Math.min(units,orderDoneCount(o,orderRoute(o,stages),workLogs,doneIdx,qtyIdx));
+      const price=Number(o.unitPrice||0);
+      total+=units;done+=d;rev+=d*price;forecast+=Math.max(0,units-d)*price;
+    });
+    return{total,done,rev,forecast};
+  },[fOrders,stages,workLogs,doneIdx,qtyIdx]);
+  const totalUnits=unitStats.total,completedUnits=unitStats.done,actualRev=unitStats.rev,forecastRev=unitStats.forecast;
   const totalWorkMins=fLogs.reduce((s,w)=>s+(w.durationMin||0),0);
   const totalWorkCost=fLogs.reduce((s,w)=>{const u=users.find(u2=>u2.id===w.userId);return s+(w.durationMin||0)*(Number(u?.hourlyRate||0)/60)},0);
   const openDefects=fOrders.flatMap(o=>(o.defects||[]).filter(d=>d.status!=="closed")).length;
@@ -2416,32 +2437,63 @@ function Dashboard({orders,projects,stages,users,workLogs,departments,customTask
   // progress, so it is called out rather than folded silently into the numbers.
   const noUnitOrders=fOrders.filter(o=>!orderUnits(o)).length;
   const openShortages=fOrders.flatMap(o=>(o.shortages||[]).filter(s2=>!s2.received)).length;
-  const forecastRev=fOrders.reduce((s,o)=>{const remaining=Math.max(0,(o.serials||[]).length-(o.serials||[]).filter(sr=>isSerDone(o,sr)).length);return s+remaining*Number(o.unitPrice||0)},0);
 
-  // Revenue by period
+  // ── הכנסות ותפוקה לפי תקופה ───────────────────────────────────────────────
+  // Same two rules as the unit counters above, so the chart and the KPIs cannot
+  // tell different stories about the same factory:
+  //   · a finished unit is booked once, in the period it was *finished* in. The
+  //     old key was serialId+period, so a unit worked on across two months booked
+  //     its price in both and the chart's total ran past הכנסה ממומשת.
+  //   · a פק"ע without serial numbers produces output too. It was skipped here
+  //     entirely; its units are booked on the signatures of the last stage in its
+  //     route, which is where they cleared it.
+  // Cost is per work log and needs neither rule — every reported minute counts.
   const keyFn=d=>period==="year"?yK(d):period==="quarter"?qK(d):mkKey(d);
-  const revByPeriod={};
-  const counted=new Set();
-  fLogs.forEach(w=>{
-    const k=keyFn(w.endTime);if(!k)return;
-    if(!revByPeriod[k])revByPeriod[k]={rev:0,qty:0,cost:0};
-    // Cost: always add worker cost per log
-    const u2=users.find(u3=>u3.id===w.userId);
-    revByPeriod[k].cost+=(w.durationMin||0)*(Number(u2?.hourlyRate||0)/60);
-    // Revenue: only when serial is fully done
-    const o=fOrders.find(o2=>(o2.serials||[]).some(s=>s.id===w.serialId));if(!o)return;
-    if(!isSerDone(o,{id:w.serialId}))return;
-    const ck=w.serialId+"|"+k;if(counted.has(ck))return;counted.add(ck);
-    revByPeriod[k].rev+=Number(o.unitPrice||0);revByPeriod[k].qty+=1;
-  });
+  const revByPeriod=useMemo(()=>{
+    const acc={},bucket=k=>(acc[k]||(acc[k]={rev:0,qty:0,cost:0}));
+    // Cost, and the date each serial was last worked on — its finish date.
+    const serEnd={},qtyLogs={};
+    fLogs.forEach(w=>{
+      const k=keyFn(w.endTime);if(k)bucket(k).cost+=(w.durationMin||0)*(Number(users.find(u2=>u2.id===w.userId)?.hourlyRate||0)/60);
+      if(w.serialId){if(!serEnd[w.serialId]||String(w.endTime)>String(serEnd[w.serialId]))serEnd[w.serialId]=w.endTime}
+      else if(isQtyLog(w))(qtyLogs[w.orderId]||(qtyLogs[w.orderId]=[])).push(w);
+    });
+    fOrders.forEach(o=>{
+      const price=Number(o.unitPrice||0),sers=o.serials||[];
+      if(sers.length){
+        sers.forEach(sr=>{
+          if(!isSerDone(o,sr))return;
+          const k=keyFn(serEnd[sr.id]);if(!k)return;
+          bucket(k).rev+=price;bucket(k).qty+=1;
+        });
+        return;
+      }
+      // Quantity-managed: only as many units as cleared the *whole* route may be
+      // booked, however many the last stage was signed for on its own.
+      const route=orderRoute(o,stages),last=route[route.length-1];if(!last)return;
+      let left=Math.min(orderUnits(o),orderDoneCount(o,route,workLogs,doneIdx,qtyIdx));
+      if(left<=0)return;
+      (qtyLogs[o.id]||[]).filter(w=>w.stageId===last.id).sort((a,b)=>String(a.endTime).localeCompare(String(b.endTime))).forEach(w=>{
+        if(left<=0)return;
+        const k=keyFn(w.endTime);if(!k)return;
+        const n=Math.min(left,Number(w.bulkCount)||0);left-=n;
+        bucket(k).rev+=n*price;bucket(k).qty+=n;
+      });
+    });
+    return acc;
+  },[fLogs,fOrders,stages,workLogs,users,doneIdx,qtyIdx,period]);
   const pKeys=Object.keys(revByPeriod).sort().slice(-10);
 
   // Donut data
   let donutData=[];
   if(donutSlice==="status"){
-    donutData=[{label:"הושלמו",value:completedSerials},{label:"בתהליך",value:totalSerials-completedSerials}].filter(d=>d.value>0);
+    donutData=[{label:"הושלמו",value:completedUnits},{label:"בתהליך",value:Math.max(0,totalUnits-completedUnits)}].filter(d=>d.value>0);
   }else if(donutSlice==="project"){
-    donutData=projects.map(p=>{const po=fOrders.filter(o=>o.projectId===p.id);const done=po.reduce((s,o)=>(o.serials||[]).filter(sr=>isSerDone(o,sr)).length+s,0);return{label:p.name,value:done}}).filter(d=>d.value>0);
+    // Units finished per project, on the same basis as the counters above, so the
+    // slices add up to הושלמו instead of quietly dropping every quantity-managed פק"ע.
+    donutData=projects.map(p=>{const po=fOrders.filter(o=>o.projectId===p.id);
+      const done=po.reduce((s,o)=>s+Math.min(orderUnits(o),orderDoneCount(o,orderRoute(o,stages),workLogs,doneIdx,qtyIdx)),0);
+      return{label:p.name,value:done}}).filter(d=>d.value>0);
   }else if(donutSlice==="phase"){
     // פק"ע by where they stand in the line, not by how many units cleared it —
     // this is the "what is waiting, what is running, what is stuck" picture.
@@ -2480,7 +2532,6 @@ function Dashboard({orders,projects,stages,users,workLogs,departments,customTask
   // any *serial* was unfinished, so a פק"ע managed by quantity — which has no
   // serials at all — could never be late however far past its date it was. It
   // now asks the same question the progress bar does: are all the units through.
-  const qtyIdx=useQtyIndex(workLogs);
   const today=todays();
   const overdue=useMemo(()=>fOrders.filter(o=>{
     if(!o.targetDate||String(o.targetDate).slice(0,10)>=today)return false;
@@ -2492,12 +2543,16 @@ function Dashboard({orders,projects,stages,users,workLogs,departments,customTask
     [fOrders,stages,workLogs,doneIdx,qtyIdx,today]);
   const overdueUnits=overdue.reduce((s2,x)=>s2+orderUnits(x.o),0);
 
-  // On-time delivery rate: orders with a target that are either done or not yet late
-  const datedOrders=fOrders.filter(o=>o.targetDate&&(o.serials||[]).length>0);
-  const onTimeCount=datedOrders.filter(o=>(o.serials||[]).every(sr=>isSerDone(o,sr))?true:new Date(o.targetDate)>=new Date()).length;
+  // On-time delivery rate: late is exactly what the list above calls late, so the
+  // two KPIs cannot contradict each other. It used to count only פק"ע that carry
+  // serial numbers — which is how 468 late פק"ע ended up sitting beside a rate
+  // computed over 321 of them.
+  const overdueIds=useMemo(()=>new Set(overdue.map(x=>x.o.id)),[overdue]);
+  const datedOrders=fOrders.filter(o=>o.targetDate);
+  const onTimeCount=datedOrders.filter(o=>!overdueIds.has(o.id)).length;
   const onTimePct=datedOrders.length?Math.round(onTimeCount/datedOrders.length*100):null;
   // Average net work time per completed unit
-  const avgPerUnit=completedSerials>0?totalWorkMins/completedSerials:0;
+  const avgPerUnit=completedUnits>0?totalWorkMins/completedUnits:0;
 
   // Stage bottleneck analysis: average duration per stage
   const stagePerf=stages.map(st=>{
@@ -2585,18 +2640,28 @@ function Dashboard({orders,projects,stages,users,workLogs,departments,customTask
           ״פק"ע שטרם הסתיימו״ = <b style={{color:"var(--c-text)"}}>{ST_PHASE.pre.label} + {ST_PHASE.line.label} + {ST_PHASE.stuck.label}</b> — {openOrders.toLocaleString()} פק"ע.
           הסטטוסים <b style={{color:"var(--c-text)"}}>דווח אחרון · נסגרה · פקע COC</b> נחשבים ״{ST_PHASE.done.label}״ ואינם נספרים שם.
           {noUnitOrders>0&&<> ל-<b style={{color:"var(--c-text)"}}>{noUnitOrders.toLocaleString()}</b> פק"ע אין סידוריים ואין כמות, ולכן אי אפשר לדווח עליהן התקדמות.</>}
+          {/* The two unit numbers on this screen are two different facts, and
+              side by side they look like an error unless the screen says which
+              is which: the tiles count the quantity Priority opened the פק"ע for,
+              the KPI counts what was actually signed for on the floor. */}
+          <div style={{marginTop:5}}>
+            היחידות במשבצות הן <b style={{color:"var(--c-text)"}}>הכמות שהפק"ע נפתחה לה</b> ב-ERP — {totalUnits.toLocaleString()} יח' בסך הכל.
+            מתוכן <b style={{color:"var(--c-text)"}}>{completedUnits.toLocaleString()}</b> דווחו כגמורות באפליקציה
+            {totalUnits>0&&<> ({Math.round(completedUnits/totalUnits*100)}%)</>}.
+            {phaseCount.units.done>completedUnits&&<> הפער מול {phaseCount.units.done.toLocaleString()} היחידות שב״{ST_PHASE.done.label}״ הוא עבודה שנעשתה לפני שהמערכת נכנסה לשימוש, או שטרם דווחה בה.</>}
+          </div>
         </div>
       </Card>
 
       {/* KPIs */}
       <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(140px,1fr))",gap:9,marginBottom:14}}>
         <KpiBox i="📋" v={openOrders.toLocaleString()} label='פק"ע שטרם הסתיימו' c="#f59e0b" sub={`מתוך ${fOrders.length.toLocaleString()} · ${phaseCount.n.done.toLocaleString()} כבר הסתיימו`}/>
-        <KpiBox i="🔢" v={totalSerials.toLocaleString()} label='סה"כ יחידות' c="#60a5fa" sub={`${completedSerials.toLocaleString()} הושלמו`}/>
+        <KpiBox i="🔢" v={totalUnits.toLocaleString()} label='סה"כ יחידות' c="#60a5fa" sub={`${completedUnits.toLocaleString()} דווחו כגמורות באפליקציה`}/>
         <KpiBox i="🚨" v={overdue.length.toLocaleString()} label='פק"ע באיחור' c={overdue.length?"#ef4444":"#10b981"} sub='מול תאריך סיום ייצור מהפריוריטי'/>
         <KpiBox i="🎯" v={onTimePct!=null?onTimePct+"%":"—"} label="עמידה בלוחות זמנים" c={onTimePct==null?"#8b95a8":onTimePct>=85?"#10b981":onTimePct>=60?"#f59e0b":"#ef4444"} sub={datedOrders.length?`${onTimeCount}/${datedOrders.length} פק"ע בזמן`:null}/>
         <KpiBox i="💰" v={fmtMoney(actualRev)} label="הכנסה ממומשת" c="#a78bfa"/>
         <KpiBox i="🔮" v={fmtMoney(forecastRev)} label="צפי הכנסות" c="#06b6d4"/>
-        <KpiBox i="⏱️" v={fmtTime(totalWorkMins)} label="שעות עבודה" c="#3b82f6" sub={completedSerials>0?`${fmtTime(Math.round(avgPerUnit))} ליחידה`:null}/>
+        <KpiBox i="⏱️" v={fmtTime(totalWorkMins)} label="שעות עבודה" c="#3b82f6" sub={completedUnits>0?`${fmtTime(Math.round(avgPerUnit))} ליחידה`:null}/>
         <KpiBox i="💵" v={fmtMoney(totalWorkCost)} label="עלות עבודה" c="#f97316"/>
         <KpiBox i="🔧" v={openDefects} label="תקלות פתוחות" c="#ef4444"/>
         <KpiBox i="⚠️" v={openShortages} label="חוסרים פתוחים" c="#dc2626"/>
@@ -2671,7 +2736,7 @@ function Dashboard({orders,projects,stages,users,workLogs,departments,customTask
               <ChartInfo title="הכנסות / תפוקה לפי תקופה"
                 shows="עמודות שמציגות כמה הכנסות (₪) או כמה יחידות הופקו בכל תקופה — חודש, רבעון או שנה. אפשר להחליף בין 'הכנסות' ל'תפוקה' בכפתורים שלמעלה, ובין סוגי התקופות בראש המסך."
                 data={["הכנסות — סכום מחיר היחידה (unitPrice) של כל יחידה שהושלמה במלואה באותה תקופה.","תפוקה — מספר היחידות שהושלמו במלואן באותה תקופה."]}
-                how={["המערכת עוברת על כל רישומי העבודה ומשייכת כל יחידה לתקופה לפי תאריך סיום העבודה עליה.","הכנסה ויחידה נספרות פעם אחת בלבד — ברגע שכל השלבים של אותה יחידה הושלמו.","מוצגות עד 10 התקופות האחרונות, מסודרות כרונולוגית."]}
+                how={["המערכת עוברת על כל רישומי העבודה ומשייכת כל יחידה לתקופה לפי תאריך סיום העבודה עליה.","הכנסה ויחידה נספרות פעם אחת בלבד — ברגע שכל השלבים של אותה יחידה הושלמו.",'פק"ע שאינה מנוהלת סיריאלית נספרת לפי חתימות הכמות בשלב האחרון במסלול שלה, עד למספר היחידות שעברו את כל המסלול.',"מוצגות עד 10 התקופות האחרונות, מסודרות כרונולוגית."]}
                 tip="עמודה גבוהה = תקופה חזקה. השוו בין עמודות סמוכות כדי לזהות מגמת צמיחה או ירידה."/>
             </div>
             <SegBtn options={[["rev","הכנסות"],["qty","תפוקה"]]} value={barMetric} onChange={setBarMetric}/>
