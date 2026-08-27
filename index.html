@@ -2397,11 +2397,24 @@ function Dashboard({orders,projects,stages,users,workLogs,departments,customTask
   const totalWorkMins=fLogs.reduce((s,w)=>s+(w.durationMin||0),0);
   const totalWorkCost=fLogs.reduce((s,w)=>{const u=users.find(u2=>u2.id===w.userId);return s+(w.durationMin||0)*(Number(u?.hourlyRate||0)/60)},0);
   const openDefects=fOrders.flatMap(o=>(o.defects||[]).filter(d=>d.status!=="closed")).length;
-  const openOrders=fOrders.filter(o=>{const sers=o.serials||[];return sers.length===0||sers.some(s=>!isSerDone(o,s))}).length;
-  // A פק"ע with no serial numbers counts as "not finished" above because none of
-  // its units cleared the route — it has none. That is a data gap, not work in
-  // progress, so it is called out rather than folded silently into the number.
-  const noUnitOrders=fOrders.filter(o=>!(o.serials||[]).length).length;
+  // ── מצב הפק"ע לפי הסטטוס מה-ERP ───────────────────────────
+  // "שטרם הסתיימו" used to be answered from the floor's reports: a פק"ע counted
+  // as unfinished unless every one of its serial numbers had cleared the route.
+  // Most imported פק"ע carry no serial numbers at all, so the test was true for
+  // nearly every one of them and the KPI showed the whole file under an "open"
+  // label. The ERP status is the answer to that question, and it is already kept
+  // on every order: דווח אחרון / נסגרה / COC are finished, everything else is
+  // still out there. מבוטלת never reaches fOrders unless asked for by name.
+  const phaseCount=useMemo(()=>{
+    const n={pre:0,line:0,stuck:0,done:0,cancelled:0},units={pre:0,line:0,stuck:0,done:0,cancelled:0};
+    fOrders.forEach(o=>{const p=orderPhase(o);if(n[p]===undefined)return;n[p]++;units[p]+=orderUnits(o)});
+    return{n,units};
+  },[fOrders]);
+  const openOrders=phaseCount.n.pre+phaseCount.n.line+phaseCount.n.stuck;
+  // A פק"ע with neither serial numbers nor a quantity has nothing to sign for, so
+  // no progress can ever be reported against it. That is a data gap, not work in
+  // progress, so it is called out rather than folded silently into the numbers.
+  const noUnitOrders=fOrders.filter(o=>!orderUnits(o)).length;
   const openShortages=fOrders.flatMap(o=>(o.shortages||[]).filter(s2=>!s2.received)).length;
   const forecastRev=fOrders.reduce((s,o)=>{const remaining=Math.max(0,(o.serials||[]).length-(o.serials||[]).filter(sr=>isSerDone(o,sr)).length);return s+remaining*Number(o.unitPrice||0)},0);
 
@@ -2478,9 +2491,6 @@ function Dashboard({orders,projects,stages,users,workLogs,departments,customTask
   }).map(o=>({o,days:daysBetween(o.targetDate,today)})).sort((a,b)=>b.days-a.days),
     [fOrders,stages,workLogs,doneIdx,qtyIdx,today]);
   const overdueUnits=overdue.reduce((s2,x)=>s2+orderUnits(x.o),0);
-  // How many of the visible פק"ע have not entered the line at all — the pile the
-  // "פתוחה" status used to hide inside "not finished yet".
-  const preLine=fOrders.filter(o=>orderPhase(o)==="pre").length;
 
   // On-time delivery rate: orders with a target that are either done or not yet late
   const datedOrders=fOrders.filter(o=>o.targetDate&&(o.serials||[]).length>0);
@@ -2538,11 +2548,50 @@ function Dashboard({orders,projects,stages,users,workLogs,departments,customTask
         </Card>
       </div>
 
+      {/* ── שורת הסטטוסים ──────────────────────────────────────────────────
+          One tile per phase of the ERP status dictionary, counted over exactly the
+          פק"ע the rest of the screen is counting. This row is also the filter:
+          clicking a tile narrows the whole dashboard to that phase, and clicking
+          it again clears it. Cancelled orders are outside fOrders, so their tile
+          appears only when they are the ones being shown. */}
+      <Card style={{marginBottom:12,padding:"11px 13px"}}>
+        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",gap:10,flexWrap:"wrap",marginBottom:9}}>
+          <div style={{display:"flex",alignItems:"baseline",gap:8,flexWrap:"wrap"}}>
+            <div style={{fontWeight:700,fontSize:14}}>📊 מצב הפק"ע לפי סטטוס</div>
+            <span style={{fontSize:11,color:"var(--c-dim)"}}>הסטטוס כפי שהגיע מ-Priority · לחיצה מסננת את כל המסך</span>
+          </div>
+          <div style={{fontSize:11.5,color:"var(--c-dim)"}}>סה"כ <b style={{color:"var(--c-text)"}}>{fOrders.length.toLocaleString()}</b> פק"ע</div>
+        </div>
+        <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(150px,1fr))",gap:9}}>
+          {PHASE_ORDER.filter(k=>k!=="cancelled"||selStat==="ph_cancelled").map(k=>{
+            const ph=ST_PHASE[k],key="ph_"+k,n=phaseCount.n[k],on=selStat===key;
+            const pct=fOrders.length?Math.round(n/fOrders.length*100):0;
+            return(
+              <button key={key} title={ph.hint} onClick={()=>setSelStat(on?"all":key)}
+                style={{textAlign:"start",background:on?ph.color+"1c":"var(--c-deep)",border:`1px solid ${on?ph.color+"88":"var(--c-border)"}`,
+                  borderRadius:12,padding:"10px 12px",fontFamily:"inherit",cursor:"pointer",display:"flex",flexDirection:"column",gap:5}}>
+                <div style={{display:"flex",alignItems:"center",gap:7}}>
+                  <span style={{fontSize:14}}>{ph.icon}</span>
+                  <span style={{fontSize:11.5,fontWeight:600,color:on?ph.color:"var(--c-muted)"}}>{ph.label}</span>
+                </div>
+                <div style={{fontSize:20,fontWeight:800,color:ph.color,letterSpacing:"-.02em",lineHeight:1.1}}>{n.toLocaleString()}</div>
+                <div style={{height:4,borderRadius:3,background:"var(--c-border)",overflow:"hidden"}}><div style={{width:pct+"%",height:"100%",background:ph.color,opacity:.85}}/></div>
+                <div style={{fontSize:10,color:"var(--c-dim)"}}>{pct}% מהפק"ע · {phaseCount.units[k].toLocaleString()} יח'</div>
+              </button>
+            );
+          })}
+        </div>
+        <div style={{fontSize:11.5,color:"var(--c-muted)",marginTop:9,lineHeight:1.7,background:"var(--c-deep)",border:"1px solid var(--c-border)",borderRadius:8,padding:"7px 10px"}}>
+          ״פק"ע שטרם הסתיימו״ = <b style={{color:"var(--c-text)"}}>{ST_PHASE.pre.label} + {ST_PHASE.line.label} + {ST_PHASE.stuck.label}</b> — {openOrders.toLocaleString()} פק"ע.
+          הסטטוסים <b style={{color:"var(--c-text)"}}>דווח אחרון · נסגרה · פקע COC</b> נחשבים ״{ST_PHASE.done.label}״ ואינם נספרים שם.
+          {noUnitOrders>0&&<> ל-<b style={{color:"var(--c-text)"}}>{noUnitOrders.toLocaleString()}</b> פק"ע אין סידוריים ואין כמות, ולכן אי אפשר לדווח עליהן התקדמות.</>}
+        </div>
+      </Card>
+
       {/* KPIs */}
       <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(140px,1fr))",gap:9,marginBottom:14}}>
-        <KpiBox i="📋" v={openOrders} label='פק"ע שטרם הסתיימו' c="#f59e0b" sub={noUnitOrders?`מתוכן ${noUnitOrders.toLocaleString()} ללא סידוריים לדיווח`:null}/>
+        <KpiBox i="📋" v={openOrders.toLocaleString()} label='פק"ע שטרם הסתיימו' c="#f59e0b" sub={`מתוך ${fOrders.length.toLocaleString()} · ${phaseCount.n.done.toLocaleString()} כבר הסתיימו`}/>
         <KpiBox i="🔢" v={totalSerials.toLocaleString()} label='סה"כ יחידות' c="#60a5fa" sub={`${completedSerials.toLocaleString()} הושלמו`}/>
-        <KpiBox i="🚧" v={preLine.toLocaleString()} label={ST_PHASE.pre.label} c={ST_PHASE.pre.color} sub='פתוחה / שוחררה — התהליך לא התחיל'/>
         <KpiBox i="🚨" v={overdue.length.toLocaleString()} label='פק"ע באיחור' c={overdue.length?"#ef4444":"#10b981"} sub='מול תאריך סיום ייצור מהפריוריטי'/>
         <KpiBox i="🎯" v={onTimePct!=null?onTimePct+"%":"—"} label="עמידה בלוחות זמנים" c={onTimePct==null?"#8b95a8":onTimePct>=85?"#10b981":onTimePct>=60?"#f59e0b":"#ef4444"} sub={datedOrders.length?`${onTimeCount}/${datedOrders.length} פק"ע בזמן`:null}/>
         <KpiBox i="💰" v={fmtMoney(actualRev)} label="הכנסה ממומשת" c="#a78bfa"/>
