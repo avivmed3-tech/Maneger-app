@@ -733,13 +733,19 @@ const userToDb=u=>({id:u.id,username:u.username,password_hash:u.password_hash||u
 const dbToOrder=r=>({id:r.id,woNumber:r.wo_number,pn:r.pn,description:r.description,qty:r.qty,
   unitPrice:r.unit_price,projectId:r.project_id,branch:branchCode(r.branch),receivedDate:r.received_date,targetDate:r.target_date,
   stageIds:r.stage_ids,blockId:r.block_id,serials:r.serials,shortages:r.shortages,
-  defects:r.defects,deliveredSerials:r.delivered_serials,status:r.status,companyId:r.company_id||DEFAULT_COMPANY_ID});
+  defects:r.defects,deliveredSerials:r.delivered_serials,status:r.status,
+  // What the ERP actually wrote in סטטוס פק"ע, kept verbatim beside the four
+  // statuses it folds onto — it is the only place the reason a פק"ע is stuck
+  // ("בעית ח\"ג חסר", "הוקפאה") survives the import.
+  erpStatus:r.erp_status||"",erpNote:r.erp_note||"",
+  companyId:r.company_id||DEFAULT_COMPANY_ID});
 const orderToDb=o=>({id:o.id,wo_number:o.woNumber,pn:o.pn||null,description:o.description||null,
   qty:Number(o.qty)||0,unit_price:Number(o.unitPrice)||0,project_id:o.projectId||null,
   branch:branchCode(o.branch)||null,
   received_date:o.receivedDate||null,target_date:o.targetDate||null,stage_ids:o.stageIds||[],
   block_id:o.blockId||null,serials:o.serials||[],shortages:o.shortages||[],
   defects:o.defects||[],delivered_serials:o.deliveredSerials||[],status:o.status||"open",
+  erp_status:o.erpStatus||null,erp_note:o.erpNote||null,
   company_id:rowCid(o),updated_at:new Date().toISOString()});
 const dbToLog=r=>({id:r.id,userId:r.user_id,userName:r.user_name,serialId:r.serial_id,
   serialSn:r.serial_sn,stageId:r.stage_id,orderId:r.order_id,startTime:r.start_time,
@@ -1610,8 +1616,8 @@ const Logo=({size=32})=>(
     <path d="M86 44 L91 52 L98 36 L104 26" fill="none" stroke="#1c7fd6" strokeWidth="4.5" strokeLinejoin="round" strokeLinecap="round"/>
     </svg>
 );
-const Btn=({children,color="#374151",onClick,style={},disabled,small})=>(
-  <button onClick={onClick} disabled={disabled} style={{background:disabled?"#374151":color,color:"#fff",border:"none",borderRadius:8,padding:small?"6px 12px":"9px 16px",fontWeight:600,fontSize:small?12:14,opacity:disabled?.5:1,transition:"opacity .15s, filter .15s",whiteSpace:"nowrap",...style}}
+const Btn=({children,color="#374151",onClick,style={},disabled,small,title})=>(
+  <button onClick={onClick} disabled={disabled} title={title} style={{background:disabled?"#374151":color,color:"#fff",border:"none",borderRadius:8,padding:small?"6px 12px":"9px 16px",fontWeight:600,fontSize:small?12:14,opacity:disabled?.5:1,transition:"opacity .15s, filter .15s",whiteSpace:"nowrap",...style}}
     onMouseEnter={e=>{if(!disabled)e.currentTarget.style.filter="brightness(1.15)"}}
     onMouseLeave={e=>{e.currentTarget.style.filter="none"}}
   >{children}</button>
@@ -2328,17 +2334,53 @@ function Dashboard({orders,projects,stages,users,workLogs,departments,customTask
   const [period,setPeriod]=useState("month");
   const [selYear,setSelYear]=useState("all");
   const [selProj,setSelProj]=useState("all");
+  // The two cuts a floor manager asks the dashboard for first: which division,
+  // and what state the פק"ע are in. Until now both existed only on the פק"ע
+  // screen, so every dashboard number was the whole factory or nothing.
+  const [selBranch,setSelBranch]=useState("all");
+  const [selStat,setSelStat]=useState("all");
   const [donutSlice,setDonutSlice]=useState("status");
   const [barMetric,setBarMetric]=useState("rev");
+  const [showAllLate,setShowAllLate]=useState(false);
 
   // Compute all years from workLogs
   const allYears=useMemo(()=>[...new Set(workLogs.filter(w=>w.completed&&w.endTime).map(w=>yK(w.endTime)).filter(Boolean))].sort().reverse(),[workLogs]);
 
-  // Filter orders by project
-  const fOrders=useMemo(()=>orders.filter(o=>selProj==="all"||o.projectId===selProj),[orders,selProj]);
+  const branchOpts=useMemo(()=>branchList(orders,departments||[]),[orders,departments]);
+  const branchCount=useMemo(()=>{
+    const m={none:0};
+    orders.forEach(o=>{const c=branchCode(o.branch);if(c)m[c]=(m[c]||0)+1;else m.none++});
+    return m;
+  },[orders]);
+  const statCount=useMemo(()=>{
+    const c={open:0,partial:0,complete:0,blocked:0,ph_pre:0,ph_line:0,ph_stuck:0,ph_done:0};
+    orders.forEach(o=>{const k=o.status||"open";if(c[k]!==undefined)c[k]++;c["ph_"+orderPhase(o)]++});
+    return c;
+  },[orders]);
 
-  // Filter workLogs by year
-  const fLogs=useMemo(()=>workLogs.filter(w=>{if(!w.completed||!w.endTime)return false;if(selYear!=="all"&&yK(w.endTime)!==selYear)return false;return true}),[workLogs,selYear]);
+  // Filter orders by project, division and state
+  const fOrders=useMemo(()=>orders.filter(o=>{
+    if(selProj!=="all"&&o.projectId!==selProj)return false;
+    if(selBranch!=="all"){
+      const c=branchCode(o.branch);
+      if(selBranch==="none"?!!c:c!==selBranch)return false;
+    }
+    if(selStat!=="all"){
+      if(selStat.startsWith("ph_")){if(orderPhase(o)!==selStat.slice(3))return false}
+      else if((o.status||"open")!==selStat)return false;
+    }
+    return true;
+  }),[orders,selProj,selBranch,selStat]);
+
+  const anyFilter=selProj!=="all"||selBranch!=="all"||selStat!=="all";
+  // With a filter on, the hours and the money have to come from the same פק"ע the
+  // rest of the screen is counting — otherwise "מחלקת תק״ש" shows that division's
+  // units against the whole factory's hours.
+  const visibleOrderIds=useMemo(()=>anyFilter?new Set(fOrders.map(o=>o.id)):null,[anyFilter,fOrders]);
+
+  // Filter workLogs by year (and by the visible פק"ע, when a filter is on)
+  const fLogs=useMemo(()=>workLogs.filter(w=>{if(!w.completed||!w.endTime)return false;if(selYear!=="all"&&yK(w.endTime)!==selYear)return false;
+    if(visibleOrderIds&&!visibleOrderIds.has(w.orderId))return false;return true}),[workLogs,selYear,visibleOrderIds]);
 
   // Helper: is serial done
   const doneIdx=useDoneIndex(workLogs);
@@ -2383,6 +2425,13 @@ function Dashboard({orders,projects,stages,users,workLogs,departments,customTask
     donutData=[{label:"הושלמו",value:completedSerials},{label:"בתהליך",value:totalSerials-completedSerials}].filter(d=>d.value>0);
   }else if(donutSlice==="project"){
     donutData=projects.map(p=>{const po=fOrders.filter(o=>o.projectId===p.id);const done=po.reduce((s,o)=>(o.serials||[]).filter(sr=>isSerDone(o,sr)).length+s,0);return{label:p.name,value:done}}).filter(d=>d.value>0);
+  }else if(donutSlice==="phase"){
+    // פק"ע by where they stand in the line, not by how many units cleared it —
+    // this is the "what is waiting, what is running, what is stuck" picture.
+    donutData=PHASE_ORDER.map(k=>({label:ST_PHASE[k].label,value:fOrders.filter(o=>orderPhase(o)===k).length,color:ST_PHASE[k].color})).filter(d=>d.value>0);
+  }else if(donutSlice==="branch"){
+    const m={};fOrders.forEach(o=>{const c=branchCode(o.branch)||"none";m[c]=(m[c]||0)+1});
+    donutData=Object.entries(m).map(([c,n])=>({label:c==="none"?"ללא סניף":branchLabel(c),value:n,color:c==="none"?"#8b95a8":branchColor(c)})).sort((a,b)=>b.value-a.value);
   }else{
     donutData=stages.map(st=>({label:st.name,value:fLogs.filter(w=>w.stageId===st.id).length,color:st.color})).filter(d=>d.value>0);
   }
@@ -2408,8 +2457,26 @@ function Dashboard({orders,projects,stages,users,workLogs,departments,customTask
     return{...u,totalMin,units,cost,revenue:rev,profit:rev-cost,uph:totalMin>0?(units/(totalMin/60)):0};
   }).sort((a,b)=>b.uph-a.uph);
 
-  // Overdue
-  const overdue=fOrders.filter(o=>o.targetDate&&new Date(o.targetDate)<new Date()&&(o.serials||[]).some(s=>!isSerDone(o,s)));
+  // ── פק"ע באיחור ──────────────────────────────────────────────────────────
+  // Late is measured against תאריך סיום ייצור — Priority's "ת. סיום יצור" column,
+  // which is what lands on the order as targetDate. The old test asked whether
+  // any *serial* was unfinished, so a פק"ע managed by quantity — which has no
+  // serials at all — could never be late however far past its date it was. It
+  // now asks the same question the progress bar does: are all the units through.
+  const qtyIdx=useQtyIndex(workLogs);
+  const today=todays();
+  const overdue=useMemo(()=>fOrders.filter(o=>{
+    if(!o.targetDate||String(o.targetDate).slice(0,10)>=today)return false;
+    if(orderPhase(o)==="done")return false;
+    const units=orderUnits(o);
+    if(!units)return true;
+    return orderDoneCount(o,orderRoute(o,stages),workLogs,doneIdx,qtyIdx)<units;
+  }).map(o=>({o,days:daysBetween(o.targetDate,today)})).sort((a,b)=>b.days-a.days),
+    [fOrders,stages,workLogs,doneIdx,qtyIdx,today]);
+  const overdueUnits=overdue.reduce((s2,x)=>s2+orderUnits(x.o),0);
+  // How many of the visible פק"ע have not entered the line at all — the pile the
+  // "פתוחה" status used to hide inside "not finished yet".
+  const preLine=fOrders.filter(o=>orderPhase(o)==="pre").length;
 
   // On-time delivery rate: orders with a target that are either done or not yet late
   const datedOrders=fOrders.filter(o=>o.targetDate&&(o.serials||[]).length>0);
@@ -2443,9 +2510,26 @@ function Dashboard({orders,projects,stages,users,workLogs,departments,customTask
         <Card style={{padding:"10px 14px",display:"flex",gap:12,flexWrap:"wrap",alignItems:"flex-end",boxShadow:"0 2px 8px #0003"}}>
           <span style={{fontSize:13,color:"var(--c-dim)",fontWeight:600,paddingBottom:2}}>🔍</span>
           <div style={{display:"flex",flexDirection:"column",gap:3,minWidth:140}}><label style={{fontSize:11,color:"var(--c-dim)"}}>פרויקט</label><select value={selProj} onChange={e=>setSelProj(e.target.value)} style={{padding:"5px 8px",fontSize:12}}><option value="all">כל הפרויקטים</option>{projects.map(p=><option key={p.id} value={p.id}>{p.name}</option>)}</select></div>
+          <div style={{display:"flex",flexDirection:"column",gap:3,minWidth:140}}><label style={{fontSize:11,color:"var(--c-dim)"}}>סניף (חטיבה)</label>
+            <select value={selBranch} onChange={e=>setSelBranch(e.target.value)} style={{padding:"5px 8px",fontSize:12}} title='מספר הסניף מגיע מה-ERP ומייצג את החטיבה העסקית'>
+              <option value="all">כל הסניפים</option>
+              {branchOpts.map(c=><option key={c} value={c}>{branchLabel(c)}{branchCount[c]?` · ${branchCount[c]}`:""}</option>)}
+              {branchCount.none>0&&<option value="none">ללא סניף · {branchCount.none}</option>}
+            </select></div>
+          <div style={{display:"flex",flexDirection:"column",gap:3,minWidth:180}}><label style={{fontSize:11,color:"var(--c-dim)"}}>סטטוס פק"ע</label>
+            <select value={selStat} onChange={e=>setSelStat(e.target.value)} style={{padding:"5px 8px",fontSize:12}} title='הסטטוס כפי שהגיע מ-Priority, ומיקום הפק"ע בקו הייצור'>
+              <option value="all">כל הסטטוסים</option>
+              <optgroup label="סטטוס מה-ERP">
+                {ST_ORDER.map(k=><option key={k} value={k}>{SL[k]} · {statCount[k]||0}</option>)}
+              </optgroup>
+              <optgroup label="מיקום בקו הייצור">
+                {PHASE_ORDER.map(k=><option key={"ph_"+k} value={"ph_"+k}>{ST_PHASE[k].icon} {ST_PHASE[k].label} · {statCount["ph_"+k]||0}</option>)}
+              </optgroup>
+            </select></div>
           <div style={{display:"flex",flexDirection:"column",gap:3}}><label style={{fontSize:11,color:"var(--c-dim)"}}>שנה</label><select value={selYear} onChange={e=>setSelYear(e.target.value)} style={{padding:"5px 8px",fontSize:12}}><option value="all">כל השנים</option>{allYears.map(y=><option key={y} value={y}>{y}</option>)}</select></div>
           <div style={{display:"flex",flexDirection:"column",gap:3}}><label style={{fontSize:11,color:"var(--c-dim)"}}>תקופה</label><SegBtn options={[["month","חודשי"],["quarter","רבעוני"],["year","שנתי"]]} value={period} onChange={setPeriod}/></div>
-          {(selProj!=="all"||selYear!=="all")&&<button onClick={()=>{setSelProj("all");setSelYear("all")}} style={{background:"#374151",color:"#e2e8f0",border:"none",borderRadius:6,padding:"5px 10px",fontSize:12,fontFamily:"inherit"}}>✕ נקה</button>}
+          {(anyFilter||selYear!=="all")&&<button onClick={()=>{setSelProj("all");setSelYear("all");setSelBranch("all");setSelStat("all")}} style={{background:"#374151",color:"#e2e8f0",border:"none",borderRadius:6,padding:"5px 10px",fontSize:12,fontFamily:"inherit"}}>✕ נקה</button>}
+          {anyFilter&&<span style={{fontSize:11.5,color:"var(--c-dim)",paddingBottom:3}}>מוצגות <b style={{color:"var(--c-text)"}}>{fOrders.length.toLocaleString()}</b> מתוך {orders.length.toLocaleString()} פק"ע — כל המספרים במסך מתייחסים אליהן בלבד</span>}
         </Card>
       </div>
 
@@ -2453,6 +2537,8 @@ function Dashboard({orders,projects,stages,users,workLogs,departments,customTask
       <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(140px,1fr))",gap:9,marginBottom:14}}>
         <KpiBox i="📋" v={openOrders} label='פק"ע שטרם הסתיימו' c="#f59e0b" sub={noUnitOrders?`מתוכן ${noUnitOrders.toLocaleString()} ללא סידוריים לדיווח`:null}/>
         <KpiBox i="🔢" v={totalSerials.toLocaleString()} label='סה"כ יחידות' c="#60a5fa" sub={`${completedSerials.toLocaleString()} הושלמו`}/>
+        <KpiBox i="🚧" v={preLine.toLocaleString()} label={ST_PHASE.pre.label} c={ST_PHASE.pre.color} sub='פתוחה / שוחררה — עוד לא בקו'/>
+        <KpiBox i="🚨" v={overdue.length.toLocaleString()} label='פק"ע באיחור' c={overdue.length?"#ef4444":"#10b981"} sub='מול תאריך סיום ייצור מהפריוריטי'/>
         <KpiBox i="🎯" v={onTimePct!=null?onTimePct+"%":"—"} label="עמידה בלוחות זמנים" c={onTimePct==null?"#8b95a8":onTimePct>=85?"#10b981":onTimePct>=60?"#f59e0b":"#ef4444"} sub={datedOrders.length?`${onTimeCount}/${datedOrders.length} פק"ע בזמן`:null}/>
         <KpiBox i="💰" v={fmtMoney(actualRev)} label="הכנסה ממומשת" c="#a78bfa"/>
         <KpiBox i="🔮" v={fmtMoney(forecastRev)} label="צפי הכנסות" c="#06b6d4"/>
@@ -2465,15 +2551,41 @@ function Dashboard({orders,projects,stages,users,workLogs,departments,customTask
       {/* Factory diagram moved to the live factory board (מסך מפעל חי) */}
 
       {/* Operational insights */}
+      {/* פק"ע באיחור — the whole list, not the first five, and it says out loud
+          what "late" is measured against. Priority's ת. סיום יצור is the date the
+          order carries; nothing else in the app is a delivery commitment. */}
       {(overdue.length>0)&&(
         <Card style={{marginBottom:12,border:"1px solid #ef444433"}}>
-          <div style={{fontWeight:700,fontSize:13,color:"#ef4444",marginBottom:8}}>🚨 פק"ע באיחור ({overdue.length})</div>
-          {overdue.slice(0,5).map(o=>{const d=daysBetween(o.targetDate,todays());return(
-            <div key={o.id} style={{background:"var(--c-deep)",borderRadius:8,padding:"8px 12px",marginBottom:4,display:"flex",justifyContent:"space-between",alignItems:"center",border:"1px solid #ef444422"}}>
-              <div><span style={{fontWeight:700,color:"#60a5fa"}}>{o.woNumber}</span><span style={{fontSize:11,color:"var(--c-dim)",marginRight:8}}>{o.description}</span></div>
-              <span style={{color:"#ef4444",fontWeight:700,fontSize:12}}>+{d} ימים</span>
+          <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",gap:10,flexWrap:"wrap",marginBottom:4}}>
+            <div style={{fontWeight:700,fontSize:13,color:"#ef4444"}}>🚨 פק"ע באיחור ({overdue.length.toLocaleString()})</div>
+            <div style={{fontSize:11.5,color:"var(--c-dim)"}}>{overdueUnits.toLocaleString()} יחידות · האיחור הגדול ביותר {overdue[0].days} ימים</div>
+          </div>
+          <div style={{fontSize:11.5,color:"var(--c-muted)",marginBottom:9,lineHeight:1.7,background:"var(--c-deep)",border:"1px solid var(--c-border)",borderRadius:8,padding:"7px 10px"}}>
+            האיחור נמדד מול <b style={{color:"var(--c-text)"}}>תאריך סיום ייצור</b> — עמודת <b style={{color:"var(--c-text)"}}>״ת. סיום יצור״</b> מהפריוריטי, שנשמרת על כל פק"ע כיעד האספקה.
+            נספרת כאן כל פק"ע שהתאריך שלה עבר ושעדיין לא כל היחידות שלה סיימו את המסלול — גם פק"ע שמנוהלת לפי כמות וללא סידוריים. פק"ע שיצאה מהקו (COC / נסגרה) אינה נספרת.
+          </div>
+          {(showAllLate?overdue:overdue.slice(0,8)).map(({o,days})=>{
+            const br2=branchCode(o.branch),erp2=orderErpInfo(o),ph2=ST_PHASE[orderPhase(o)]||ST_PHASE.line;
+            return(
+            <div key={o.id} style={{background:"var(--c-deep)",borderRadius:8,padding:"8px 12px",marginBottom:4,display:"flex",justifyContent:"space-between",alignItems:"center",gap:10,border:"1px solid #ef444422",flexWrap:"wrap"}}>
+              <div style={{display:"flex",alignItems:"center",gap:7,flexWrap:"wrap",minWidth:0}}>
+                <span style={{fontWeight:700,color:"#60a5fa"}}>{o.woNumber}</span>
+                <Badge status={o.status||"open"}/>
+                {erp2&&erp2.raw&&<span title={erp2.desc} style={{fontSize:10.5,background:ph2.color+"14",color:ph2.color,border:`1px dashed ${ph2.color}55`,padding:"1px 7px",borderRadius:20,whiteSpace:"nowrap"}}>{ph2.icon} {erp2.raw}</span>}
+                {br2&&<span style={{fontSize:10.5,background:branchColor(br2)+"1f",color:branchColor(br2),border:`1px solid ${branchColor(br2)}44`,padding:"1px 7px",borderRadius:20,whiteSpace:"nowrap"}}>🏢 {branchLabel(br2)}</span>}
+                <span style={{fontSize:11,color:"var(--c-dim)"}}>{o.description}</span>
+              </div>
+              <div style={{display:"flex",alignItems:"center",gap:10,whiteSpace:"nowrap"}}>
+                <span style={{fontSize:11,color:"var(--c-dim)"}}>סיום ייצור: {fmt(o.targetDate)}</span>
+                <span style={{color:"#ef4444",fontWeight:700,fontSize:12}}>+{days} ימים</span>
+              </div>
             </div>
           )})}
+          {overdue.length>8&&(
+            <button onClick={()=>setShowAllLate(p=>!p)} style={{background:"none",border:"none",color:"#60a5fa",fontSize:12,fontWeight:700,fontFamily:"inherit",padding:"6px 0 0",cursor:"pointer"}}>
+              {showAllLate?"▲ הצג פחות":`▼ הצג את כל ${overdue.length.toLocaleString()} הפק"ע באיחור`}
+            </button>
+          )}
         </Card>
       )}
 
@@ -2515,9 +2627,9 @@ function Dashboard({orders,projects,stages,users,workLogs,departments,customTask
         <Card style={{display:"flex",flexDirection:"column"}}>
           <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:10}}><div style={{display:"flex",alignItems:"center",gap:7}}><div style={{fontWeight:700,fontSize:14}}>📊 התפלגות</div><ChartInfo title="התפלגות"
             shows="טבעת (Donut) שמפלגת את הנתונים לפי הבחירה בתפריט: סטטוס יחידות, פרויקטים או שלבי ייצור. כל פלח הוא קטגוריה."
-            data={["סטטוס — כמה יחידות הושלמו לעומת כמה עדיין בתהליך.","פרויקטים — כמה יחידות הושלמו בכל פרויקט.","שלבים — כמה פעולות עבודה בוצעו בכל שלב ייצור."]}
+            data={["סטטוס יחידות — כמה יחידות הושלמו לעומת כמה עדיין בתהליך.",'מיקום בקו — כמה פק"ע טרם נכנסו לייצור, כמה בקו, כמה עצורות וכמה יצאו.','סניפים — כמה פק"ע בכל חטיבה עסקית.',"פרויקטים — כמה יחידות הושלמו בכל פרויקט.","שלבים — כמה פעולות עבודה בוצעו בכל שלב ייצור."]}
             how="לכל קטגוריה מסכמים את מספר היחידות או הפעולות שלה, וגודל הפלח בטבעת משקף את חלקה היחסי מתוך הסך הכולל."
-            tip="פלח גדול = הקטגוריה הדומיננטית. כך רואים במבט אחד היכן מרוכזת רוב הפעילות."/></div><select value={donutSlice} onChange={e=>setDonutSlice(e.target.value)} style={{padding:"3px 6px",fontSize:11,width:"auto"}}><option value="status">סטטוס</option><option value="project">פרויקטים</option><option value="stage">שלבים</option></select></div>
+            tip="פלח גדול = הקטגוריה הדומיננטית. כך רואים במבט אחד היכן מרוכזת רוב הפעילות."/></div><select value={donutSlice} onChange={e=>setDonutSlice(e.target.value)} style={{padding:"3px 6px",fontSize:11,width:"auto"}}><option value="status">סטטוס יחידות</option><option value="phase">מיקום בקו</option><option value="branch">סניפים</option><option value="project">פרויקטים</option><option value="stage">שלבים</option></select></div>
           <div style={{flex:1,display:"flex",alignItems:"center",justifyContent:"center"}}><DonutChart data={donutData} size={170}/></div>
         </Card>
       </div>
@@ -3192,6 +3304,15 @@ function OrderDetail({order,projects,stages,stageBlocks,departments=[],onClose,o
   const pct=units?Math.round(totalCompleted/units*100):0;
   const passes=orderStagePasses(order,oStages,workLogs,doneIdx,qtyIdx);
   const reportState=REPORT_STATE[orderReportState(order,oStages,workLogs,doneIdx,qtyIdx)];
+  // What the ERP itself said about this פק"ע — the wording the four app statuses
+  // fold away. On a תקועה it is the reason it is stuck.
+  const erp=orderErpInfo(order);
+  const phase=orderPhase(order),ph=ST_PHASE[phase]||ST_PHASE.line;
+  // A פק"ע that came back תקועה with nothing beside it leaves the manager with a
+  // red badge and no reason. The status itself is the ERP's to write; the note is
+  // the floor's, and it survives the next import untouched.
+  const [editNote,setEditNote]=useState(false);
+  const [noteDraft,setNoteDraft]=useState("");
   const perUnitMin=orderPerUnitMin(order,stages,stageBlocks);
   const remainMin=orderRemainingMin(order,stages,stageBlocks,workLogs,doneIdx,qtyIdx);
   // Quantity signatures on a פק"ע that has since been given serial numbers: the
@@ -3235,9 +3356,46 @@ function OrderDetail({order,projects,stages,stageBlocks,departments=[],onClose,o
           </div>
           <div style={{display:"flex",gap:8,alignItems:"center",flexWrap:"wrap"}}>
             <span title={`סטטוס מה-ERP: ${SL[order.status||"open"]}`}><Badge status={order.status||"open"} large/></span>
+            <span title={ph.hint} style={{fontSize:12,background:ph.color+"14",color:ph.color,border:`1px solid ${ph.color}44`,padding:"3px 10px",borderRadius:20,fontWeight:700,whiteSpace:"nowrap"}}>{ph.icon} {ph.label}</span>
             <span style={{fontSize:14,fontWeight:700,color:"#10b981"}}>{totalCompleted}/{units} הושלמו{byQty?" (לפי כמות)":""}</span>
           </div>
         </div>
+        {/* ── מה ה-ERP אמר ─────────────────────────────────────────────────
+            A stuck פק"ע is stuck *for a reason*, and Priority writes that reason
+            into the status itself — "בעית ח״ג חסר", "הוקפאה", "בעיה הנדסית". The
+            import folds all of them onto one red "תקועה" badge, so the reason was
+            the first thing lost. It is kept on the order now and printed here,
+            with whatever free-text note the file carried beside it. */}
+        {canEdit&&!erp&&phase==="stuck"&&!editNote&&(
+          <div style={{marginTop:12}}>
+            <Btn small color="#ef4444" onClick={()=>{setNoteDraft(order.erpNote||"");setEditNote(true)}}>⛔ רשום סיבת תקיעה</Btn>
+          </div>
+        )}
+        {editNote&&(
+          <div style={{background:"#ef444410",border:"1px solid #ef444444",borderRadius:9,padding:"10px 12px",marginTop:12}}>
+            <label style={{fontSize:11.5,color:"var(--c-dim)",display:"block",marginBottom:4}}>סיבת התקיעה / הערת סטטוס — נשמרת על הפק"ע ולא נמחקת בייבוא הבא</label>
+            <input value={noteDraft} onChange={e=>setNoteDraft(e.target.value)} placeholder='למשל: ממתין לחומר גלם מספק — הוזמן ב-12/8' style={{marginBottom:8}}/>
+            <div style={{display:"flex",gap:7}}>
+              <Btn small color="#10b981" onClick={()=>{onUpdate({...order,erpNote:noteDraft.trim()});setEditNote(false)}}>שמור</Btn>
+              <Btn small onClick={()=>setEditNote(false)}>ביטול</Btn>
+            </div>
+          </div>
+        )}
+        {erp&&(erp.raw||erp.note)&&(
+          <div style={{background:ph.color+"10",border:`1px solid ${ph.color}44`,borderRadius:9,padding:"10px 12px",marginTop:12,fontSize:12.5,lineHeight:1.7}}>
+            <div style={{fontWeight:700,color:ph.color,marginBottom:2}}>
+              {phase==="stuck"?"⛔ סיבת התקיעה":phase==="pre"?'🚧 טרם נכנסה לקו הייצור':`${ph.icon} סטטוס מה-ERP`}
+              {erp.raw&&<span style={{color:"var(--c-text)"}}> — {erp.raw}</span>}
+              {erp.guessed&&<span title="הסטטוס אינו ברשימת הסטטוסים המוכרים — הוא שויך לפי הניסוח" style={{color:"#f59e0b",marginRight:5}}>❓</span>}
+            </div>
+            {erp.desc&&<div style={{color:"var(--c-muted)"}}>{erp.desc}</div>}
+            {erp.note&&<div style={{color:"var(--c-text)",marginTop:4}}>📝 <b>מהקובץ:</b> {erp.note}</div>}
+            <div style={{color:"var(--c-dim)",fontSize:11.5,marginTop:4}}>
+              {erp.raw?'הטקסט הזה הוא מה שהיה בעמודת ״סטטוס פק"ע״ בקובץ ה-Priority בייבוא האחרון.':"ההערה נרשמה באפליקציה."}
+              {canEdit&&!editNote&&<button onClick={()=>{setNoteDraft(order.erpNote||"");setEditNote(true)}} style={{background:"none",border:"none",color:"#60a5fa",fontSize:11.5,fontWeight:700,fontFamily:"inherit",cursor:"pointer",padding:"0 6px"}}>✏️ {erp.note?"ערוך הערה":"הוסף הערה"}</button>}
+            </div>
+          </div>
+        )}
         {reportState&&(
           <div style={{background:reportState.color+"12",border:`1px solid ${reportState.color}44`,borderRadius:9,padding:"9px 12px",marginBottom:12,fontSize:12.5,lineHeight:1.7}}>
             <b style={{color:reportState.color}}>{reportState.icon} {reportState.label}</b>
@@ -3377,6 +3535,10 @@ function Orders({orders,projects,stages,stageBlocks,updO,workLogs,onWorkLog,onDe
       // all", which is the question the status cannot.
       if(filterStat==="nounits"||filterStat==="gap"){
         if(orderReportState(o,orderRoute(o,stages),workLogs,doneIdx,qtyIdx)!==filterStat)return false;
+      // Where the פק"ע stands relative to the line, which the four statuses cannot
+      // say: "פתוחה" and "שוחררה" are both open and both mean nobody has started.
+      }else if(filterStat.startsWith("ph_")){
+        if(orderPhase(o)!==filterStat.slice(3))return false;
       }else if(filterStat!=="all"&&(o.status||"open")!==filterStat)return false;
       if(q&&!o.woNumber?.toLowerCase().includes(q)&&!o.description?.toLowerCase().includes(q)&&!o.pn?.toLowerCase().includes(q))return false;
       return true;
@@ -3395,11 +3557,12 @@ function Orders({orders,projects,stages,stageBlocks,updO,workLogs,onWorkLog,onDe
   // How many פק"ע sit in each status, so the filter chips say what they will show
   // — and so a run of "everything is open" is visible before anyone goes looking.
   const statCount=useMemo(()=>{
-    const c={open:0,partial:0,complete:0,blocked:0,nounits:0,gap:0};
+    const c={open:0,partial:0,complete:0,blocked:0,nounits:0,gap:0,ph_pre:0,ph_line:0,ph_stuck:0,ph_done:0};
     orders.forEach(o=>{
       const k=o.status||"open";if(c[k]!==undefined)c[k]++;
       const rs=orderReportState(o,orderRoute(o,stages),workLogs,doneIdx,qtyIdx);
       if(c[rs]!==undefined)c[rs]++;
+      c["ph_"+orderPhase(o)]++;
     });
     return c;
   },[orders,stages,workLogs,doneIdx,qtyIdx]);
@@ -3443,7 +3606,8 @@ function Orders({orders,projects,stages,stageBlocks,updO,workLogs,onWorkLog,onDe
         </select></div>
         {setWorkdayHours&&<div style={{display:"flex",flexDirection:"column",gap:3}}><label style={{fontSize:11,color:"var(--c-dim)"}}>יום עבודה (שע' נטו)</label><input type="number" min="1" step="0.5" value={workdayHours} onChange={e=>setWorkdayHours(e.target.value)} style={{padding:"7px 8px",fontSize:12,width:90}} title="משמש לחישוב צפי הסיום"/></div>}
         <div style={{fontSize:12,color:"var(--c-dim)",paddingBottom:4}}>{filtered.length} פק"ע</div>
-        <div style={{display:"flex",gap:6,flexWrap:"wrap",width:"100%"}}>
+        <div style={{display:"flex",gap:6,flexWrap:"wrap",width:"100%",alignItems:"center"}}>
+          <span style={{fontSize:11,color:"var(--c-dim)",fontWeight:600}} title='הסטטוס כפי שהגיע מה-ERP בייבוא'>סטטוס:</span>
           {[["all",'הכל',orders.length,"#8b95a8",""],
             ...ST_ORDER.map(k=>[k,SL[k],statCount[k],SC[k],"הסטטוס כפי שהגיע מה-ERP בייבוא"]),
             ["nounits",`${REPORT_STATE.nounits.icon} ${REPORT_STATE.nounits.label}`,statCount.nounits,REPORT_STATE.nounits.color,REPORT_STATE.nounits.hint],
@@ -3453,6 +3617,17 @@ function Orders({orders,projects,stages,stageBlocks,updO,workLogs,onWorkLog,onDe
               border:`1px solid ${filterStat===k?c+"88":"var(--c-border)"}`,color:filterStat===k?c:"var(--c-muted)",
               borderRadius:16,padding:"3px 11px",fontSize:11.5,fontWeight:600,fontFamily:"inherit",cursor:"pointer"}}>{l} · {n}</button>
           ))}
+        </div>
+        {/* Where the פק"ע stands relative to the line. "פתוחה" and "שוחררה" are
+            both open and both mean nobody has started — separating them from the
+            ones already in the queue is the whole point of this row. */}
+        <div style={{display:"flex",gap:6,flexWrap:"wrap",width:"100%",alignItems:"center"}}>
+          <span style={{fontSize:11,color:"var(--c-dim)",fontWeight:600}} title='נגזר מהסטטוס המקורי של Priority ששמור על כל פק"ע'>מיקום בקו:</span>
+          {PHASE_ORDER.map(k=>{const ph=ST_PHASE[k],key="ph_"+k,n=statCount[key]||0;return(
+            <button key={key} title={ph.hint} onClick={()=>setFilterStat(filterStat===key?"all":key)} style={{background:filterStat===key?ph.color+"26":"var(--c-deep)",
+              border:`1px solid ${filterStat===key?ph.color+"88":"var(--c-border)"}`,color:filterStat===key?ph.color:"var(--c-muted)",
+              borderRadius:16,padding:"3px 11px",fontSize:11.5,fontWeight:600,fontFamily:"inherit",cursor:"pointer"}}>{ph.icon} {ph.label} · {n}</button>
+          )})}
         </div>
         {statCount.nounits>0&&(
           <div style={{width:"100%",fontSize:11.5,color:"var(--c-dim)",background:"var(--c-deep)",border:"1px solid var(--c-border)",borderRadius:8,padding:"7px 10px",lineHeight:1.6}}>
@@ -3478,6 +3653,8 @@ function Orders({orders,projects,stages,stageBlocks,updO,workLogs,onWorkLog,onDe
           const passes=orderStagePasses(o,oStages,workLogs,doneIdx,qtyIdx);
           const passPct=passes.total?Math.round(passes.done/passes.total*100):0;
           const rs=REPORT_STATE[orderReportState(o,oStages,workLogs,doneIdx,qtyIdx)];
+          const phase=orderPhase(o),ph=ST_PHASE[phase]||ST_PHASE.line;
+          const erp=orderErpInfo(o);
           const proj=projMap.get(o.projectId);
           const br=branchCode(o.branch);
           const openDef=(o.defects||[]).filter(d=>d.status!=="closed").length;
@@ -3491,7 +3668,11 @@ function Orders({orders,projects,stages,stageBlocks,updO,workLogs,onWorkLog,onDe
               <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:4}}>
                 <div style={{display:"flex",alignItems:"center",gap:6,flexWrap:"wrap"}}>
                   <span style={{fontWeight:700,fontSize:15}}>{o.woNumber}</span>
-                  <span title={`סטטוס מה-ERP: ${SL[o.status||"open"]}`}><Badge status={o.status||"open"}/></span>
+                  <span title={erp?`סטטוס פק"ע ב-Priority: ${erp.raw}${erp.desc?"\n"+erp.desc:""}`:`סטטוס מה-ERP: ${SL[o.status||"open"]}`}><Badge status={o.status||"open"}/></span>
+                  {/* The ERP's own wording, where it says more than the four
+                      statuses can — a stuck פק"ע carries its reason right here. */}
+                  {erp&&erp.raw&&<span title={erp.desc} style={{fontSize:11,background:ph.color+"14",color:ph.color,border:`1px dashed ${ph.color}55`,padding:"2px 7px",borderRadius:20,whiteSpace:"nowrap"}}>{ph.icon} {erp.raw}</span>}
+                  {!erp&&phase==="pre"&&<span title={ST_PHASE.pre.hint} style={{fontSize:11,background:ST_PHASE.pre.color+"14",color:ST_PHASE.pre.color,border:`1px dashed ${ST_PHASE.pre.color}55`,padding:"2px 7px",borderRadius:20,whiteSpace:"nowrap"}}>{ST_PHASE.pre.icon} {ST_PHASE.pre.label}</span>}
                   {rs&&<span title={rs.hint} style={{fontSize:11,background:rs.color+"1f",color:rs.color,border:`1px solid ${rs.color}44`,padding:"2px 7px",borderRadius:20,whiteSpace:"nowrap"}}>{rs.icon} {rs.label}</span>}
                   {o.pn&&<span style={{fontSize:11,color:"#a78bfa"}}>P/N: {o.pn}</span>}
                   {br&&<span title={`סניף ${br}${branchName(br)?" — "+branchName(br):""} · חטיבה עסקית מה-ERP${deptsForBranch(departments,br).length?" · "+deptsForBranch(departments,br).map(d=>d.name).join(" · "):""}`} style={{fontSize:11,background:branchColor(br)+"1f",color:branchColor(br),border:`1px solid ${branchColor(br)}44`,padding:"2px 7px",borderRadius:20,whiteSpace:"nowrap"}}>🏢 {branchLabel(br)}</span>}
@@ -5480,7 +5661,7 @@ function BranchAccessBox({user,departments,orders,options,onChange,inp,border,mu
   );
 }
 
-function AdminPanel({projects,stages,orders=[],onClose,lightMode,departments,updD}){
+function AdminPanel({projects,stages,orders=[],onClose,lightMode,departments,updD,onPilotReset}){
   const {toast}=useToast();
   const {currentUser}=useAuth();
   const [users,setUsersLocal]=useState(getUsers());
@@ -5641,7 +5822,10 @@ function AdminPanel({projects,stages,orders=[],onClose,lightMode,departments,upd
             <div>
               <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:12}}>
                 <div style={{fontSize:14,fontWeight:700,color:text}}>משתמשים ({users.length})</div>
-                <Btn color="var(--c-accent)" small onClick={()=>setAddMode(true)}>+ הוסף משתמש</Btn>
+                <div style={{display:"flex",gap:7,flexWrap:"wrap"}}>
+                  {onPilotReset&&<Btn color="#ef4444" small onClick={()=>{onClose();onPilotReset()}} title="מחיקת עובדי הדמו והנתונים שלהם לפני תחילת פיילוט">🧹 ניקוי לפיילוט</Btn>}
+                  <Btn color="var(--c-accent)" small onClick={()=>setAddMode(true)}>+ הוסף משתמש</Btn>
+                </div>
               </div>
               {addMode&&(
                 <div style={{background:lm?"#f7f8fa":"#0d1120",borderRadius:10,padding:16,marginBottom:12,border:`1px solid ${border}`}}>
@@ -7551,7 +7735,7 @@ function doExport(ctx){
   addSheet(wb,"סיכום כללי",["מדד","ערך"],sumRows,[30,26],null,"0F2942");
 
   // ── 1: פקודות עבודה ─────────────────────────────────────────────────────
-  const h1=['מספר פק"ע','P/N (מק"ט)','תיאור','פרויקט','סניף','חטיבה','מחלקות הסניף','סטטוס','כמות מוזמנת','סידוריים','נמסרו','% השלמה','מחיר ליחידה','שווי כולל','תאריך קבלה','יעד אספקה','ימים ליעד','שלבים','בלוק','זמן תקן ליח\' (דק\')','זמן מכירה ליח\' (דק\')','זמן תקן שנצבר (שע\')','זמן מכירה שנצבר (שע\')','זמן בפועל (שע\')','פער מול תקן (שע\')','עמידה בתקן %','פער מכירה (שע\')','ניצול %','תקלות פתוחות','תקלות סה"כ','חוסרים פתוחים'];
+  const h1=['מספר פק"ע','P/N (מק"ט)','תיאור','פרויקט','סניף','חטיבה','מחלקות הסניף','סטטוס','סטטוס פק"ע ב-Priority','מיקום בקו','הערת סטטוס','כמות מוזמנת','סידוריים','נמסרו','% השלמה','מחיר ליחידה','שווי כולל','תאריך קבלה','יעד אספקה','ימים ליעד','שלבים','בלוק','זמן תקן ליח\' (דק\')','זמן מכירה ליח\' (דק\')','זמן תקן שנצבר (שע\')','זמן מכירה שנצבר (שע\')','זמן בפועל (שע\')','פער מול תקן (שע\')','עמידה בתקן %','פער מכירה (שע\')','ניצול %','תקלות פתוחות','תקלות סה"כ','חוסרים פתוחים'];
   const r1=orders.map(o=>{
     const sers=o.serials||[],logs=byOrder.get(o.id)||[];
     const act=logs.reduce((s,w)=>s+Number(w.durationMin||0),0);
@@ -7567,6 +7751,9 @@ function doExport(ctx){
     const br=branchCode(o.branch);
     return[o.woNumber,o.pn||"",o.description||"",pMap.get(o.projectId)||"",br,branchName(br),
       deptsForBranch(departments,br).map(d=>d.name).join(", "),SL[o.status||"open"]||"פתוחה",
+      // The ERP's own wording beside the app's four statuses — this is what says
+      // why a תקועה is stuck, and what tells "שוחררה" from "הועבר לייצור".
+      o.erpStatus||"",(ST_PHASE[orderPhase(o)]||ST_PHASE.line).label,o.erpNote||"",
       Number(o.qty||0),sers.length,(o.deliveredSerials||[]).length,
       totalPairs>0?Math.round(pairs.size/totalPairs*100):0,
       Number(o.unitPrice||0),Number(o.unitPrice||0)*Number(o.qty||0),
@@ -7581,7 +7768,7 @@ function doExport(ctx){
   // Column positions are read off the header row rather than counted by hand, so
   // inserting a column cannot leave the colouring pointing at the wrong one.
   const c1st=h1.indexOf("סטטוס"),c1eff=[h1.indexOf("עמידה בתקן %"),h1.indexOf("ניצול %")];
-  addSheet(wb,"פקודות עבודה",h1,r1,[15,14,28,14,9,12,22,11,12,10,9,10,12,13,12,12,10,30,14,15,15,16,16,14,15,12,14,10,11,11,11],
+  addSheet(wb,"פקודות עבודה",h1,r1,[15,14,28,14,9,12,22,11,18,16,26,12,10,9,10,12,13,12,12,10,30,14,15,15,16,16,14,15,12,14,10,11,11,11],
     (ri,c,row)=>c===c1st?(row[c1st]==="הושלמה"?XL_OK:row[c1st]==="תקועה"?XL_BAD:row[c1st]==="חלקית"?XL_INFO:XL_WARN):(c1eff.includes(c)?effStyle(row[c]):null));
 
   // ── 2: סידוריים ─────────────────────────────────────────────────────────
@@ -7785,6 +7972,9 @@ function doExport(ctx){
   });
   const c13eff=h13.indexOf("יעילות %");
   addSheet(wb,"מחלקות",h13,r13,[20,18,14,20,13,10,10,13,13,10],(ri,c,row)=>c===c13eff?effStyle(row[c13eff]):null,"334155");
+  // The status dictionary travels with the report, so a column of "בעית כלי חסר"
+  // is readable by whoever opens the file rather than only inside the app.
+  addStatusSheet(wb);
 
   XLSX.writeFile(wb,"דוח_מלא_קו_ייצור_"+todays()+".xlsx");
 }
@@ -7801,6 +7991,23 @@ const TPL_SHORTS=['פק"ע','פריט','מק"ט רכיב','כמות חסרה','�
 // easier to state per stage — "twelve units cleared הלחמה" — so that is what the
 // template asks for and what the importer expands.
 const TPL_PROGRESS=['פק"ע','שלב','כמות שהושלמה'];
+// ── גיליון מילון הסטטוסים ─────────────────────────────────────────────────
+// The status column is the one field in a Priority export that nobody can read
+// off the file itself: "שוחררה", "ביצור קבמ" and 'בעית ח"ג חסר' all mean something
+// precise on the floor and nothing at all to a person holding the spreadsheet.
+// So every export and every template carries the dictionary with it — what each
+// status means, what the app turns it into, and where it puts the פק"ע relative
+// to the production line.
+function addStatusSheet(wb){
+  const rows=Object.entries(PRI_STATUS_INFO).map(([raw,v])=>[
+    raw,SL[v.st]||v.st,(ST_PHASE[v.phase]||{}).label||"",v.desc]);
+  rows.push(["","","",""]);
+  PHASE_ORDER.forEach(k=>rows.push(["— "+ST_PHASE[k].label+" —","","",ST_PHASE[k].hint]));
+  rows.push(["","","",""]);
+  rows.push(['סטטוס שאינו ברשימה',"—","—",'סטטוס שהוזן ב-Priority ואינו ברשימה הזו משויך אוטומטית לפי הניסוח שלו (״חוסר״/״בעיה״ ← תקועה, ״נסגרה״/COC ← הושלמה, ״שוחררה״/״פתוחה״ ← טרם נכנסה לייצור), ומסומן באפליקציה בסימן ❓']);
+  addSheet(wb,'מילון סטטוס פק"ע',['סטטוס פק"ע ב-Priority',"נכנס לאפליקציה כ־","מיקום בקו הייצור","מה זה אומר"],
+    rows,[24,14,20,100],(ri,c,row)=>String(row[0]||"").startsWith("—")?xlTag("1E40AF","DBEAFE"):null,"334155");
+}
 function doTemplate(ctx){
   const {projects=[],stages=[],stageBlocks=[]}=ctx||{};
   const wb=XLSX.utils.book_new();
@@ -7822,8 +8029,9 @@ function doTemplate(ctx){
     ["גיליון ״התקדמות״ ללא סידוריים",'פק"ע שאינה מנוהלת סיריאלית לא צריכה סידוריים — הכמות בשורה נרשמת כחתימה לפי כמות'],
     ["S/N בגיליון תקלות",'אפשר להשאיר ריק — התקלה תירשם ברמת הפק"ע ולא ברמת יחידה'],
     ["כן / לא","עמודות ״נמסר״ ו״התקבל״ מקבלות: כן / לא (או TRUE / FALSE)"],
+    ['מילון סטטוס פק"ע','גיליון נפרד בקובץ הזה — מה כל סטטוס של Priority אומר, לאיזה סטטוס באפליקציה הוא נכנס, ואם הפק"ע כבר נכנסה לקו הייצור'],
     ["",""],
-    ["שים לב","ייבוא במצב ״החלף הכל״ מוחק את כל הפקודות הקיימות. במצב ״הוסף לקיימים״ הן נוספות לצידן"]
+    ["שים לב",'ייבוא במצב ״החלף הכל״ מוחק את כל הפקודות הקיימות. במצב ״עדכן על הקיים״ פק"ע שכבר קיימת מזוהה לפי מספר הפק"ע ומתעדכנת במקום — בלי כפילויות, ורק מה שהשתנה נכתב']
   ];
   // Highlighted: the opening line and the closing warning — by position in the
   // array, so adding a row in the middle can never light up the wrong one.
@@ -7861,6 +8069,7 @@ function doTemplate(ctx){
     ["פתוחה","סגורה"][i]||"",["כן","לא"][i]||"",(stageBlocks||[])[i]?.name||""]);
   addSheet(wb,"רשימות עזר",["פרויקטים","שלבים",'סטטוס פק"ע',"סוג תקלה","חומרת תקלה","סטטוס תקלה","כן/לא","בלוקים"],
     helper,[20,22,14,14,14,14,10,20],null,"334155");
+  addStatusSheet(wb);
 
   XLSX.writeFile(wb,"תבנית_ייבוא_נתונים_קו_ייצור.xlsx");
 }
@@ -7914,28 +8123,151 @@ const PRI_H={wo:'מספר פק"ע',pn:'מק"ט',desc:'תיאור מוצר',branc
   seq:'שלב בפק"ע',seqAlt:'שלה בפק"ע',op:'פעולה',
   opDesc:'תאור פעולה',wc:'מרכז עבודה',reported:'כמות מדווחת',remain:'יתרה לבצוע',
   stdPn:"ז.תקן ליח' בדק' למקט",stdWo:"ז.תקן ליח' בדק' בפקע",status:'סטטוס פק"ע'};
-// Priority's own סטטוס פק"ע values, folded onto the four statuses the app knows.
-const PRI_STATUS={
-  "פתוחה":"open","הודפסה":"open","שוחררה":"open","ממתין ליצור":"open","קדם יצור":"open",
-  "הועבר לייצור":"open","מאושרת לקיוט":"open",
-  "בתהליך ייצור":"partial","דווח ראשון":"partial","חיווט":"partial","בתהליך סגירה":"partial",
-  "בתהליך בקורת":"partial","בתהליך קיוט":"partial","בקרת יצור":"partial","סיום יצור":"partial",
-  "ביקורת ראשונ":"partial","ביקורת חלקית":"partial","ביקורת סופית":"partial","תהליך מבקר":"partial",
-  "ממתין למבקר":"partial","ממתין לאריזה":"partial","אריזה":"partial","ממתין א.FAI":"partial",
-  "ביצור קבמ":"partial",'מוכן לקב"מ':"partial",
-  "פקע COC":"complete","נסגרה":"complete",
-  "בעיה הנדסית":"blocked",'בעית ח"ג חסר':"blocked","בעית כלי חסר":"blocked","חוסרים ביצור":"blocked",
-  "חוסר נגדי":"blocked","הוקפאה":"blocked","הוחזר לתיקון":"blocked","בטיפול לקוח":"blocked"};
+// A free-text reason beside the status — not every Priority report carries one,
+// and the header it carries it under differs between reports, so every spelling
+// seen so far is tried. Whatever it holds is shown on a stuck פק"ע next to the
+// status that stopped it.
+const PRI_NOTE_H=["סיבת עיכוב","סיבת העיכוב","סיבת תקיעה","סיבת התקיעה","סיבה","סיבת עצירה",
+  "הערת סטטוס",'הערות פק"ע',"הערות","הערה","פירוט","תיאור סטטוס","status note","remark","remarks"];
+// ── סטטוס פק"ע של Priority — המילון המלא ──────────────────────────────────
+// Every value Priority's סטטוס פק"ע column carries, written out in full: what it
+// actually means on the floor, which of the app's four statuses it folds onto,
+// and — the part those four cannot say — where the פק"ע stands relative to the
+// production line itself.
+//
+// The phase is the distinction a floor manager asks for first and the status
+// hides: "פתוחה" and "שוחררה" are both open, and both mean nobody has touched
+// the work — the פק"ע is on paper, not on the line. Lumping them together with
+// "הועבר לייצור" (also open, but already in the queue) made the open pile
+// unreadable, so the phase is carried beside the status and filtered on its own.
+//
+//   pre    על הנייר בלבד — טרם נכנסה לקו הייצור
+//   line   בקו — עובדים עליה, או שהיא ממתינה לתחנה הבאה
+//   stuck  נעצרה מסיבה מזוהה; הסטטוס עצמו הוא הסיבה
+//   done   יצאה מהקו
+const ST_PHASE={
+  pre:{key:"pre",label:"טרם נכנסה לייצור",icon:"🚧",color:"#f59e0b",
+    hint:'הפק"ע קיימת ב-ERP אך עוד לא נכנסה לקו הייצור — נפתחה, הודפסה, שוחררה או ממתינה ליצור. אין עליה עבודה לדווח, והיא לא אמורה להיספר כ"בתהליך".'},
+  line:{key:"line",label:"בקו הייצור",icon:"🏭",color:"#3b82f6",
+    hint:'הפק"ע נמצאת בתוך קו הייצור — מבוצעת עליה עבודה או שהיא ממתינה לתחנה הבאה, לביקורת או לאריזה.'},
+  stuck:{key:"stuck",label:"עצורה",icon:"⛔",color:"#ef4444",
+    hint:'הייצור נעצר מסיבה מזוהה — חוסר, בעיה הנדסית, הקפאה או המתנה ללקוח. הסטטוס מה-ERP הוא סיבת התקיעה.'},
+  done:{key:"done",label:"יצאה מהקו",icon:"✅",color:"#10b981",
+    hint:'הפק"ע הסתיימה — קיבלה COC, נסגרה או בוטלה. לא צפויה עליה עוד עבודה.'}
+};
+const PHASE_ORDER=["pre","line","stuck","done"];
+// status text (as Priority writes it) → {st: app status, phase, desc}
+const PRI_STATUS_INFO={
+  // ── טרם נכנסה לקו הייצור ────────────────────────────────────────────────
+  "פתוחה":{st:"open",phase:"pre",
+    desc:'הפק"ע נפתחה ב-ERP ועדיין לא שוחררה לייצור. אין הקצאת חומרים פעילה, אף פעולה לא נפתחה לדיווח, והיא לא נמצאת בקו.'},
+  "הודפסה":{st:"open",phase:"pre",
+    desc:'תיק העבודה של הפק"ע הודפס. היא מוכנה לשחרור אך טרם נכנסה לקו הייצור.'},
+  "שוחררה":{st:"open",phase:"pre",
+    desc:'הפק"ע שוחררה לייצור והחומרים הוקצו — אך אף פעולה עדיין לא בוצעה. היא ממתינה בתור לתחנה הראשונה ולא נכנסה בפועל לקו.'},
+  "ממתין ליצור":{st:"open",phase:"pre",
+    desc:'כל התנאים לייצור מולאו והפק"ע ממתינה בתור. עדיין לא התחילה.'},
+  "קדם יצור":{st:"open",phase:"pre",
+    desc:'שלב ההכנה שלפני הייצור — תיק עבודה, חומרים, כלים ותוכניות. הפק"ע עוד לא בקו.'},
+  // ── בקו הייצור ──────────────────────────────────────────────────────────
+  "הועבר לייצור":{st:"open",phase:"line",
+    desc:'הפק"ע הועברה רשמית לרצפת הייצור ונמצאת בתור של הקו, אך טרם נקלט עליה דיווח ראשון.'},
+  "מאושרת לקיוט":{st:"open",phase:"line",
+    desc:'הפק"ע אושרה לליקוט ערכת החומרים (Kitting). התהליך התחיל, לפני העבודה עצמה.'},
+  "בתהליך קיוט":{st:"partial",phase:"line",
+    desc:'ערכת החומרים של הפק"ע מלוקטת כעת במחסן.'},
+  "בתהליך ייצור":{st:"partial",phase:"line",
+    desc:'העבודה על הפק"ע רצה בפועל — דווחו עליה פעולות ייצור.'},
+  "דווח ראשון":{st:"partial",phase:"line",
+    desc:'נקלט הדיווח הראשון על הפק"ע — הפעולה הראשונה במסלול בוצעה.'},
+  "חיווט":{st:"partial",phase:"line",
+    desc:'הפק"ע נמצאת בשלב החיווט.'},
+  "ביצור קבמ":{st:"partial",phase:"line",
+    desc:'הפק"ע בייצור בקו הקב"מ (קבלן משנה / קו ייעודי).'},
+  'מוכן לקב"מ':{st:"partial",phase:"line",
+    desc:'החלק הפנימי הסתיים והפק"ע ממתינה להעברה לקב"מ.'},
+  "בקרת יצור":{st:"partial",phase:"line",
+    desc:'בקרת ייצור — התאמת הביצוע לתוכנית נבדקת לפני המשך.'},
+  "סיום יצור":{st:"partial",phase:"line",
+    desc:'פעולות הייצור הסתיימו. הפק"ע ממתינה לביקורת, לאריזה או לסגירה — עדיין בקו.'},
+  "בתהליך בקורת":{st:"partial",phase:"line",
+    desc:'הפק"ע נמצאת בביקורת איכות.'},
+  "ביקורת ראשונ":{st:"partial",phase:"line",
+    desc:'ביקורת ראשונה (ביקורת פתיחה / First Article) מתבצעת על הפק"ע.'},
+  "ביקורת חלקית":{st:"partial",phase:"line",
+    desc:'חלק מהיחידות בפק"ע עברו ביקורת, השאר עדיין ממתינות.'},
+  "ביקורת סופית":{st:"partial",phase:"line",
+    desc:'הפק"ע בביקורת הסופית שלפני השחרור והאריזה.'},
+  "תהליך מבקר":{st:"partial",phase:"line",
+    desc:'הפק"ע נמצאת אצל המבקר.'},
+  "ממתין למבקר":{st:"partial",phase:"line",
+    desc:'הפק"ע סיימה את השלב הקודם וממתינה בתור למבקר — זמן המתנה, לא זמן עבודה.'},
+  "ממתין א.FAI":{st:"partial",phase:"line",
+    desc:'הפק"ע ממתינה לאישור FAI (בדיקת פריט ראשון) לפני שאפשר להמשיך.'},
+  "ממתין לאריזה":{st:"partial",phase:"line",
+    desc:'הפק"ע גמורה מבחינת ייצור וממתינה בתור לאריזה.'},
+  "אריזה":{st:"partial",phase:"line",
+    desc:'הפק"ע נארזת למשלוח.'},
+  "בתהליך סגירה":{st:"partial",phase:"line",
+    desc:'הפק"ע בתהליך סגירה ב-ERP — הדיווחים נסגרים והעלויות נאספות.'},
+  // ── עצורה ───────────────────────────────────────────────────────────────
+  "בעיה הנדסית":{st:"blocked",phase:"stuck",
+    desc:'הייצור נעצר בגלל בעיה הנדסית — שרטוט, תוכנית, הוראת עבודה או תקלה טכנית שדורשת החלטה של הנדסה.'},
+  'בעית ח"ג חסר':{st:"blocked",phase:"stuck",
+    desc:'חסר חומר גלם. הפק"ע לא יכולה להתקדם עד שהחומר יגיע.'},
+  "בעית כלי חסר":{st:"blocked",phase:"stuck",
+    desc:'חסר כלי או ציוד ייעודי (Tooling, ג\'יג, מכשור) שנדרש לפעולה.'},
+  "חוסרים ביצור":{st:"blocked",phase:"stuck",
+    desc:'חסרים רכיבים בקו הייצור עצמו — הפק"ע נעצרה באמצע המסלול.'},
+  "חוסר נגדי":{st:"blocked",phase:"stuck",
+    desc:'רכיב של הפק"ע נלקח לטובת פק"ע אחרת (חוסר נגדי), והיא ממתינה להשלמה.'},
+  "הוקפאה":{st:"blocked",phase:"stuck",
+    desc:'הפק"ע הוקפאה בהחלטת ניהול — שינוי עדיפויות, המתנה ללקוח או לתקציב.'},
+  "הוחזר לתיקון":{st:"blocked",phase:"stuck",
+    desc:'הפק"ע חזרה לתיקון אחרי שנפסלה בביקורת או בבדיקה.'},
+  "בטיפול לקוח":{st:"blocked",phase:"stuck",
+    desc:'הפק"ע ממתינה להחלטה, לאישור או לחומר מהלקוח.'},
+  // ── יצאה מהקו ───────────────────────────────────────────────────────────
+  "פקע COC":{st:"complete",phase:"done",
+    desc:'הפק"ע קיבלה COC (תעודת התאמה) — סופקה ואושרה. פק"ע גמורה.'},
+  "נסגרה":{st:"complete",phase:"done",
+    desc:'הפק"ע נסגרה ב-ERP. לא צפויה עליה עוד עבודה.'},
+  "בוטלה":{st:"complete",phase:"done",
+    desc:'הפק"ע בוטלה ולא תיוצר. היא יוצאת מהקו בלי אספקה.'}
+};
 // Priority statuses get renamed and added to over time, so an unfamiliar one is
-// still placed sensibly instead of silently landing on "open".
+// still placed sensibly instead of silently landing on "open" — and the guess
+// says which phase it belongs to as well, because that is what the filters read.
 function priStatus(raw){
   const s=String(raw==null?"":raw).trim();
-  if(!s)return{st:"open",guessed:false};
-  if(PRI_STATUS[s])return{st:PRI_STATUS[s],guessed:false};
-  if(/בעי|חוסר|חסר|הוקפא|מוקפא|תקוע|עיכוב/.test(s))return{st:"blocked",guessed:true};
-  if(/coc|נסגר|הושלמ|בוטל/i.test(s))return{st:"complete",guessed:true};
-  if(/ממתין ליצור|שוחרר|הודפס|פתוח|טרם/.test(s))return{st:"open",guessed:true};
-  return{st:"partial",guessed:true};
+  const out=(st,phase,guessed,desc)=>({st,phase,guessed,desc:desc||"",raw:s});
+  if(!s)return out("open","pre",false,'הקובץ לא נשא סטטוס פק"ע לשורה הזו — היא נכנסת כפתוחה שטרם נכנסה לייצור.');
+  const hit=PRI_STATUS_INFO[s];
+  if(hit)return out(hit.st,hit.phase,false,hit.desc);
+  const g='הסטטוס הזה אינו ברשימת הסטטוסים המוכרים של Priority — הוא שויך לפי הניסוח שלו. אפשר לעדכן את הפק"ע ידנית אם השיוך שגוי.';
+  if(/בעי|חוסר|חסר|הוקפא|מוקפא|תקוע|עיכוב/.test(s))return out("blocked","stuck",true,g);
+  if(/coc|נסגר|הושלמ|בוטל/i.test(s))return out("complete","done",true,g);
+  if(/ממתין ליצור|שוחרר|הודפס|פתוח|טרם/.test(s))return out("open","pre",true,g);
+  return out("partial","line",true,g);
+}
+// The phase a פק"ע is in, from whatever the ERP said about it. Orders imported
+// before the raw status was kept have nothing to read, so the app status stands
+// in: "פתוחה" there means nothing was reported, which is the pre-line case.
+function orderPhase(order){
+  const raw=String(order?.erpStatus||"").trim();
+  if(raw)return priStatus(raw).phase;
+  const st=order?.status||"open";
+  return st==="blocked"?"stuck":st==="complete"?"done":st==="partial"?"line":"pre";
+}
+// What the ERP said, spelled out — the label, its explanation, and the free-text
+// note the file carried beside it (when it did). This is what the פק"ע card shows
+// under "סיבת התקיעה" for a blocked order.
+function orderErpInfo(order){
+  const raw=String(order?.erpStatus||"").trim();
+  const note=String(order?.erpNote||"").trim();
+  if(!raw)return note?{raw:"",desc:"",note,guessed:false}:null;
+  const i=priStatus(raw);
+  return{raw,desc:i.desc,note,guessed:i.guessed};
 }
 const priNum=v=>{const n=Number(String(v==null?"":v).replace(/[^\d.\-]/g,""));return isFinite(n)?n:0};
 // Priority writes a literal 0 into its code columns (סניף / פרויקט) for "none".
@@ -7986,9 +8318,14 @@ function priScan(rows,serialRows){
         project:priTxt(xlGet(r,PRI_H.project)),branch:branchCode(xlGet(r,PRI_H.branch)),
         qty:priNum(xlGet(r,PRI_H.qty)),price:priNum(xlGet(r,PRI_H.price)),
         release:xlDate(xlGet(r,PRI_H.release)),endDate:xlDate(xlGet(r,PRI_H.endDate)),
-        statusRaw:String(xlGet(r,PRI_H.status)||"").trim(),row:i+2,ops:[],sns:[]};
+        statusRaw:String(xlGet(r,PRI_H.status)||"").trim(),
+        note:String(xlGet(r,...PRI_NOTE_H)||"").trim(),row:i+2,ops:[],sns:[]};
       wos.set(wo,o);
     }
+    // The note lives on the פק"ע, but the export repeats the header fields on
+    // every operation row and only some of them carry it — so the first row that
+    // has one wins rather than only the first row of the group.
+    if(!o.note){const n=String(xlGet(r,...PRI_NOTE_H)||"").trim();if(n)o.note=n}
     const name=String(xlGet(r,PRI_H.opDesc)||"").trim();
     const code=String(xlGet(r,PRI_H.op)||"").trim();
     const wc=String(xlGet(r,PRI_H.wc)||"").trim();
@@ -8216,6 +8553,9 @@ function priBuild(scan,ctx,map,opts){
 
     orders.push({id:oid,woNumber:w.wo,pn:w.pn,description:w.desc,qty:w.qty,unitPrice:w.price,
       projectId:projectOf(w.project),branch:branchCode(w.branch),receivedDate:w.release,targetDate:w.endDate,status:s.st,
+      // The ERP's own wording, kept. The four app statuses cannot tell "שוחררה"
+      // from "הועבר לייצור", nor say *why* a פק"ע is stuck — this can.
+      erpStatus:w.statusRaw||"",erpNote:w.note||"",
       stageIds:ids,serials,shortages:[],defects:[],deliveredSerials:[],
       // Preview only — stripped before the order reaches the app's state.
       _pri:{statusRaw:w.statusRaw,project:w.project,ops:w.ops.length,
@@ -8275,7 +8615,226 @@ function priBuild(scan,ctx,map,opts){
       serials:serialTotal,serialWos:fromSheet,serialFilled,sheetSerials:(scan.serials||{}).rows||0,
       defects:0,shortages:0,logs:logs.length,progWos,progQtyWos,progNoSerials,
       byStatus:orders.reduce((m,o)=>{m[o.status]=(m[o.status]||0)+1;return m},{}),
+      byPhase:orders.reduce((m,o)=>{const p=orderPhase(o);m[p]=(m[p]||0)+1;return m},{}),
+      // Every distinct סטטוס פק"ע the file actually carried, with its count — the
+      // legend the import screen prints so nobody has to guess what a status meant.
+      byRaw:(()=>{const m=new Map();orders.forEach(o=>{const k=String(o.erpStatus||"").trim()||"(ריק)";
+        const e=m.get(k)||{raw:k,n:0,st:o.status,phase:orderPhase(o)};e.n++;m.set(k,e)});
+        return[...m.values()].sort((a,b)=>PHASE_ORDER.indexOf(a.phase)-PHASE_ORDER.indexOf(b.phase)||b.n-a.n)})(),
       newStages:newStages.length,newProjects:newProjects.length,stds:stds.length,closedSkipped}};
+}
+// ── ייבוא חוזר: עדכון במקום כפילות ────────────────────────────────────────
+// The Priority report is a snapshot of everything currently open, so the same
+// פק"ע comes back in every file that is pulled. "הוסף לקיימים" used to append it
+// a second time, and the list filled with pairs of the same order whose route,
+// serial numbers and progress were split between two rows.
+//
+// It now matches on מספר פק"ע and updates the row that is already there. Who owns
+// what is the whole of the rule:
+//
+//   the ERP owns   סטטוס · כמות · מחיר · פרויקט · סניף · תאריכים · מסלול הפעולות
+//   the app owns   הסידוריים שעבדו עליהם · תקלות · חוסרים · אספקות · דיווחי העובדים
+//
+// A פק"ע whose ERP fields and reported progress are identical to what is already
+// stored is left alone entirely — not rewritten, not re-synced — which is what
+// makes a monthly file of thousands of orders land as the handful that moved.
+const MERGE_FIELDS=[
+  ["status","סטטוס"],["erpStatus",'סטטוס פק"ע'],["erpNote","הערת סטטוס"],
+  ["qty","כמות"],["unitPrice","מחיר ליחידה"],["projectId","פרויקט"],["branch","סניף"],
+  ["receivedDate","תאריך שחרור"],["targetDate","תאריך סיום ייצור"],
+  ["description","תיאור"],["pn",'מק"ט']
+];
+const woKey=w=>String(w==null?"":w).trim().toLowerCase();
+const snKey=s=>String(s==null?"":s).trim().toLowerCase();
+// stageId → units, from a set of import logs. Per-unit records count one each,
+// a quantity signature carries its count.
+function progPerStage(logs){
+  const m=new Map();
+  (logs||[]).forEach(w=>{if(!w.stageId)return;m.set(w.stageId,(m.get(w.stageId)||0)+(isQtyLog(w)?(Number(w.bulkCount)||0):1))});
+  return m;
+}
+const progSig=m=>[...m.entries()].filter(([,n])=>n>0).sort((a,b)=>a[0]<b[0]?-1:1).map(([k,n])=>k+":"+n).join("|");
+// The import's progress records for one order, drawn against the serials that
+// order actually ends up with. Regenerated rather than re-pointed, because the
+// order the file describes and the order already stored can differ in whether
+// they are managed serially at all.
+function priRelog(order,perStage,stamp){
+  const out=[],serials=order.serials||[],cap=serials.length||(Number(order.qty)||0);
+  if(!cap)return out;
+  let k=0;
+  perStage.forEach((n0,sid)=>{
+    const n=Math.min(Math.floor(n0)||0,cap);
+    if(!(n>0))return;
+    if(!serials.length){
+      out.push({id:`${order.id}q${k++}`,userId:PRI_LOG_USER,userName:PRI_LOG_NAME,
+        serialId:null,serialSn:null,stageId:sid,orderId:order.id,
+        startTime:stamp,endTime:stamp,completed:true,
+        durationMin:0,paused:false,pauseStart:null,totalPauseMin:0,pauseLog:[],
+        bulk:true,bulkGroupId:null,bulkCount:n});
+      return;
+    }
+    for(let u=0;u<n;u++){
+      const sr=serials[u];
+      out.push({id:`${order.id}p${k++}`,userId:PRI_LOG_USER,userName:PRI_LOG_NAME,
+        serialId:sr.id,serialSn:sr.sn,stageId:sid,orderId:order.id,
+        startTime:stamp,endTime:stamp,completed:true,
+        durationMin:0,paused:false,pauseStart:null,totalPauseMin:0,pauseLog:[],
+        bulk:false,bulkGroupId:null,bulkCount:null});
+    }
+  });
+  return out;
+}
+// Plans a "הוסף לקיימים" run without applying it: which orders are new, which
+// change and in what, which are already up to date, and the exact logs to write
+// and to drop. `built` is what priBuild produced; `existing` the app's orders;
+// `workLogs` everything reported so far, app and ERP alike.
+function priMergePlan(built,existing,workLogs){
+  const byWo=new Map();
+  (existing||[]).forEach(o=>{const k=woKey(o.woNumber);if(k&&!byWo.has(k))byWo.set(k,o)});
+  const logsByOrder=new Map();
+  (built.logs||[]).forEach(w=>{const a=logsByOrder.get(w.orderId);a?a.push(w):logsByOrder.set(w.orderId,[w])});
+  // Only the ERP's own records are replaced on a re-import — a person's reported
+  // work is never touched by a file.
+  const erpByOrder=new Map();
+  (workLogs||[]).forEach(w=>{if(w.userId!==PRI_LOG_USER)return;const a=erpByOrder.get(w.orderId);a?a.push(w):erpByOrder.set(w.orderId,[w])});
+
+  const added=[],updated=[],changes=[],logs=[],dropLogIds=[];
+  let unchanged=0,newSerials=0,progressChanged=0;
+
+  (built.orders||[]).forEach(b=>{
+    const {_pri,...bo}=b;
+    const prev=byWo.get(woKey(bo.woNumber));
+    const bLogs=logsByOrder.get(b.id)||[];
+    const stamp=(bLogs[0]&&bLogs[0].startTime)||nowISO();
+    const perStage=progPerStage(bLogs);
+    if(!prev){
+      added.push(bo);
+      logs.push(...bLogs);
+      return;
+    }
+    // ── the row already exists: update it in place ────────────────────────
+    const fields=[];
+    const next={...prev};
+    MERGE_FIELDS.forEach(([k,label])=>{
+      const v=bo[k];
+      // A field the file left empty is not an instruction to erase what is stored.
+      if(v===""||v===null||v===undefined)return;
+      const a=k==="qty"||k==="unitPrice"?Number(prev[k]||0):String(prev[k]||"");
+      const c=k==="qty"||k==="unitPrice"?Number(v||0):String(v||"");
+      if(a===c)return;
+      next[k]=v;fields.push(label);
+    });
+    // A reason belongs to the stoppage that caused it. Once the ERP says the פק"ע
+    // is moving again, last month's "ממתין לנגדים מהספק" is not a fact any more —
+    // it is a stale line on the card that reads as current. It goes with the
+    // stoppage, unless the file supplied a new one.
+    if(prev.erpNote&&!bo.erpNote&&orderPhase(prev)==="stuck"&&orderPhase(next)!=="stuck"){
+      next.erpNote="";fields.push("סיבת התקיעה נוקתה");
+    }
+    // The route belongs to the ERP, but an empty one in the file means "no
+    // operation was mapped to a stage", not "this פק"ע has no route".
+    if((bo.stageIds||[]).length&&String((prev.stageIds||[]).join(","))!==String(bo.stageIds.join(","))){
+      next.stageIds=bo.stageIds;fields.push("מסלול");
+    }
+    // Serial numbers are added, never removed — a unit somebody already reported
+    // work on does not disappear because this month's report stopped listing it.
+    const have=new Map((prev.serials||[]).map(sr=>[snKey(sr.sn),sr]));
+    const addSn=(bo.serials||[]).filter(sr=>sr.sn&&!have.has(snKey(sr.sn)));
+    if(addSn.length){
+      next.serials=[...(prev.serials||[]),...addSn.map((sr,i)=>({id:`${prev.id}n${Date.now().toString(36)}${i}`,sn:sr.sn,createdAt:nowISO()}))];
+      fields.push(`${addSn.length} סידוריים חדשים`);
+      newSerials+=addSn.length;
+    }
+    // Defects and shortages a filled-in template carries are added, never used to
+    // wipe what the floor already recorded — matched on their own wording so the
+    // same row in next month's file does not become a second open תקלה.
+    const dKey=d=>[String(d.title||"").trim(),String(d.discoveredDate||"").slice(0,10)].join("|");
+    const shKey=x=>[String(x.item||"").trim(),String(x.sku||"").trim()].join("|");
+    const addDef=(bo.defects||[]).filter(d=>!(prev.defects||[]).some(p2=>dKey(p2)===dKey(d)));
+    if(addDef.length){next.defects=[...(prev.defects||[]),...addDef];fields.push(`${addDef.length} תקלות`)}
+    const addSh=(bo.shortages||[]).filter(x=>!(prev.shortages||[]).some(p2=>shKey(p2)===shKey(x)));
+    if(addSh.length){next.shortages=[...(prev.shortages||[]),...addSh];fields.push(`${addSh.length} חוסרים`)}
+    // Progress: compare what the file now says against what the last import left.
+    const prevErp=erpByOrder.get(prev.id)||[];
+    const sigNew=progSig(perStage),sigOld=progSig(progPerStage(prevErp));
+    const progMoved=sigNew!==sigOld;
+    if(!fields.length&&!progMoved){unchanged++;return}
+    if(progMoved||next.serials!==prev.serials){
+      // Redrawn against the serials this order ends up with, so a פק"ע that
+      // gained serial numbers stops carrying its progress as a bare quantity.
+      if(prevErp.length)dropLogIds.push(...prevErp.map(w=>w.id));
+      logs.push(...priRelog(next,perStage,stamp));
+      if(progMoved){progressChanged++;if(!fields.includes("התקדמות"))fields.push("התקדמות")}
+    }
+    updated.push(next);
+    if(changes.length<400)changes.push({wo:next.woNumber,fields,
+      from:String(prev.erpStatus||SL[prev.status||"open"]||""),to:String(next.erpStatus||SL[next.status||"open"]||"")});
+  });
+  return{added,updated,unchanged,changes,logs,dropLogIds,newSerials,progressChanged};
+}
+// ── כפילויות שכבר נוצרו ───────────────────────────────────────────────────
+// Before the import learned to update in place, every "הוסף לקיימים" run added
+// the whole report again — so a פק"ע that appeared in three monthly files is now
+// three rows, each with its own serial numbers and its own slice of the reported
+// work. Folding them back together is not a delete: the rows that go have to hand
+// their units, their תקלות, their חוסרים and above all their דיווחי עבודה to the
+// row that stays, or the progress leaves with them.
+//
+// The row that stays is the one carrying the most reported work. Serial numbers
+// are matched by S/N across the duplicates, so a unit that exists twice under two
+// ids becomes one unit and both rows' logs point at it.
+function dupMergePlan(orders,workLogs){
+  const byWo=new Map();
+  (orders||[]).forEach(o=>{const k=woKey(o.woNumber);if(!k)return;const a=byWo.get(k);a?a.push(o):byWo.set(k,[o])});
+  const logsByOrder=new Map();
+  (workLogs||[]).forEach(w=>{if(!w.orderId)return;const a=logsByOrder.get(w.orderId);a?a.push(w):logsByOrder.set(w.orderId,[w])});
+  const keepers=[],dropIds=[],movedLogs=[],dropLogIds=[],groups=[];
+  byWo.forEach(rows=>{
+    if(rows.length<2)return;
+    const score=o=>(logsByOrder.get(o.id)||[]).length*1000+(o.serials||[]).length;
+    const keep={...rows.slice().sort((a,b)=>score(b)-score(a))[0]};
+    const others=rows.filter(o=>o.id!==keep.id);
+    const bySn=new Map((keep.serials||[]).map(sr=>[snKey(sr.sn),sr]));
+    const serials=[...(keep.serials||[])];
+    const defects=[...(keep.defects||[])],shortages=[...(keep.shortages||[])];
+    const delivered=new Set(keep.deliveredSerials||[]);
+    // What the keeper already holds from an import, so the same stage is not
+    // counted twice when the duplicate's copy of it arrives.
+    const erpSeen=new Set((logsByOrder.get(keep.id)||[]).filter(w=>w.userId===PRI_LOG_USER)
+      .map(w=>w.serialId?`s|${w.serialId}|${w.stageId}`:`q|${w.stageId}`));
+    let addedSerials=0,moved=0,dropped=0;
+    others.forEach(o=>{
+      const remap=new Map();
+      (o.serials||[]).forEach(sr=>{
+        const hit=bySn.get(snKey(sr.sn));
+        if(hit){remap.set(sr.id,hit.id);return}
+        serials.push(sr);bySn.set(snKey(sr.sn),sr);addedSerials++;
+      });
+      (o.defects||[]).forEach(d=>{if(!defects.some(x=>x.id===d.id))defects.push(d)});
+      (o.shortages||[]).forEach(x=>{if(!shortages.some(y=>y.id===x.id))shortages.push(x)});
+      (o.deliveredSerials||[]).forEach(id=>delivered.add(remap.get(id)||id));
+      (logsByOrder.get(o.id)||[]).forEach(w=>{
+        const sid=w.serialId?(remap.get(w.serialId)||w.serialId):null;
+        // The ERP's progress is a count, not an event: the same stage arriving
+        // from two copies of the same פק"ע is one fact stated twice.
+        if(w.userId===PRI_LOG_USER){
+          const k2=sid?`s|${sid}|${w.stageId}`:`q|${w.stageId}`;
+          if(erpSeen.has(k2)){dropLogIds.push(w.id);dropped++;return}
+          erpSeen.add(k2);
+        }
+        movedLogs.push({...w,orderId:keep.id,serialId:sid});moved++;
+      });
+      dropIds.push(o.id);
+    });
+    // A duplicate that was imported later usually carries the newer status.
+    const newest=rows.reduce((a,b)=>(String(b.erpStatus||"")&&!String(a.erpStatus||""))?b:a,keep);
+    if(newest!==keep&&newest.erpStatus){keep.status=newest.status;keep.erpStatus=newest.erpStatus;keep.erpNote=newest.erpNote||keep.erpNote}
+    keep.serials=serials;keep.defects=defects;keep.shortages=shortages;keep.deliveredSerials=[...delivered];
+    keepers.push(keep);
+    groups.push({wo:keep.woNumber,rows:rows.length,addedSerials,moved,dropped});
+  });
+  groups.sort((a,b)=>b.rows-a.rows);
+  return{keepers,dropIds,movedLogs,dropLogIds,groups};
 }
 const XL_STAT_IN={"פתוחה":"open","פתוח":"open","open":"open","חלקית":"partial","חלקי":"partial","partial":"partial",
   "הושלמה":"complete","הושלם":"complete","סגורה":"complete","complete":"complete","תקועה":"blocked","חסומה":"blocked","blocked":"blocked"};
@@ -8459,7 +9018,7 @@ const ChkOpt=({checked,onChange,label,hint,color="#10b981"})=>(
   </label>
 );
 
-function ExcelTab({orders,projects,stages,stageBlocks,workLogs,users,customTasks,dailyPlans,departments,pnStandards,updO,updP,updS,importPnStds,importWorkLogs,canImport}){
+function ExcelTab({orders,projects,stages,stageBlocks,workLogs,users,customTasks,dailyPlans,departments,pnStandards,updO,updP,updS,importPnStds,importWorkLogs,mergeDuplicates,canImport}){
   const {toast}=useToast();
   const {currentUser}=useAuth();
   // Warm the Excel library while the user is still reading the screen, so the
@@ -8478,9 +9037,20 @@ function ExcelTab({orders,projects,stages,stageBlocks,workLogs,users,customTasks
   // Now everything in the file comes in, and dropping the closed ones is a choice.
   const [priOpts,setPriOpts]=useState({onlyOpen:false,makeStages:true,makeProjects:true,importStd:true,fillSerials:false,serialMax:100,importProgress:true});
   const [showMap,setShowMap]=useState(false);const[mapQ,setMapQ]=useState("");
+  // The status legend is long by design — it is the full dictionary — so it opens
+  // on demand rather than pushing the import controls off the screen.
+  const [showLegend,setShowLegend]=useState(false);
+  const [showDiff,setShowDiff]=useState(false);
   const setOpt=(k,v)=>setPriOpts(p=>({...p,[k]:v}));
   const priRes=useMemo(()=>pri?priBuild(pri.scan,{projects,stages,pnStandards},priMap,priOpts):null,
     [pri,priMap,priOpts,projects,stages,pnStandards]);
+  // What "הוסף לקיימים" would actually do, worked out before anybody presses it:
+  // which פק"ע are new, which moved and in what, and which the file repeats
+  // unchanged. Shown on the screen and then applied as-is.
+  const mergePlan=useMemo(()=>{
+    const built=priRes||res;
+    return(mode==="merge"&&built&&built.orders)?priMergePlan(built,orders,workLogs):null;
+  },[mode,priRes,res,orders,workLogs]);
   const cur=priRes||res;
 
   const handleFile=file=>{if(!file)return;loadXLSX().catch(()=>{toast(XLSX_LOAD_ERR,"error");return null}).then(x=>{if(!x)return;doImport(file,{projects,stages},(data,err)=>{
@@ -8511,16 +9081,26 @@ function ExcelTab({orders,projects,stages,stageBlocks,workLogs,users,customTasks
     updO(prev=>mode==="replace"?list:[...prev,...list]);
     return gone;
   };
+  // "הוסף לקיימים" for a Priority file: the plan decides per פק"ע whether it is
+  // new, changed or already up to date, and only the first two are written.
+  const commitMerge=plan=>{
+    LS.set("importSnapshot",JSON.parse(JSON.stringify(orders)));
+    const byId=new Map(plan.updated.map(o=>[o.id,o]));
+    updO(prev=>[...prev.map(o=>byId.get(o.id)||o),...plan.added]);
+  };
 
   // One journal entry for the whole import, so ↩️ puts the company back exactly
   // as it was: the פק"ע that were replaced, the progress that was deleted along
   // with them, and the stages/projects the file introduced.
-  const recordImport=({action,target,details,list,gone,newLogs,newStages,newProjects})=>{
+  const recordImport=({action,target,details,list,gone,newLogs,newStages,newProjects,droppedLogs})=>{
     const goneSet=new Set(gone||[]);
     const changes=[
-      {coll:"orders",before:orders,after:(mode==="replace"?list:[...orders,...list]).map(o=>o.id)},
+      {coll:"orders",before:orders,
+        // An update-in-place run lists the same פק"ע in both halves — it is the
+        // row that changed, not a new one — so the ids are deduped.
+        after:[...new Set((mode==="replace"?list:[...orders,...list]).map(o=>o.id))]},
     ];
-    const lostLogs=(workLogs||[]).filter(w=>goneSet.has(w.orderId));
+    const lostLogs=[...(droppedLogs||[]),...(workLogs||[]).filter(w=>goneSet.has(w.orderId))];
     if(lostLogs.length||(newLogs||[]).length)
       changes.push({coll:"workLogs",before:lostLogs,after:(newLogs||[]).map(l=>l.id)});
     if((newStages||[]).length)
@@ -8543,6 +9123,23 @@ function ExcelTab({orders,projects,stages,stageBlocks,workLogs,users,customTasks
     LS.set(PRI_MAP_LS,saved);
     if(r.newStages.length&&updS)updS(prev=>[...prev,...r.newStages]);
     if(r.newProjects.length&&updP)updP(prev=>[...prev,...r.newProjects]);
+    if(mode==="merge"){
+      // Update-in-place run: nothing is deleted, the פק"ע that did not move are
+      // not even rewritten, and only the last import's own progress records are
+      // replaced where the file says the numbers changed.
+      const plan=mergePlan||priMergePlan(r,orders,workLogs);
+      const dropSet=new Set(plan.dropLogIds);
+      commitMerge(plan);
+      if(importWorkLogs&&(plan.logs.length||plan.dropLogIds.length))importWorkLogs(plan.logs,null,plan.dropLogIds);
+      if(r.stds.length&&importPnStds)importPnStds(r.stds);
+      recordImport({action:"ייבוא Priority (עדכון)",target:`${plan.added.length} חדשות · ${plan.updated.length} עודכנו`,
+        details:`עדכון על הקיים | ${plan.unchanged} פק"ע ללא שינוי | ${plan.newSerials} סידוריים חדשים | ${plan.progressChanged} פק"ע עם התקדמות שהשתנתה | ${r.stats.newStages} שלבים חדשים | ${r.stats.newProjects} פרויקטים | ${r.stats.stds} זמני תקן`,
+        list:[...plan.added,...plan.updated],gone:[],newLogs:plan.logs,newStages:r.newStages,newProjects:r.newProjects,
+        droppedLogs:(workLogs||[]).filter(w=>dropSet.has(w.id))});
+      setPri(null);
+      toast(`עודכן מול הקיים · ${plan.added.length} פק"ע חדשות · ${plan.updated.length} עודכנו · ${plan.unchanged} ללא שינוי`,"success",7000);
+      return;
+    }
     const gone=commitOrders(r.orders.map(({_pri,...o})=>o));
     // The progress rides along with the orders it belongs to — and in "replace"
     // mode the logs of the orders that just went away go with them, or the next
@@ -8555,6 +9152,14 @@ function ExcelTab({orders,projects,stages,stageBlocks,workLogs,users,customTasks
     setPri(null);toast(`יובאו ${r.orders.length} פק"ע מ-Priority · ${r.stats.logs.toLocaleString()} רישומי התקדמות`,"success");
   };
 
+  // What the old append-mode left behind: the same מספר פק"ע on more than one row.
+  const dups=useMemo(()=>{
+    const m=new Map();
+    orders.forEach(o=>{const k=woKey(o.woNumber);if(!k)return;m.set(k,(m.get(k)||0)+1)});
+    let wos=0,extra=0;
+    m.forEach(n=>{if(n>1){wos++;extra+=n-1}});
+    return{wos,extra};
+  },[orders]);
   const exportCtx={orders,projects,stages,stageBlocks,workLogs,users,customTasks,dailyPlans,departments,pnStandards};
   const errCount=(cur?.issues||[]).filter(x=>x.level!=="info").length;
   const stName=id=>stages.find(s=>s.id===id)?.name||priRes?.newStages.find(s=>s.id===id)?.name||"";
@@ -8569,7 +9174,7 @@ function ExcelTab({orders,projects,stages,stageBlocks,workLogs,users,customTasks
       <Card style={{marginBottom:14}}>
         <div style={{fontWeight:700,marginBottom:6}}>📤 ייצוא דוח מלא</div>
         <div style={{fontSize:13,color:"var(--c-muted)",marginBottom:10}}>
-          16 גיליונות מעוצבים: סיכום כללי · פקודות עבודה · סידוריים · תקלות · חוסרים · התקדמות · לוג עבודה · משימות · תוכניות עבודה · ביצועי עובדים · זמן תקן מול בפועל · הגדרות זמן תקן · שלבים · בלוקים · עובדים · מחלקות
+          17 גיליונות מעוצבים: סיכום כללי · פקודות עבודה · סידוריים · תקלות · חוסרים · התקדמות · לוג עבודה · משימות · תוכניות עבודה · ביצועי עובדים · זמן תקן מול בפועל · הגדרות זמן תקן · שלבים · בלוקים · עובדים · מחלקות · מילון סטטוס פק"ע
         </div>
         <div style={{display:"flex",gap:12,flexWrap:"wrap",marginBottom:12,fontSize:11.5,color:"var(--c-dim)"}}>
           <span>📋 {orders.length} פק"ע</span><span>🏷️ {orders.reduce((s,o)=>s+(o.serials||[]).length,0)} סידוריים</span>
@@ -8596,11 +9201,25 @@ function ExcelTab({orders,projects,stages,stageBlocks,workLogs,users,customTasks
       <Card>
         <div style={{fontWeight:700,marginBottom:10}}>📥 ייבוא נתונים מ-Excel</div>
         <div style={{display:"flex",gap:10,marginBottom:12,alignItems:"center",flexWrap:"wrap"}}>
-          <SegBtn options={[["replace","החלף הכל"],["merge","הוסף לקיימים"]]} value={mode} onChange={setMode}/>
+          <SegBtn options={[["replace","החלף הכל"],["merge","עדכן על הקיים"]]} value={mode} onChange={setMode}/>
           <span style={{fontSize:11.5,color:mode==="replace"?"#f59e0b":"var(--c-dim)"}}>
-            {mode==="replace"?'⚠️ כל הפק"ע הקיימות יימחקו ויוחלפו בקובץ':'הפק"ע מהקובץ יתווספו לקיימות'}
+            {mode==="replace"
+              ?'⚠️ כל הפק"ע הקיימות יימחקו ויוחלפו בקובץ'
+              :'פק"ע שכבר קיימת מזוהה לפי מספר הפק"ע ומתעדכנת במקום — בלי כפילויות. רק מה שהשתנה נכתב.'}
           </span>
         </div>
+        {dups.wos>0&&mergeDuplicates&&(
+          <div style={{background:"#f59e0b12",border:"1px solid #f59e0b55",borderRadius:10,padding:"10px 13px",marginBottom:12}}>
+            <div style={{fontWeight:700,fontSize:12.5,color:"#f59e0b",marginBottom:3}}>⚠️ יש כפילויות מייבוא קודם — {dups.wos.toLocaleString()} מספרי פק"ע מופיעים יותר מפעם אחת ({dups.extra.toLocaleString()} שורות עודפות)</div>
+            <div style={{fontSize:11.5,color:"var(--c-muted)",lineHeight:1.7,marginBottom:8}}>
+              נוצרו לפני שהייבוא ידע לעדכן במקום. האיחוד משאיר שורה אחת לכל פק"ע — זו שנושאת הכי הרבה דיווחי עבודה — ומעביר אליה את הסידוריים, התקלות, החוסרים והדיווחים של השורות האחרות; סידוריים זהים (אותו S/N) מתאחדים ליחידה אחת. הפעולה נרשמת ביומן וניתנת לאחזור.
+            </div>
+            <Btn small color="#f59e0b" onClick={()=>{
+              if(!confirm(`לאחד ${dups.extra} שורות כפולות ב-${dups.wos} פק"ע?\nהדיווחים והסידוריים עוברים לשורה שנשארת. אפשר לאחזר מיומן הפעילות.`))return;
+              mergeDuplicates();
+            }}>🧬 אחד את הכפילויות</Btn>
+          </div>
+        )}
         <div className={`dz${drag?" drag":""}`} onDragOver={e=>{e.preventDefault();setDrag(true)}} onDragLeave={()=>setDrag(false)} onDrop={e=>{e.preventDefault();setDrag(false);handleFile(e.dataTransfer.files[0])}} onClick={()=>{const inp=document.createElement("input");inp.type="file";inp.accept=".xlsx,.xls";inp.onchange=ev=>handleFile(ev.target.files[0]);inp.click()}}>
           <div style={{fontSize:36,marginBottom:8}}>📁</div>
           <div style={{fontWeight:600,marginBottom:4}}>גרור קובץ Excel לכאן או לחץ לבחירה</div>
@@ -8644,10 +9263,11 @@ function ExcelTab({orders,projects,stages,stageBlocks,workLogs,users,customTasks
           </div>
 
           {/* What the file says about status, before it is imported — this is the
-              answer to "where did all the closed ones go" without having to look. */}
+              answer to "where did all the closed ones go" without having to look,
+              and the legend that says what every Priority status actually means. */}
           <div style={{background:"var(--c-deep)",border:"1px solid var(--c-border)",borderRadius:10,padding:"9px 13px",marginBottom:12}}>
             <div style={{fontWeight:700,fontSize:12.5,marginBottom:6}}>סטטוס הפק"ע שייכנסו</div>
-            <div style={{display:"flex",gap:7,flexWrap:"wrap"}}>
+            <div style={{display:"flex",gap:7,flexWrap:"wrap",marginBottom:8}}>
               {ST_ORDER.map(k=>{const n=priRes.stats.byStatus[k]||0;const c=SC[k];return(
                 <span key={k} style={{background:c+"1a",color:n?c:"var(--c-dim)",border:`1px solid ${c}44`,borderRadius:14,padding:"3px 11px",fontWeight:600,fontSize:12}}>{SL[k]} · {n}</span>
               )})}
@@ -8657,6 +9277,39 @@ function ExcelTab({orders,projects,stages,stageBlocks,workLogs,users,customTasks
                 </span>
               )}
             </div>
+            <div style={{fontSize:11.5,color:"var(--c-dim)",marginBottom:5}}>ומאיפה הן בקו הייצור:</div>
+            <div style={{display:"flex",gap:7,flexWrap:"wrap"}}>
+              {PHASE_ORDER.map(k=>{const ph=ST_PHASE[k];const n=(priRes.stats.byPhase||{})[k]||0;return(
+                <span key={k} title={ph.hint} style={{background:ph.color+"1a",color:n?ph.color:"var(--c-dim)",border:`1px solid ${ph.color}44`,borderRadius:14,padding:"3px 11px",fontWeight:600,fontSize:12}}>{ph.icon} {ph.label} · {n}</span>
+              )})}
+            </div>
+            <button onClick={()=>setShowLegend(p=>!p)} style={{background:"none",border:"none",color:"#60a5fa",fontSize:12,fontWeight:700,fontFamily:"inherit",padding:"8px 0 0",cursor:"pointer"}}>
+              📖 מה כל סטטוס אומר — {(priRes.stats.byRaw||[]).length} סטטוסים בקובץ {showLegend?"▲":"▼"}
+            </button>
+            {showLegend&&(
+              <div style={{marginTop:8,overflowX:"auto"}}>
+                <table style={{fontSize:12}}><thead><tr>
+                  <th style={{minWidth:130}}>סטטוס פק"ע ב-Priority</th><th style={{width:60}}>כמה</th>
+                  <th style={{width:110}}>נכנס כ־</th><th style={{width:150}}>מיקום בקו</th><th>מה זה אומר</th>
+                </tr></thead><tbody>
+                  {(priRes.stats.byRaw||[]).map(r2=>{
+                    const info=priStatus(r2.raw==="(ריק)"?"":r2.raw);
+                    const ph=ST_PHASE[r2.phase]||ST_PHASE.line;
+                    return(<tr key={r2.raw}>
+                      <td style={{fontWeight:600,whiteSpace:"nowrap"}}>{r2.raw}{info.guessed&&<span title="הסטטוס אינו ברשימה המוכרת — שויך לפי הניסוח" style={{color:"#f59e0b",marginRight:4}}>❓</span>}</td>
+                      <td style={{fontWeight:700}}>{r2.n}</td>
+                      <td><Badge status={r2.st}/></td>
+                      <td style={{color:ph.color,fontWeight:600,whiteSpace:"nowrap"}}>{ph.icon} {ph.label}</td>
+                      <td style={{color:"var(--c-muted)",lineHeight:1.6}}>{info.desc}</td>
+                    </tr>);
+                  })}
+                </tbody></table>
+                <div style={{fontSize:11.5,color:"var(--c-dim)",marginTop:6,lineHeight:1.7}}>
+                  ״מיקום בקו״ הוא ההפרדה שארבעת הסטטוסים לא יודעים לעשות: <b style={{color:"#f59e0b"}}>פתוחה</b> ו<b style={{color:"#f59e0b"}}>שוחררה</b> שתיהן ״פתוחה״, ושתיהן פק"ע שעדיין לא נכנסה לקו — לעומת <b>הועבר לייצור</b> שכבר בתור. אפשר לסנן לפי זה במסך פקודות העבודה ובדשבורד.
+                  {" "}הסטטוס המקורי נשמר על כל פק"ע, ובפק"ע <b style={{color:"#ef4444"}}>תקועה</b> הוא מוצג בכרטיס כסיבת התקיעה.
+                </div>
+              </div>
+            )}
           </div>
 
           <div style={{background:"var(--c-deep)",border:"1px solid var(--c-border)",borderRadius:10,padding:"8px 13px",marginBottom:12}}>
@@ -8737,6 +9390,46 @@ function ExcelTab({orders,projects,stages,stageBlocks,workLogs,users,customTasks
               </div>
             </>
           )}
+          {/* Update-in-place: what this run would actually change, before it runs.
+              The report repeats every open פק"ע every month, so the honest number
+              is not "how many rows are in the file" but "how many of them moved". */}
+          {mergePlan&&(
+            <div style={{marginBottom:12,background:"var(--c-deep)",border:"1px solid #10b98144",borderRadius:10,padding:"10px 13px"}}>
+              <div style={{fontWeight:700,fontSize:12.5,marginBottom:7,color:"#34d399"}}>🔁 עדכון על הקיים — מה ישתנה</div>
+              <div style={{display:"flex",gap:7,flexWrap:"wrap",marginBottom:7}}>
+                {[[`${mergePlan.added.length} פק"ע חדשות`,mergePlan.added.length?"#10b981":"#8b95a8"],
+                  [`${mergePlan.updated.length} יתעדכנו`,mergePlan.updated.length?"#3b82f6":"#8b95a8"],
+                  [`${mergePlan.unchanged} ללא שינוי — לא ייכתבו`,"#8b95a8"],
+                  [`${mergePlan.newSerials} סידוריים חדשים`,mergePlan.newSerials?"#a78bfa":"#8b95a8"],
+                  [`${mergePlan.progressChanged} עם התקדמות שהשתנתה`,mergePlan.progressChanged?"#06b6d4":"#8b95a8"]].map(([t,c])=>(
+                  <span key={t} style={{background:c+"1a",color:c,border:`1px solid ${c}44`,borderRadius:14,padding:"3px 11px",fontWeight:600,fontSize:12}}>{t}</span>
+                ))}
+              </div>
+              <div style={{fontSize:11.5,color:"var(--c-dim)",lineHeight:1.7}}>
+                הזיהוי הוא לפי <b style={{color:"var(--c-text)"}}>מספר הפק"ע</b>. מה שמגיע מה-ERP מתעדכן — סטטוס, כמות, מחיר, פרויקט, סניף, תאריכים ומסלול הפעולות.
+                מה שנוצר באפליקציה נשמר כפי שהוא — סידוריים שכבר עבדו עליהם, תקלות, חוסרים ואספקות, וכל דיווח עבודה של עובד.
+                מדיווחי הייבוא הקודם נמחקים רק אלה של פק"ע שההתקדמות שלהן בקובץ השתנתה.
+              </div>
+              {mergePlan.changes.length>0&&(<>
+                <button onClick={()=>setShowDiff(p=>!p)} style={{background:"none",border:"none",color:"#60a5fa",fontSize:12,fontWeight:700,fontFamily:"inherit",padding:"7px 0 0",cursor:"pointer"}}>
+                  📋 פירוט השינויים ({mergePlan.changes.length}) {showDiff?"▲":"▼"}
+                </button>
+                {showDiff&&(
+                  <div style={{marginTop:7,maxHeight:260,overflowY:"auto",overflowX:"auto"}}>
+                    <table style={{fontSize:12}}><thead><tr><th style={{width:110}}>פק"ע</th><th style={{minWidth:170}}>סטטוס: מ־ ← ל־</th><th>מה משתנה</th></tr></thead><tbody>
+                      {mergePlan.changes.map(c=>(
+                        <tr key={c.wo}>
+                          <td style={{fontWeight:600}}>{c.wo}</td>
+                          <td style={{color:"var(--c-muted)"}}>{c.from===c.to?"—":<>{c.from||"—"} ← <b style={{color:"var(--c-text)"}}>{c.to||"—"}</b></>}</td>
+                          <td style={{color:"var(--c-muted)"}}>{c.fields.join(" · ")||"—"}</td>
+                        </tr>
+                      ))}
+                    </tbody></table>
+                  </div>
+                )}
+              </>)}
+            </div>
+          )}
           {cur.issues.length>0&&(
             <div style={{marginBottom:10,background:"var(--c-deep)",border:`1px solid ${errCount?"#f59e0b55":"var(--c-border)"}`,borderRadius:9,padding:"9px 12px"}}>
               <button onClick={()=>setShowIssues(p=>!p)} style={{background:"none",border:"none",color:errCount?"#f59e0b":"var(--c-muted)",fontSize:12.5,fontWeight:700,fontFamily:"inherit",padding:0}}>
@@ -8770,15 +9463,33 @@ function ExcelTab({orders,projects,stages,stageBlocks,workLogs,users,customTasks
           {cur.orders.length>12&&<div style={{fontSize:11.5,color:"var(--c-dim)",padding:"6px 2px"}}>מוצגות 12 מתוך {cur.orders.length} פקודות</div>}
           </div>
           <div style={{display:"flex",gap:10,alignItems:"center",flexWrap:"wrap"}}>
-            <Btn color="#10b981" disabled={!cur.orders.length} onClick={()=>{
+            <Btn color="#10b981" disabled={!cur.orders.length||(!!mergePlan&&!mergePlan.added.length&&!mergePlan.updated.length)} onClick={()=>{
               if(priRes){applyPri();return}
+              if(mode==="merge"){
+                // The template goes through the same update-in-place path as a
+                // Priority file: a פק"ע that is already here is updated, not
+                // added a second time.
+                const plan=mergePlan||priMergePlan(res,orders,workLogs);
+                const dropSet=new Set(plan.dropLogIds);
+                commitMerge(plan);
+                if(importWorkLogs&&(plan.logs.length||plan.dropLogIds.length))importWorkLogs(plan.logs,null,plan.dropLogIds);
+                recordImport({action:"ייבוא Excel (עדכון)",target:`${plan.added.length} חדשות · ${plan.updated.length} עודכנו`,
+                  details:`עדכון על הקיים | ${plan.unchanged} פק"ע ללא שינוי | ${plan.newSerials} סידוריים חדשים | ${plan.progressChanged} פק"ע עם התקדמות שהשתנתה`,
+                  list:[...plan.added,...plan.updated],gone:[],newLogs:plan.logs,
+                  droppedLogs:(workLogs||[]).filter(w=>dropSet.has(w.id))});
+                setRes(null);
+                toast(`עודכן מול הקיים · ${plan.added.length} פק"ע חדשות · ${plan.updated.length} עודכנו · ${plan.unchanged} ללא שינוי`,"success",7000);
+                return;
+              }
               const gone=commitOrders(res.orders);
               if(importWorkLogs&&((res.logs||[]).length||gone.length))importWorkLogs(res.logs||[],gone);
               recordImport({action:"ייבוא Excel",target:`${res.orders.length} פקעות`,
                 details:`${mode==="replace"?"החלפה":"הוספה"} | ${res.stats.serials} סידוריים | ${res.stats.defects} תקלות | ${res.stats.shortages} חוסרים | ${res.stats.logs} רישומי התקדמות`,
                 list:res.orders,gone,newLogs:res.logs||[]});
-              setRes(null);toast(`הנתונים יובאו בהצלחה${res.stats.logs?` · ${res.stats.logs} רישומי התקדמות`:""}`,"success")}}>✅ אשר ייבוא ({cur.orders.length})</Btn>
+              setRes(null);toast(`הנתונים יובאו בהצלחה${res.stats.logs?` · ${res.stats.logs} רישומי התקדמות`:""}`,"success")}}>{mergePlan?`✅ עדכן — ${mergePlan.added.length} חדשות · ${mergePlan.updated.length} עדכונים`:`✅ אשר ייבוא (${cur.orders.length})`}</Btn>
             <Btn onClick={clearAll}>ביטול</Btn>
+            {mergePlan&&!mergePlan.added.length&&!mergePlan.updated.length&&
+              <span style={{fontSize:11.5,color:"#10b981"}}>✔️ הכול כבר מעודכן — אין מה לכתוב מהקובץ הזה</span>}
             {priRes&&cur.orders.length>500&&<span style={{fontSize:11.5,color:"var(--c-dim)"}}>ייבוא גדול — השמירה לענן עשויה לקחת מספר שניות</span>}
           </div>
         </div>)}
@@ -8798,7 +9509,9 @@ function AlertsPanel({orders,stages,workLogs,users,onClose,dismissedAlerts,onDis
     const a=[];
     orders.forEach(o=>(o.defects||[]).filter(d=>d.status!=="closed"&&(d.severity==="critical"||d.severity==="high")).forEach(d=>{
       a.push({id:`def_${o.id}_${d.id}`,sev:d.severity==="critical"?0:1,icon:d.severity==="critical"?"🔴":"🟠",text:`תקלה ${d.severity==="critical"?"קריטית":"גבוהה"}: ${d.title}`,sub:`פק"ע ${o.woNumber}${d.discoveredDate?` | ${fmt(d.discoveredDate)}`:""}`,color:d.severity==="critical"?"#dc2626":"#f97316"})}));
-    orders.filter(o=>o.targetDate&&new Date(o.targetDate)<new Date()).forEach(o=>{const d=daysBetween(o.targetDate,todays());if(d>0)a.push({id:`late_${o.id}`,sev:1,icon:"🚨",text:`פק"ע ${o.woNumber} באיחור ${d} ימים`,sub:`יעד: ${fmt(o.targetDate)}`,color:"#ef4444"})});
+    // Late is measured against תאריך סיום ייצור (ת. סיום יצור from Priority). A
+    // פק"ע that already left the line is not late, however old its date is.
+    orders.filter(o=>o.targetDate&&new Date(o.targetDate)<new Date()&&orderPhase(o)!=="done").forEach(o=>{const d=daysBetween(o.targetDate,todays());if(d>0)a.push({id:`late_${o.id}`,sev:1,icon:"🚨",text:`פק"ע ${o.woNumber} באיחור ${d} ימים`,sub:`תאריך סיום ייצור: ${fmt(o.targetDate)}`,color:"#ef4444"})});
     const sMap=new Map((stages||[]).map(s=>[s.id,s]));
     workLogs.filter(w=>!w.completed).forEach(w=>{const m=Math.round((Date.now()-new Date(w.startTime).getTime())/60000);if(m>120)a.push({id:`stuck_${w.id}`,sev:2,icon:"⏳",text:`${w.userName} תקוע ${fmtTime(m)} על ${logUnitLabel(w)}`,sub:sMap.get(w.stageId)?.name||"",color:"#f59e0b"})});
     orders.forEach(o=>{const sn=(o.serials||[]).length,df=(o.defects||[]).filter(d=>d.status!=="closed").length;if(sn>0&&df/sn>.2)a.push({id:`yield_${o.id}`,sev:2,icon:"📉",text:`Yield נמוך ב-${o.woNumber}: ${df}/${sn} תקלות`,sub:`${Math.round(df/sn*100)}% שיעור תקלות`,color:"#f97316"})});
@@ -8865,7 +9578,124 @@ function OfflineBanner({lm}){return(
 // ══════════════════════════════════════════════════════════════════════════
 // ═══ NAVBAR ═════════════════════════════════════════════════════════════
 // ══════════════════════════════════════════════════════════════════════════
-function Navbar({tab,setTab,tabs,lightMode,toggleLight,sync,onAdmin,onLogout,alertCount,onAlerts,onRefresh,onLiveBoard,onReport,onHistory,isAdmin,isManager,onLoadDemo,onDeleteDemo,onInstall,canInstall}){
+// ── ניקוי לפיילוט ─────────────────────────────────────────────────────────────
+// A first run of the app seeds a full demo organisation — two departments, four
+// team leads, twelve workers — so the screens have something to show before any
+// real data exists. The moment a real pilot starts, every one of those people is
+// noise: they sit in the הספק עובדים table, in the org chart, in the reports, and
+// in every average the dashboard computes.
+//
+// Deleting them one by one is fourteen confirmations and leaves their work logs,
+// tasks and plans behind, still counted. This does the whole thing in one pass,
+// shows exactly what will go before it goes, and records it in the journal so a
+// mistake is one ↩️ away.
+//
+// Two things are never on the list: the admin account, and whoever is signed in —
+// an app with no users at all re-seeds the demo team on the next load, which is
+// the opposite of what this is for.
+function PilotResetModal({users,workLogs,customTasks,dailyPlans,departments,onClose,onRun,lightMode}){
+  const {currentUser}=useAuth();
+  const protectedIds=new Set([currentUser?.id,...users.filter(u=>u.role==="admin").map(u=>u.id)].filter(Boolean));
+  const candidates=users.filter(u=>!protectedIds.has(u.id));
+  const [picked,setPicked]=useState(()=>new Set(candidates.map(u=>u.id)));
+  const [wipeWork,setWipeWork]=useState(true);
+  const [wipeAllLogs,setWipeAllLogs]=useState(false);
+  const [dropDepts,setDropDepts]=useState(false);
+  const [typed,setTyped]=useState("");
+  const [busy,setBusy]=useState(false);
+  const lm=lightMode;
+  const card=lm?"#ffffff":"#131829",border=lm?"#dde1e8":"#1e2a42",text=lm?"#1a1f2e":"#e2e8f0",muted=lm?"#5a6478":"#8b95a8";
+  const toggle=id=>setPicked(p=>{const n=new Set(p);n.has(id)?n.delete(id):n.add(id);return n});
+
+  const theirLogs=(workLogs||[]).filter(w=>picked.has(w.userId));
+  const theirTasks=(customTasks||[]).filter(t=>picked.has(t.userId));
+  const theirPlans=(dailyPlans||[]).filter(p=>picked.has(p.userId));
+  const allLogs=(workLogs||[]).length;
+  // A department nobody is left in is a demo department; one that still has people
+  // is somebody's real structure and is left alone whatever the checkbox says.
+  const emptyDepts=(departments||[]).filter(d=>!users.some(u=>u.departmentId===d.id&&!picked.has(u.id)));
+  const ok=picked.size>0&&typed.trim()==="מחק";
+
+  const run=async()=>{
+    if(!ok||busy)return;
+    setBusy(true);
+    try{
+      await onRun({
+        userIds:[...picked],
+        logIds:wipeAllLogs?(workLogs||[]).map(w=>w.id):(wipeWork?theirLogs.map(w=>w.id):[]),
+        taskIds:wipeWork?theirTasks.map(t=>t.id):[],
+        planIds:wipeWork?theirPlans.map(p=>p.id):[],
+        deptIds:dropDepts?emptyDepts.map(d=>d.id):[]
+      });
+      onClose();
+    }finally{setBusy(false)}
+  };
+
+  const row={display:"flex",alignItems:"center",gap:8,fontSize:12.5,color:text,padding:"3px 0",cursor:"pointer"};
+  return(
+    <div onClick={onClose} style={{position:"fixed",inset:0,background:"#000000cc",zIndex:260,display:"flex",alignItems:"center",justifyContent:"center",padding:10,overflowY:"auto"}}>
+      <div onClick={e=>e.stopPropagation()} style={{background:card,borderRadius:16,maxWidth:640,width:"100%",maxHeight:"92vh",overflowY:"auto",border:`1px solid ${border}`,color:text}}>
+        <div style={{padding:"16px 22px",borderBottom:`1px solid ${border}`,display:"flex",justifyContent:"space-between",alignItems:"center",position:"sticky",top:0,background:card,zIndex:1,borderRadius:"16px 16px 0 0"}}>
+          <div style={{fontWeight:700,fontSize:17}}>🧹 ניקוי לפיילוט — מחיקת עובדים ונתוניהם</div>
+          <button onClick={onClose} style={{background:"none",border:"none",fontSize:20,color:muted}}>✕</button>
+        </div>
+        <div style={{padding:"14px 22px 22px"}}>
+          <div style={{background:"#f59e0b12",border:"1px solid #f59e0b44",borderRadius:9,padding:"10px 12px",fontSize:12.5,lineHeight:1.8,marginBottom:14}}>
+            מוחק את העובדים שנבחרו ואת כל מה שתלוי בהם, כדי שהפיילוט יתחיל עם נתונים נקיים.
+            <b> חשבון המנהל והמשתמש המחובר לא נמחקים</b> — מערכת בלי אף משתמש טוענת מחדש את צוות הדמו בכניסה הבאה.
+            <div style={{color:muted,marginTop:4}}>הפעולה נרשמת ביומן הפעילות וניתנת לאחזור מלא דרך 🛡️ ניהול מערכת ← יומן ואחזור.</div>
+          </div>
+
+          {candidates.length===0?(
+            <div style={{fontSize:13,color:muted,padding:"10px 0"}}>אין עובדים למחיקה — במערכת יש רק חשבונות מנהל.</div>
+          ):(<>
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:6,flexWrap:"wrap",gap:8}}>
+              <div style={{fontWeight:700,fontSize:13}}>עובדים למחיקה ({picked.size}/{candidates.length})</div>
+              <div style={{display:"flex",gap:6}}>
+                <Btn small onClick={()=>setPicked(new Set(candidates.map(u=>u.id)))}>סמן הכל</Btn>
+                <Btn small onClick={()=>setPicked(new Set())}>נקה בחירה</Btn>
+              </div>
+            </div>
+            <div style={{border:`1px solid ${border}`,borderRadius:9,padding:"8px 10px",maxHeight:230,overflowY:"auto",marginBottom:12,background:lm?"#f7f8fa":"#0a0e1a"}}>
+              {candidates.map(u=>{
+                const nLogs=(workLogs||[]).filter(w=>w.userId===u.id).length;
+                return(
+                  <label key={u.id} style={row}>
+                    <input type="checkbox" style={{width:"auto"}} checked={picked.has(u.id)} onChange={()=>toggle(u.id)}/>
+                    <b>{u.name||u.username}</b>
+                    <span style={{color:ROLES[u.role]?.color||muted,fontSize:11.5}}>{ROLES[u.role]?.label||u.role}</span>
+                    <span style={{color:muted,fontSize:11.5}}>@{u.username}</span>
+                    {nLogs>0&&<span style={{color:"#f59e0b",fontSize:11.5}}>· {nLogs.toLocaleString()} דיווחים</span>}
+                  </label>
+                );
+              })}
+            </div>
+            <div style={{border:`1px solid ${border}`,borderRadius:9,padding:"9px 11px",marginBottom:12}}>
+              <label style={row}><input type="checkbox" style={{width:"auto"}} checked={wipeWork} onChange={e=>setWipeWork(e.target.checked)}/>
+                מחק גם את מה ששייך להם — {theirLogs.length.toLocaleString()} דיווחי עבודה · {theirTasks.length.toLocaleString()} משימות · {theirPlans.length.toLocaleString()} תוכניות עבודה</label>
+              <div style={{fontSize:11.5,color:muted,marginRight:24,marginBottom:6}}>בלי זה הדיווחים יישארו במערכת בלי עובד שיוצג לצידם, וימשיכו להיספר בשעות ובעלויות.</div>
+              <label style={row}><input type="checkbox" style={{width:"auto"}} checked={wipeAllLogs} onChange={e=>setWipeAllLogs(e.target.checked)}/>
+                <span style={{color:"#ef4444",fontWeight:700}}>מחק את כל {allLogs.toLocaleString()} דיווחי העבודה במערכת</span></label>
+              <div style={{fontSize:11.5,color:muted,marginRight:24,marginBottom:6}}>כולל ההתקדמות שיובאה מ-Priority. סרגלי ההתקדמות של כל הפק"ע יתאפסו — סמנו רק אם רוצים להתחיל את המדידה מאפס. הפק"ע עצמן, הסידוריים והסטטוסים נשארים.</div>
+              {emptyDepts.length>0&&(<>
+                <label style={row}><input type="checkbox" style={{width:"auto"}} checked={dropDepts} onChange={e=>setDropDepts(e.target.checked)}/>
+                  מחק {emptyDepts.length} מחלקות שיישארו ריקות — {emptyDepts.map(d=>d.name).join(" · ")}</label>
+              </>)}
+            </div>
+            <div style={{fontSize:12.5,marginBottom:6}}>להשלמה, הקלידו <b style={{color:"#ef4444"}}>מחק</b>:</div>
+            <input value={typed} onChange={e=>setTyped(e.target.value)} placeholder="מחק" style={{marginBottom:12,maxWidth:200}}/>
+            <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
+              <Btn color="#ef4444" disabled={!ok||busy} onClick={run}>{busy?"מוחק...":`🗑️ מחק ${picked.size} עובדים`}</Btn>
+              <Btn onClick={onClose}>ביטול</Btn>
+            </div>
+          </>)}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function Navbar({tab,setTab,tabs,lightMode,toggleLight,sync,onAdmin,onLogout,alertCount,onAlerts,onRefresh,onLiveBoard,onReport,onHistory,isAdmin,isManager,onLoadDemo,onDeleteDemo,onPilotReset,onInstall,canInstall}){
   const {currentUser}=useAuth();
   const [menuOpen,setMenuOpen]=useState(false);
   const lm=lightMode;
@@ -8948,7 +9778,8 @@ function Navbar({tab,setTab,tabs,lightMode,toggleLight,sync,onAdmin,onLogout,ale
                   <button onClick={()=>{onHistory();setMenuOpen(false)}} style={{background:"transparent",border:"none",color:"#8b5cf6",borderRadius:7,padding:"8px 12px",fontSize:13,fontWeight:600,fontFamily:"inherit",textAlign:"right",cursor:"pointer",whiteSpace:"nowrap"}}>📋 היסטוריה</button>
                   {isAdmin&&<><div style={{borderTop:`1px solid ${navBorder}`,margin:"4px 0"}}/>
                   <button onClick={()=>{onLoadDemo();setMenuOpen(false)}} style={{background:"transparent",border:"none",color:"#06b6d4",borderRadius:7,padding:"8px 12px",fontSize:13,fontWeight:600,fontFamily:"inherit",textAlign:"right",cursor:"pointer",whiteSpace:"nowrap"}}>🧪 טען נתוני דמו</button>
-                  <button onClick={()=>{onDeleteDemo();setMenuOpen(false)}} style={{background:"transparent",border:"none",color:"#ef4444",borderRadius:7,padding:"8px 12px",fontSize:13,fontWeight:600,fontFamily:"inherit",textAlign:"right",cursor:"pointer",whiteSpace:"nowrap"}}>🗑️ מחק נתוני דמו</button></>}
+                  <button onClick={()=>{onDeleteDemo();setMenuOpen(false)}} style={{background:"transparent",border:"none",color:"#ef4444",borderRadius:7,padding:"8px 12px",fontSize:13,fontWeight:600,fontFamily:"inherit",textAlign:"right",cursor:"pointer",whiteSpace:"nowrap"}}>🗑️ מחק נתוני דמו</button>
+                  <button onClick={()=>{onPilotReset();setMenuOpen(false)}} title='מחיקת עובדי הדמו והנתונים שלהם לפני תחילת פיילוט' style={{background:"transparent",border:"none",color:"#ef4444",borderRadius:7,padding:"8px 12px",fontSize:13,fontWeight:600,fontFamily:"inherit",textAlign:"right",cursor:"pointer",whiteSpace:"nowrap"}}>🧹 ניקוי לפיילוט</button></>}
                   <div style={{borderTop:`1px solid ${navBorder}`,margin:"4px 0"}}/>
                   {canInstall&&<button onClick={()=>{onInstall();setMenuOpen(false)}} style={{background:"transparent",border:"none",color:"#3b82f6",borderRadius:7,padding:"8px 12px",fontSize:13,fontWeight:600,fontFamily:"inherit",textAlign:"right",cursor:"pointer",whiteSpace:"nowrap"}}>📲 התקן אפליקציה</button>}
                   <button onClick={()=>{onLogout();setMenuOpen(false)}} style={{background:"transparent",border:"none",color:"#ef4444",borderRadius:7,padding:"8px 12px",fontSize:13,fontWeight:600,fontFamily:"inherit",textAlign:"right",cursor:"pointer"}}>🚪 יציאה</button>
@@ -8993,7 +9824,8 @@ function Navbar({tab,setTab,tabs,lightMode,toggleLight,sync,onAdmin,onLogout,ale
               {isAdmin&&<><div style={{borderTop:`1px solid ${navBorder}`,margin:"6px 8px"}}/>
               <div style={{padding:"8px 14px",fontSize:11,color:navMuted,fontWeight:700,textTransform:"uppercase",letterSpacing:".05em"}}>נתונים</div>
               <button onClick={()=>{onLoadDemo();setMenuOpen(false)}} style={{background:"transparent",border:"none",borderRadius:8,padding:"10px 14px",fontSize:14,color:"#06b6d4",fontFamily:"inherit",textAlign:"right",display:"flex",alignItems:"center",gap:10}}><span style={{fontSize:18}}>🧪</span>טען נתוני דמו</button>
-              <button onClick={()=>{onDeleteDemo();setMenuOpen(false)}} style={{background:"transparent",border:"none",borderRadius:8,padding:"10px 14px",fontSize:14,color:"#ef4444",fontFamily:"inherit",textAlign:"right",display:"flex",alignItems:"center",gap:10}}><span style={{fontSize:18}}>🗑️</span>מחק נתוני דמו</button></>}</>}
+              <button onClick={()=>{onDeleteDemo();setMenuOpen(false)}} style={{background:"transparent",border:"none",borderRadius:8,padding:"10px 14px",fontSize:14,color:"#ef4444",fontFamily:"inherit",textAlign:"right",display:"flex",alignItems:"center",gap:10}}><span style={{fontSize:18}}>🗑️</span>מחק נתוני דמו</button>
+              <button onClick={()=>{onPilotReset();setMenuOpen(false)}} style={{background:"transparent",border:"none",borderRadius:8,padding:"10px 14px",fontSize:14,color:"#ef4444",fontFamily:"inherit",textAlign:"right",display:"flex",alignItems:"center",gap:10}}><span style={{fontSize:18}}>🧹</span>ניקוי לפיילוט</button></>}</>}
               <div style={{borderTop:`1px solid ${navBorder}`,margin:"6px 8px"}}/>
               {canInstall&&<button onClick={()=>{onInstall();setMenuOpen(false)}} style={{background:"#3b82f611",border:"none",borderRadius:8,padding:"10px 14px",fontSize:14,color:"#3b82f6",fontFamily:"inherit",textAlign:"right",display:"flex",alignItems:"center",gap:10,fontWeight:600}}><span style={{fontSize:18}}>📲</span>התקן אפליקציה</button>}
               <button onClick={()=>{onLogout();setMenuOpen(false)}} style={{background:"transparent",border:"none",borderRadius:8,padding:"10px 14px",fontSize:14,color:"#ef4444",fontFamily:"inherit",textAlign:"right",display:"flex",alignItems:"center",gap:10}}><span style={{fontSize:18}}>🚪</span>יציאה מהמערכת</button>
@@ -10492,15 +11324,20 @@ function App(){
   // per unit per stage. `dropOrderIds` is the list of orders a "replace all"
   // import just removed — their logs go with them, here and on the server, or the
   // next sync pulls back progress for units that no longer exist.
-  const importWorkLogs=useCallback((logs,dropOrderIds)=>{
+  // `dropLogIds` is the finer cut a re-import needs: only the records the *last*
+  // import wrote for an order that has since moved, so the work its people
+  // reported through the app stays exactly where it is.
+  const importWorkLogs=useCallback((logs,dropOrderIds,dropLogIds)=>{
     // A quantity signature has no serial by design — it is the count that carries
     // the progress — so it is admitted on the same terms as a per-unit record.
     const add=(logs||[]).filter(w=>w&&w.stageId&&(w.serialId||isQtyLog(w)));
     const drop=(dropOrderIds&&dropOrderIds.length)?new Set(dropOrderIds):null;
-    if(!add.length&&!drop)return;
+    const dropIds=(dropLogIds&&dropLogIds.length)?new Set(dropLogIds):null;
+    if(!add.length&&!drop&&!dropIds)return;
+    const doomed=w=>(drop&&drop.has(w.orderId))||(dropIds&&dropIds.has(w.id));
     setWorkLogs(prev=>{
-      const gone=drop?prev.filter(w=>drop.has(w.orderId)):[];
-      const next=drop?[...prev.filter(w=>!drop.has(w.orderId)),...add]:[...prev,...add];
+      const gone=(drop||dropIds)?prev.filter(doomed):[];
+      const next=(drop||dropIds)?[...prev.filter(w=>!doomed(w)),...add]:[...prev,...add];
       persist(null,null,null,next);
       if(gone.length)SB.delIds("work_logs",gone.map(w=>w.id)).catch(e=>console.warn("log cleanup skipped",e));
       return next;
@@ -10724,9 +11561,10 @@ function App(){
   },[isAdmin,isLead]);
 
   // Alert count for badge
-  const alertCount=useMemo(()=>{let c=0;const dm=dismissedAlerts;filteredOrders.forEach(o=>(o.defects||[]).filter(d=>d.status!=="closed"&&(d.severity==="critical"||d.severity==="high")).forEach(d=>{if(!dm.includes(`def_${o.id}_${d.id}`))c++}));filteredOrders.filter(o=>o.targetDate&&new Date(o.targetDate)<new Date()).forEach(o=>{if(!dm.includes(`late_${o.id}`))c++});filteredWorkLogs.filter(w=>!w.completed).forEach(w=>{if(Math.round((Date.now()-new Date(w.startTime).getTime())/60000)>120&&!dm.includes(`stuck_${w.id}`))c++});return c},[filteredOrders,filteredWorkLogs,dismissedAlerts]);
+  const alertCount=useMemo(()=>{let c=0;const dm=dismissedAlerts;filteredOrders.forEach(o=>(o.defects||[]).filter(d=>d.status!=="closed"&&(d.severity==="critical"||d.severity==="high")).forEach(d=>{if(!dm.includes(`def_${o.id}_${d.id}`))c++}));filteredOrders.filter(o=>o.targetDate&&new Date(o.targetDate)<new Date()&&orderPhase(o)!=="done").forEach(o=>{if(!dm.includes(`late_${o.id}`))c++});filteredWorkLogs.filter(w=>!w.completed).forEach(w=>{if(Math.round((Date.now()-new Date(w.startTime).getTime())/60000)>120&&!dm.includes(`stuck_${w.id}`))c++});return c},[filteredOrders,filteredWorkLogs,dismissedAlerts]);
 
   const [showDemoPanel,setShowDemoPanel]=useState(false);
+  const [showPilotReset,setShowPilotReset]=useState(false);
 
   // ── Demo Data ───────────────────────────────────────────────────
   const loadDemoData=async()=>{
@@ -10877,6 +11715,81 @@ function App(){
     }catch(e){console.error(e);setSync("error");toast("שגיאה: "+sbErrMsg(e),"error")}
   };
 
+  // Folds פק"ע that appear more than once — the leftovers of the old
+  // "הוסף לקיימים" — back into one row each, carrying their units and their
+  // reported work with them. Journalled as one entry, like an import.
+  const mergeDuplicateOrders=useCallback(()=>{
+    const plan=dupMergePlan(oRef.current,wRef.current);
+    if(!plan.dropIds.length)return plan;
+    const keepById=new Map(plan.keepers.map(o=>[o.id,o]));
+    const dropSet=new Set(plan.dropIds),dropLogSet=new Set(plan.dropLogIds);
+    const beforeOrders=oRef.current.filter(o=>dropSet.has(o.id)||keepById.has(o.id));
+    const movedIds=new Set(plan.movedLogs.map(w=>w.id));
+    const beforeLogs=wRef.current.filter(w=>movedIds.has(w.id)||dropLogSet.has(w.id));
+    const nextOrders=oRef.current.filter(o=>!dropSet.has(o.id)).map(o=>keepById.get(o.id)||o);
+    // The moved logs keep their ids and only change which order (and which unit)
+    // they belong to, so they are rewritten in place rather than deleted and
+    // re-created — no window in which the progress does not exist.
+    const nextLogs=[...wRef.current.filter(w=>!movedIds.has(w.id)&&!dropLogSet.has(w.id)),...plan.movedLogs];
+    setOrders(nextOrders);setWorkLogs(nextLogs);persist(nextOrders,null,null,nextLogs);
+    SB.delIds("orders",plan.dropIds).catch(e=>console.warn("dup cleanup skipped",e));
+    if(plan.dropLogIds.length)SB.delIds("work_logs",plan.dropLogIds).catch(()=>{});
+    UNDO.record({user:currentUser,action:'איחוד פק"ע כפולות',target:`${plan.groups.length} מספרי פק"ע`,
+      details:`${plan.dropIds.length} שורות כפולות אוחדו | ${plan.movedLogs.length} דיווחים הועברו | ${plan.dropLogIds.length} דיווחי ייבוא כפולים הוסרו`,
+      changes:[{coll:"orders",before:beforeOrders,after:nextOrders.map(o=>o.id)},
+        ...(beforeLogs.length?[{coll:"workLogs",before:beforeLogs,after:nextLogs.map(w=>w.id)}]:[])]});
+    toast(`אוחדו ${plan.dropIds.length} שורות כפולות ב-${plan.groups.length} פק"ע — אפשר לאחזר מיומן הפעילות`,"success",7000);
+    return plan;
+  },[currentUser,toast]);
+
+  // ── ניקוי לפיילוט ────────────────────────────────────────────────────────
+  // One pass over everything a set of employees leaves behind: the accounts, the
+  // work they reported, their tasks and their plans, and — when asked — the
+  // departments that end up with nobody in them. Written to state, to the local
+  // cache and to the server together, and journalled as a single entry so ↩️ puts
+  // all of it back at once.
+  const runPilotReset=async({userIds,logIds,taskIds,planIds,deptIds})=>{
+    const uSet=new Set(userIds||[]),lSet=new Set(logIds||[]),tSet=new Set(taskIds||[]),pSet=new Set(planIds||[]),dSet=new Set(deptIds||[]);
+    setSync("saving");
+    try{
+      const before={
+        users:getUsers().filter(u=>uSet.has(u.id)),
+        workLogs:wRef.current.filter(w=>lSet.has(w.id)),
+        customTasks:ctRef.current.filter(t=>tSet.has(t.id)),
+        dailyPlans:plRef.current.filter(x=>pSet.has(x.id)),
+        departments:dpRef.current.filter(d=>dSet.has(d.id))
+      };
+      const changes=Object.entries(before).filter(([,rows])=>rows.length)
+        .map(([coll,rows])=>({coll,before:rows,after:[]}));
+
+      if(lSet.size){const next=wRef.current.filter(w=>!lSet.has(w.id));setWorkLogs(next);persist(null,null,null,next)}
+      if(tSet.size){const next=ctRef.current.filter(t=>!tSet.has(t.id));setCustomTasks(next);persist(null,null,null,null,next)}
+      if(pSet.size){const next=plRef.current.filter(x=>!pSet.has(x.id));setDailyPlans(next);persist(null,null,null,null,null,null,null,next)}
+      if(dSet.size){const next=dpRef.current.filter(d=>!dSet.has(d.id));setDepartments(next);persist(null,null,null,null,null,null,next)}
+      if(uSet.size){
+        const next=getUsers().filter(u=>!uSet.has(u.id));
+        await saveUsers(next);
+        setUsersTick(t=>t+1);
+        window.dispatchEvent(new CustomEvent("pml:users"));
+      }
+      // The rows have to leave the server too, or the next sweep pulls every one
+      // of them straight back in.
+      await Promise.all([
+        lSet.size?SB.delIds("work_logs",[...lSet]):null,
+        tSet.size?SB.delIds("custom_tasks",[...tSet]):null,
+        pSet.size?SB.delIds("daily_plans",[...pSet]):null,
+        dSet.size?SB.delIds("departments",[...dSet]):null,
+        uSet.size?SB.delIds("app_users",[...uSet]):null
+      ].filter(Boolean));
+      if(changes.length)UNDO.record({user:currentUser,action:"ניקוי לפיילוט",
+        target:`${uSet.size} עובדים`,
+        details:`${lSet.size} דיווחי עבודה · ${tSet.size} משימות · ${pSet.size} תוכניות · ${dSet.size} מחלקות`,
+        changes});
+      setSync("ok");
+      toast(`נמחקו ${uSet.size} עובדים${lSet.size?` ו-${lSet.size.toLocaleString()} דיווחי עבודה`:""} — אפשר לאחזר מיומן הפעילות`,"success",7000);
+    }catch(e){console.error(e);setSync("error");toast("שגיאה בניקוי: "+sbErrMsg(e),"error",7000)}
+  };
+
   const deleteDemoData=async()=>{
     if(!confirm("למחוק את כל נתוני הדמו? (פקעות, לוגים, משימות וזמני תקן שמתחילים ב-demo_)"))return;
     setSync("saving");
@@ -10941,7 +11854,7 @@ function App(){
     <AuthCtx.Provider value={{currentUser,canEdit,canViewProject}}>
       {isOffline&&<OfflineBanner lm={lm}/>}
       {showUpdate&&!isOffline&&<UpdateBanner onUpdate={handleUpdate} onDismiss={()=>setShowUpdate(false)} lm={lm}/>}
-      <Navbar tab={tab} setTab={setTab} tabs={TABS} lightMode={lightMode} toggleLight={()=>setLightMode(p=>!p)} sync={sync} onAdmin={()=>setShowAdmin(true)} onLogout={handleLogout} alertCount={alertCount} onAlerts={()=>setShowAlerts(true)} onRefresh={()=>refreshFromDB(true)} onLiveBoard={()=>setShowLiveBoard(true)} onReport={()=>setShowReport(true)} onHistory={()=>setShowHistory(true)} isAdmin={isAdmin} isManager={isAdmin||isDeptMgr} onLoadDemo={loadDemoData} onDeleteDemo={deleteDemoData} onInstall={handleInstall} canInstall={!isStandalone}/>
+      <Navbar tab={tab} setTab={setTab} tabs={TABS} lightMode={lightMode} toggleLight={()=>setLightMode(p=>!p)} sync={sync} onAdmin={()=>setShowAdmin(true)} onLogout={handleLogout} alertCount={alertCount} onAlerts={()=>setShowAlerts(true)} onRefresh={()=>refreshFromDB(true)} onLiveBoard={()=>setShowLiveBoard(true)} onReport={()=>setShowReport(true)} onHistory={()=>setShowHistory(true)} isAdmin={isAdmin} isManager={isAdmin||isDeptMgr} onLoadDemo={loadDemoData} onDeleteDemo={deleteDemoData} onPilotReset={()=>setShowPilotReset(true)} onInstall={handleInstall} canInstall={!isStandalone}/>
       {currentUser?.isDemo&&(
         <div style={{background:lm?"#eff6ff":"#0c1e3a",borderBottom:`1px solid ${lm?"#bfdbfe":"#1e3a5f"}`,padding:"8px 16px",display:"flex",alignItems:"center",justifyContent:"center",gap:10,flexWrap:"wrap"}}>
           <span style={{fontSize:13,color:lm?"#1d4ed8":"#93c5fd"}}>🔍 מצב דמו — הנתונים לא נשמרים</span>
@@ -10960,11 +11873,12 @@ function App(){
         {tab==="stages"&&isAdmin&&<StagesManagement stages={stages} setStages={setStages} stageBlocks={stageBlocks} setStageBlocks={setStageBlocks} persist={persist}/>}
         {tab==="projects"&&<Projects projects={filteredProjects} orders={filteredOrders} updP={updP} stages={stages} workLogs={filteredWorkLogs}/>}
         {tab==="reports"&&(isAdmin||isDeptMgr||isLead)&&<TeamReports users={visibleUsers} workLogs={filteredWorkLogs} orders={filteredOrders} stages={stages} stageBlocks={stageBlocks} projects={filteredProjects} customTasks={visibleTasks} dailyPlans={visiblePlans} departments={visibleDepartments} pnStandards={pnStandards}/>}
-        {tab==="excel"&&(isAdmin||isDeptMgr)&&<ExcelTab orders={filteredOrders} projects={filteredProjects} stages={stages} stageBlocks={stageBlocks} workLogs={filteredWorkLogs} users={visibleUsers} customTasks={visibleTasks} dailyPlans={visiblePlans} departments={visibleDepartments} pnStandards={pnStandards} updO={updO} updP={updP} updS={updS} importPnStds={importPnStds} importWorkLogs={importWorkLogs} canImport={isAdmin}/>}
+        {tab==="excel"&&(isAdmin||isDeptMgr)&&<ExcelTab orders={filteredOrders} projects={filteredProjects} stages={stages} stageBlocks={stageBlocks} workLogs={filteredWorkLogs} users={visibleUsers} customTasks={visibleTasks} dailyPlans={visiblePlans} departments={visibleDepartments} pnStandards={pnStandards} updO={updO} updP={updP} updS={updS} importPnStds={importPnStds} importWorkLogs={importWorkLogs} mergeDuplicates={isAdmin?mergeDuplicateOrders:null} canImport={isAdmin}/>}
       </main>
       <FastScroll/>
       {showInstall&&<InstallBanner onInstall={handleInstall} onDismiss={()=>setShowInstall(false)} lm={lm}/>}
-      {showAdmin&&isAdmin&&<AdminPanel projects={projects} stages={stages} orders={orders} onClose={()=>setShowAdmin(false)} lightMode={lightMode} departments={departments} updD={updD}/>}
+      {showPilotReset&&isAdmin&&<PilotResetModal users={allUsers} workLogs={workLogs} customTasks={customTasks} dailyPlans={dailyPlans} departments={departments} lightMode={lightMode} onClose={()=>setShowPilotReset(false)} onRun={runPilotReset}/>}
+      {showAdmin&&isAdmin&&<AdminPanel projects={projects} stages={stages} orders={orders} onClose={()=>setShowAdmin(false)} lightMode={lightMode} departments={departments} updD={updD} onPilotReset={()=>setShowPilotReset(true)}/>}
       {showAlerts&&<AlertsPanel orders={filteredOrders} stages={stages} workLogs={filteredWorkLogs} users={visibleUsers} onClose={()=>setShowAlerts(false)} dismissedAlerts={dismissedAlerts} onDismissAll={ids=>setDismissedAlerts(prev=>[...new Set([...prev,...ids])])}/>}
       {showLiveBoard&&(isAdmin||isDeptMgr)&&(canUseFeature("live_board")?<LiveFactoryBoard orders={filteredOrders} workLogs={filteredWorkLogs} stages={stages} customTasks={customTasks} users={visibleUsers} departments={visibleDepartments} onClose={()=>setShowLiveBoard(false)} lightMode={lightMode}/>:<Modal onClose={()=>setShowLiveBoard(false)}><UpgradePrompt feature="לוח חי"/></Modal>)}
       {showReport&&(isAdmin||isDeptMgr)&&(canUseFeature("pdf_reports")?<MonthlyReportModal orders={filteredOrders} workLogs={filteredWorkLogs} stages={stages} projects={filteredProjects} users={visibleUsers} onClose={()=>setShowReport(false)}/>:<Modal onClose={()=>setShowReport(false)}><UpgradePrompt feature="דוחות PDF"/></Modal>)}
