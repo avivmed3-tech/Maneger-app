@@ -1,0 +1,11 @@
+# OmniView — https://omniview.website
+#
+# The same build is served on several hostnames (the Vercel project aliases and
+# the GitHub Pages copy). Only omniview.website is meant to be indexed, so the
+# canonical tag in index.html points there and this file names the sitemap on
+# that host — otherwise a search engine is free to pick whichever alias it
+# crawled first as the "real" address.
+User-agent: *
+Allow: /
+
+Sitemap: https://omniview.website/sitemap.xml
