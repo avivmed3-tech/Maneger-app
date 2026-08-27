@@ -7914,28 +7914,52 @@ const PRI_H={wo:'מספר פק"ע',pn:'מק"ט',desc:'תיאור מוצר',branc
   seq:'שלב בפק"ע',seqAlt:'שלה בפק"ע',op:'פעולה',
   opDesc:'תאור פעולה',wc:'מרכז עבודה',reported:'כמות מדווחת',remain:'יתרה לבצוע',
   stdPn:"ז.תקן ליח' בדק' למקט",stdWo:"ז.תקן ליח' בדק' בפקע",status:'סטטוס פק"ע'};
-// Priority's own סטטוס פק"ע values, folded onto the four statuses the app knows.
+// ── Priority's סטטוס פק"ע → the app's statuses ────────────────────────────
+// This table is Anna's, from the floor, and it is the one thing here to keep in
+// sync with the ERP. She reads a פק"ע into three buckets — טרם התחיל תהליך ייצור
+// (open), בתהליך ייצור (partial), הסתיימה (complete) — with a separate תקועה mark
+// on the statuses that mean the פק"ע is on the floor but not moving.
+//
+// A פק"ע carries one status in the app, and its fourth value *is* that mark:
+// "blocked" is labelled תקועה and sits between חלקית and הושלמה in ST_ORDER, so a
+// stuck status lands there and says both halves at once — in production, held up.
+//
+// מבוטלת is her "לא להציג": a canceled פק"ע is not work, so it is dropped at
+// import instead of arriving as some status nobody asked for.
+const PRI_CANCEL="__cancel";
 const PRI_STATUS={
-  "פתוחה":"open","הודפסה":"open","שוחררה":"open","ממתין ליצור":"open","קדם יצור":"open",
-  "הועבר לייצור":"open","מאושרת לקיוט":"open",
-  "בתהליך ייצור":"partial","דווח ראשון":"partial","חיווט":"partial","בתהליך סגירה":"partial",
-  "בתהליך בקורת":"partial","בתהליך קיוט":"partial","בקרת יצור":"partial","סיום יצור":"partial",
-  "ביקורת ראשונ":"partial","ביקורת חלקית":"partial","ביקורת סופית":"partial","תהליך מבקר":"partial",
-  "ממתין למבקר":"partial","ממתין לאריזה":"partial","אריזה":"partial","ממתין א.FAI":"partial",
-  "ביצור קבמ":"partial",'מוכן לקב"מ':"partial",
-  "פקע COC":"complete","נסגרה":"complete",
-  "בעיה הנדסית":"blocked",'בעית ח"ג חסר':"blocked","בעית כלי חסר":"blocked","חוסרים ביצור":"blocked",
-  "חוסר נגדי":"blocked","הוקפאה":"blocked","הוחזר לתיקון":"blocked","בטיפול לקוח":"blocked"};
+  // טרם התחיל תהליך ייצור
+  "פתוחה":"open","שוחררה":"open",
+  // בתהליך ייצור — from the moment the paperwork leaves the office
+  "הודפסה":"partial","ממתין ליצור":"partial","קדם יצור":"partial","הועבר לייצור":"partial",
+  "מאושרת לקיוט":"partial","בתהליך קיוט":"partial","בתהליך ייצור":"partial","דווח ראשון":"partial",
+  "חיווט":"partial","בקרת יצור":"partial","בתהליך בקורת":"partial","ביקורת ראשונ":"partial",
+  "ביקורת חלקית":"partial","ביקורת סופית":"partial","תהליך מבקר":"partial","ממתין למבקר":"partial",
+  "ממתין א.FAI":"partial","ממתין לאריזה":"partial","אריזה":"partial","ביצור קבמ":"partial",
+  'מוכן לקב"מ':"partial","סיום יצור":"partial","בתהליך סגירה":"partial",
+  // הסתיימה — דווח אחרון is the last report on the route, not another milestone
+  "דווח אחרון":"complete","נסגרה":"complete","פקע COC":"complete",
+  // בתהליך ייצור + תקועה
+  "חוסרים ביצור":"blocked","בעיה הנדסית":"blocked",'בעית ח"ג חסר':"blocked",
+  "בעית כלי חסר":"blocked","חוסר נגדי":"blocked","הוקפאה":"blocked",
+  "הוחזר לתיקון":"blocked","בטיפול לקוח":"blocked",
+  // לא להציג
+  "מבוטלת":PRI_CANCEL};
 // Priority statuses get renamed and added to over time, so an unfamiliar one is
 // still placed sensibly instead of silently landing on "open".
 function priStatus(raw){
   const s=String(raw==null?"":raw).trim();
-  if(!s)return{st:"open",guessed:false};
-  if(PRI_STATUS[s])return{st:PRI_STATUS[s],guessed:false};
-  if(/בעי|חוסר|חסר|הוקפא|מוקפא|תקוע|עיכוב/.test(s))return{st:"blocked",guessed:true};
-  if(/coc|נסגר|הושלמ|בוטל/i.test(s))return{st:"complete",guessed:true};
-  if(/ממתין ליצור|שוחרר|הודפס|פתוח|טרם/.test(s))return{st:"open",guessed:true};
-  return{st:"partial",guessed:true};
+  if(!s)return{st:"open",guessed:false,cancel:false};
+  const hit=PRI_STATUS[s];
+  // Canceled still answers .st, for the callers that only ask for one: "הושלמה"
+  // keeps it out of the live-work counts if it ever does get imported.
+  if(hit===PRI_CANCEL)return{st:"complete",guessed:false,cancel:true};
+  if(hit)return{st:hit,guessed:false,cancel:false};
+  if(/מבוטל|בוטלה/.test(s))return{st:"complete",guessed:true,cancel:true};
+  if(/בעי|חוסר|חסר|הוקפא|מוקפא|תקוע|עיכוב/.test(s))return{st:"blocked",guessed:true,cancel:false};
+  if(/coc|נסגר|הושלמ|דווח אחרון/i.test(s))return{st:"complete",guessed:true,cancel:false};
+  if(/שוחרר|פתוח|טרם/.test(s))return{st:"open",guessed:true,cancel:false};
+  return{st:"partial",guessed:true,cancel:false};
 }
 const priNum=v=>{const n=Number(String(v==null?"":v).replace(/[^\d.\-]/g,""));return isFinite(n)?n:0};
 // Priority writes a literal 0 into its code columns (סניף / פרויקט) for "none".
@@ -8120,11 +8144,14 @@ function priBuild(scan,ctx,map,opts){
   };
 
   // ── orders ────────────────────────────────────────────────────────────
-  const orders=[];let closedSkipped=0,noStage=0,guessed=0,serialTotal=0,serialCapped=0,noQty=0,serialFilled=0,fromSheet=0;
+  const orders=[];let closedSkipped=0,canceled=0,noStage=0,guessed=0,serialTotal=0,serialCapped=0,noQty=0,serialFilled=0,fromSheet=0;
   // Progress carried over from the ERP — see the block inside the loop.
   const logs=[];let progWos=0,progQtyWos=0,progNoSerials=0,progClamped=0;
   scan.wos.forEach(w=>{
     const s=priStatus(w.statusRaw);
+    // מבוטלת — "לא להציג". Dropped before anything is counted for it: a canceled
+    // פק"ע is not work, and importing it would put a ghost on every floor screen.
+    if(s.cancel){canceled++;return}
     if(s.guessed)guessed++;
     if(onlyOpen&&s.st==="complete"){closedSkipped++;return}
     // The route is this פק"ע's own, in its own order: the stages it actually has,
@@ -8258,7 +8285,8 @@ function priBuild(scan,ctx,map,opts){
   if(noStage)addIssue("warn",`${noStage} פק"ע ללא שלבים — כל הפעולות שלהן לא שויכו`);
   if(noQty)addIssue("warn",`${noQty} פק"ע ללא כמות`);
   if(guessed)addIssue("info",`${guessed} פק"ע עם סטטוס Priority שאינו ברשימה — שויך לפי הדמיון`);
-  if(closedSkipped)addIssue("info",`${closedSkipped} פק"ע סגורות (COC / נסגרה) לא יובאו`);
+  if(closedSkipped)addIssue("info",`${closedSkipped} פק"ע שהסתיימו (נסגרה / דווח אחרון / COC) לא יובאו`);
+  if(canceled)addIssue("info",`${canceled} פק"ע מבוטלות — לא יובאו`);
   if(scan.skipped)addIssue("info",`${scan.skipped} שורות ללא מספר פק"ע — דולגו`);
   if(serialCapped)addIssue("warn",`${serialCapped} פק"ע קיבלו פחות סידוריים מהכמות בגלל התקרה`);
   if(progQtyWos)addIssue("info",`${progQtyWos} פק"ע ללא סידוריים קיבלו את ההתקדמות שלהן כחתימה לפי כמות — אפשר להמשיך לחתום עליהן בכרטיס הפק"ע`);
@@ -8275,7 +8303,7 @@ function priBuild(scan,ctx,map,opts){
       serials:serialTotal,serialWos:fromSheet,serialFilled,sheetSerials:(scan.serials||{}).rows||0,
       defects:0,shortages:0,logs:logs.length,progWos,progQtyWos,progNoSerials,
       byStatus:orders.reduce((m,o)=>{m[o.status]=(m[o.status]||0)+1;return m},{}),
-      newStages:newStages.length,newProjects:newProjects.length,stds:stds.length,closedSkipped}};
+      newStages:newStages.length,newProjects:newProjects.length,stds:stds.length,closedSkipped,canceled}};
 }
 const XL_STAT_IN={"פתוחה":"open","פתוח":"open","open":"open","חלקית":"partial","חלקי":"partial","partial":"partial",
   "הושלמה":"complete","הושלם":"complete","סגורה":"complete","complete":"complete","תקועה":"blocked","חסומה":"blocked","blocked":"blocked"};
@@ -8304,11 +8332,19 @@ function doImport(file,ctx,cb){
     const projByName=new Map(projects.map(p=>[xlNorm(p.name),p.id]));
     const stgByName=new Map(stages.map(s=>[xlNorm(s.name),s.id]));
     const allStageIds=stages.map(s=>s.id);
-    const oMap={};let skipped=0;
+    const oMap={};let skipped=0,canceledRows=0;
+    // פק"ע the file calls מבוטלת never reach the app, so neither do the serial /
+    // defect / progress rows hanging off them — those are skipped without a warning.
+    const canceledWos=new Set();
     rowsOf(wsO).forEach((r,i)=>{
       const wo=String(xlGet(r,'מספר פק"ע','פק"ע','פקע',"WO","wo number","מספר")||"").trim();
       if(!wo){skipped++;return}
       if(oMap[wo]){issues.push({level:"warn",msg:`שורה ${i+2}: פק"ע ${wo} מופיעה יותר מפעם אחת — נלקחה השורה הראשונה`});return}
+      // Status first: a canceled פק"ע is dropped before the row's other warnings
+      // are raised, so the preview stays quiet about a row nobody will import.
+      const stCell=xlGet(r,"סטטוס",PRI_H.status,"status");
+      const stKnown=XL_STAT_IN[xlNorm(stCell)],stPri=priStatus(stCell);
+      if(!stKnown&&stPri.cancel){canceledRows++;canceledWos.add(wo);return}
       const pName=String(xlGet(r,"פרויקט","project")||"").trim();
       const pid=pName?projByName.get(xlNorm(pName))||"":"";
       if(pName&&!pid)issues.push({level:"warn",msg:`פק"ע ${wo}: הפרויקט ״${pName}״ לא קיים במערכת — הפק"ע תיובא ללא פרויקט`});
@@ -8332,14 +8368,16 @@ function doImport(file,ctx,cb){
         targetDate:xlDate(xlGet(r,"יעד אספקה","יעד","ת. סיום יצור","תאריך סיום","target")),
         // Unknown wording (a Priority status pasted into the template, say) is
         // still placed by meaning rather than defaulting everything to "open".
-        status:XL_STAT_IN[xlNorm(xlGet(r,"סטטוס",PRI_H.status,"status"))]||priStatus(xlGet(r,"סטטוס",PRI_H.status,"status")).st,
+        status:stKnown||stPri.st,
         stageIds,serials:[],shortages:[],defects:[],deliveredSerials:[]};
     });
     const list=Object.values(oMap);
     if(!list.length){cb(null,'לא נמצאו פקודות עבודה בקובץ — ודא שקיימת עמודת ״מספר פק"ע״ מלאה');return}
     if(skipped)issues.push({level:"info",msg:skipped===1?"שורה ריקה אחת בגיליון פקודות עבודה — דולגה":`${skipped} שורות ריקות בגיליון פקודות עבודה — דולגו`});
+    if(canceledRows)issues.push({level:"info",msg:`${canceledRows} פק"ע מבוטלות — לא יובאו`});
 
-    const orphan=(sheet,wo,i)=>issues.push({level:"warn",msg:`${sheet} שורה ${i+2}: פק"ע ${wo||"(ריק)"} לא נמצאה בגיליון פקודות עבודה — השורה דולגה`});
+    const orphan=(sheet,wo,i)=>{if(canceledWos.has(wo))return;
+      issues.push({level:"warn",msg:`${sheet} שורה ${i+2}: פק"ע ${wo||"(ריק)"} לא נמצאה בגיליון פקודות עבודה — השורה דולגה`})};
 
     // סידוריים
     let nSer=0;
@@ -8656,6 +8694,11 @@ function ExcelTab({orders,projects,stages,stageBlocks,workLogs,users,customTasks
                   ⚠️ {priRes.stats.closedSkipped} סגורות מדולגות
                 </span>
               )}
+              {priRes.stats.canceled>0&&(
+                <span title='פק"ע בסטטוס ״מבוטלת״ אינן מיובאות' style={{background:"#8b95a81a",color:"#8b95a8",border:"1px solid #8b95a844",borderRadius:14,padding:"3px 11px",fontWeight:600,fontSize:12}}>
+                  🚫 {priRes.stats.canceled} מבוטלות לא יובאו
+                </span>
+              )}
             </div>
           </div>
 
@@ -8663,7 +8706,7 @@ function ExcelTab({orders,projects,stages,stageBlocks,workLogs,users,customTasks
             <div style={{fontWeight:700,fontSize:12.5,marginBottom:2}}>מה נכנס לאפליקציה</div>
             <ChkOpt checked={priOpts.onlyOpen} onChange={v=>setOpt("onlyOpen",v)} color="#f59e0b" label='דלג על פק"ע סגורות'
               hint={priOpts.onlyOpen
-                ?`פק"ע בסטטוס פקע COC / נסגרה לא ייובאו כלל — ${priRes.stats.closedSkipped} פק"ע יישארו בחוץ`
+                ?`פק"ע בסטטוס נסגרה / דווח אחרון / פקע COC לא ייובאו כלל — ${priRes.stats.closedSkipped} פק"ע יישארו בחוץ`
                 :'כבוי — כל הפק"ע שבקובץ נכנסות, והסגורות נכנסות בסטטוס ״הושלמה״'}/>
             <ChkOpt checked={priOpts.importProgress} onChange={v=>setOpt("importProgress",v)} label="ייבא התקדמות בייצור"
               hint='עמודות ״כמות מדווחת״ / ״יתרה לבצוע״ — כל יחידה שדווחה בפעולה נרשמת כשלב שהושלם, כך שסרגלי ההתקדמות באפליקציה מראים את המצב האמיתי ולא 0%'/>
