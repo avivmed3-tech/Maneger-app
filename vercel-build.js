@@ -38,6 +38,11 @@ const SHIP = [
   { file: "app-icon-512.png" },
   { file: "app-icon-maskable-512.png" },
   { file: "landing.html" },
+  // Only files listed here reach dist/, and dist/ is what Vercel serves — a
+  // crawler asking for either of these on omniview.website would 404 if they
+  // were left out, however present they are in the repo.
+  { file: "robots.txt" },
+  { file: "sitemap.xml" },
 ];
 
 const r = spawnSync(process.execPath, [path.join(ROOT, "build.js")], { stdio: "inherit" });
