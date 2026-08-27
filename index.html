@@ -2353,13 +2353,17 @@ function Dashboard({orders,projects,stages,users,workLogs,departments,customTask
     return m;
   },[orders]);
   const statCount=useMemo(()=>{
-    const c={open:0,partial:0,complete:0,blocked:0,ph_pre:0,ph_line:0,ph_stuck:0,ph_done:0};
-    orders.forEach(o=>{const k=o.status||"open";if(c[k]!==undefined)c[k]++;c["ph_"+orderPhase(o)]++});
+    const c={live:0,open:0,partial:0,complete:0,blocked:0,ph_pre:0,ph_line:0,ph_stuck:0,ph_done:0,ph_cancelled:0};
+    orders.forEach(o=>{const ph=orderPhase(o);c["ph_"+ph]++;if(ph==="cancelled")return;
+      c.live++;const k=o.status||"open";if(c[k]!==undefined)c[k]++});
     return c;
   },[orders]);
 
   // Filter orders by project, division and state
   const fOrders=useMemo(()=>orders.filter(o=>{
+    // מבוטלת is "do not show": it never reaches a KPI, a chart or the late list
+    // unless its own option is picked in the status filter.
+    if(selStat!=="ph_cancelled"&&isCancelled(o))return false;
     if(selProj!=="all"&&o.projectId!==selProj)return false;
     if(selBranch!=="all"){
       const c=branchCode(o.branch);
@@ -2517,19 +2521,20 @@ function Dashboard({orders,projects,stages,users,workLogs,departments,customTask
               {branchCount.none>0&&<option value="none">ללא סניף · {branchCount.none}</option>}
             </select></div>
           <div style={{display:"flex",flexDirection:"column",gap:3,minWidth:180}}><label style={{fontSize:11,color:"var(--c-dim)"}}>סטטוס פק"ע</label>
-            <select value={selStat} onChange={e=>setSelStat(e.target.value)} style={{padding:"5px 8px",fontSize:12}} title='הסטטוס כפי שהגיע מ-Priority, ומיקום הפק"ע בקו הייצור'>
+            <select value={selStat} onChange={e=>setSelStat(e.target.value)} style={{padding:"5px 8px",fontSize:12}} title='הסטטוס כפי שהגיע מ-Priority, והשלב שבו הפק"ע נמצאת בתהליך'>
               <option value="all">כל הסטטוסים</option>
               <optgroup label="סטטוס מה-ERP">
                 {ST_ORDER.map(k=><option key={k} value={k}>{SL[k]} · {statCount[k]||0}</option>)}
               </optgroup>
-              <optgroup label="מיקום בקו הייצור">
-                {PHASE_ORDER.map(k=><option key={"ph_"+k} value={"ph_"+k}>{ST_PHASE[k].icon} {ST_PHASE[k].label} · {statCount["ph_"+k]||0}</option>)}
+              <optgroup label="שלב בתהליך">
+                {PHASE_ORDER.filter(k=>k!=="cancelled"||statCount.ph_cancelled>0).map(k=><option key={"ph_"+k} value={"ph_"+k}>{ST_PHASE[k].icon} {ST_PHASE[k].label} · {statCount["ph_"+k]||0}</option>)}
               </optgroup>
             </select></div>
           <div style={{display:"flex",flexDirection:"column",gap:3}}><label style={{fontSize:11,color:"var(--c-dim)"}}>שנה</label><select value={selYear} onChange={e=>setSelYear(e.target.value)} style={{padding:"5px 8px",fontSize:12}}><option value="all">כל השנים</option>{allYears.map(y=><option key={y} value={y}>{y}</option>)}</select></div>
           <div style={{display:"flex",flexDirection:"column",gap:3}}><label style={{fontSize:11,color:"var(--c-dim)"}}>תקופה</label><SegBtn options={[["month","חודשי"],["quarter","רבעוני"],["year","שנתי"]]} value={period} onChange={setPeriod}/></div>
           {(anyFilter||selYear!=="all")&&<button onClick={()=>{setSelProj("all");setSelYear("all");setSelBranch("all");setSelStat("all")}} style={{background:"#374151",color:"#e2e8f0",border:"none",borderRadius:6,padding:"5px 10px",fontSize:12,fontFamily:"inherit"}}>✕ נקה</button>}
-          {anyFilter&&<span style={{fontSize:11.5,color:"var(--c-dim)",paddingBottom:3}}>מוצגות <b style={{color:"var(--c-text)"}}>{fOrders.length.toLocaleString()}</b> מתוך {orders.length.toLocaleString()} פק"ע — כל המספרים במסך מתייחסים אליהן בלבד</span>}
+          {anyFilter&&<span style={{fontSize:11.5,color:"var(--c-dim)",paddingBottom:3}}>מוצגות <b style={{color:"var(--c-text)"}}>{fOrders.length.toLocaleString()}</b> מתוך {statCount.live.toLocaleString()} פק"ע — כל המספרים במסך מתייחסים אליהן בלבד</span>}
+          {statCount.ph_cancelled>0&&selStat!=="ph_cancelled"&&<span style={{fontSize:11.5,color:"var(--c-dim)",paddingBottom:3}} title={ST_PHASE.cancelled.hint}>🚫 {statCount.ph_cancelled.toLocaleString()} פק"ע מבוטלות אינן נספרות</span>}
         </Card>
       </div>
 
@@ -2537,7 +2542,7 @@ function Dashboard({orders,projects,stages,users,workLogs,departments,customTask
       <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(140px,1fr))",gap:9,marginBottom:14}}>
         <KpiBox i="📋" v={openOrders} label='פק"ע שטרם הסתיימו' c="#f59e0b" sub={noUnitOrders?`מתוכן ${noUnitOrders.toLocaleString()} ללא סידוריים לדיווח`:null}/>
         <KpiBox i="🔢" v={totalSerials.toLocaleString()} label='סה"כ יחידות' c="#60a5fa" sub={`${completedSerials.toLocaleString()} הושלמו`}/>
-        <KpiBox i="🚧" v={preLine.toLocaleString()} label={ST_PHASE.pre.label} c={ST_PHASE.pre.color} sub='פתוחה / שוחררה — עוד לא בקו'/>
+        <KpiBox i="🚧" v={preLine.toLocaleString()} label={ST_PHASE.pre.label} c={ST_PHASE.pre.color} sub='פתוחה / שוחררה — התהליך לא התחיל'/>
         <KpiBox i="🚨" v={overdue.length.toLocaleString()} label='פק"ע באיחור' c={overdue.length?"#ef4444":"#10b981"} sub='מול תאריך סיום ייצור מהפריוריטי'/>
         <KpiBox i="🎯" v={onTimePct!=null?onTimePct+"%":"—"} label="עמידה בלוחות זמנים" c={onTimePct==null?"#8b95a8":onTimePct>=85?"#10b981":onTimePct>=60?"#f59e0b":"#ef4444"} sub={datedOrders.length?`${onTimeCount}/${datedOrders.length} פק"ע בזמן`:null}/>
         <KpiBox i="💰" v={fmtMoney(actualRev)} label="הכנסה ממומשת" c="#a78bfa"/>
@@ -2562,7 +2567,7 @@ function Dashboard({orders,projects,stages,users,workLogs,departments,customTask
           </div>
           <div style={{fontSize:11.5,color:"var(--c-muted)",marginBottom:9,lineHeight:1.7,background:"var(--c-deep)",border:"1px solid var(--c-border)",borderRadius:8,padding:"7px 10px"}}>
             האיחור נמדד מול <b style={{color:"var(--c-text)"}}>תאריך סיום ייצור</b> — עמודת <b style={{color:"var(--c-text)"}}>״ת. סיום יצור״</b> מהפריוריטי, שנשמרת על כל פק"ע כיעד האספקה.
-            נספרת כאן כל פק"ע שהתאריך שלה עבר ושעדיין לא כל היחידות שלה סיימו את המסלול — גם פק"ע שמנוהלת לפי כמות וללא סידוריים. פק"ע שיצאה מהקו (COC / נסגרה) אינה נספרת.
+            נספרת כאן כל פק"ע שהתאריך שלה עבר ושעדיין לא כל היחידות שלה סיימו את המסלול — גם פק"ע שמנוהלת לפי כמות וללא סידוריים. פק"ע שהסתיימה (דווח אחרון / נסגרה / COC) או שבוטלה אינה נספרת.
           </div>
           {(showAllLate?overdue:overdue.slice(0,8)).map(({o,days})=>{
             const br2=branchCode(o.branch),erp2=orderErpInfo(o),ph2=ST_PHASE[orderPhase(o)]||ST_PHASE.line;
@@ -2627,9 +2632,9 @@ function Dashboard({orders,projects,stages,users,workLogs,departments,customTask
         <Card style={{display:"flex",flexDirection:"column"}}>
           <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:10}}><div style={{display:"flex",alignItems:"center",gap:7}}><div style={{fontWeight:700,fontSize:14}}>📊 התפלגות</div><ChartInfo title="התפלגות"
             shows="טבעת (Donut) שמפלגת את הנתונים לפי הבחירה בתפריט: סטטוס יחידות, פרויקטים או שלבי ייצור. כל פלח הוא קטגוריה."
-            data={["סטטוס יחידות — כמה יחידות הושלמו לעומת כמה עדיין בתהליך.",'מיקום בקו — כמה פק"ע טרם נכנסו לייצור, כמה בקו, כמה עצורות וכמה יצאו.','סניפים — כמה פק"ע בכל חטיבה עסקית.',"פרויקטים — כמה יחידות הושלמו בכל פרויקט.","שלבים — כמה פעולות עבודה בוצעו בכל שלב ייצור."]}
+            data={["סטטוס יחידות — כמה יחידות הושלמו לעומת כמה עדיין בתהליך.",'שלב בתהליך — כמה פק"ע טרם התחילו, כמה בתהליך ייצור, כמה עצורות וכמה הסתיימו.','סניפים — כמה פק"ע בכל חטיבה עסקית.',"פרויקטים — כמה יחידות הושלמו בכל פרויקט.","שלבים — כמה פעולות עבודה בוצעו בכל שלב ייצור."]}
             how="לכל קטגוריה מסכמים את מספר היחידות או הפעולות שלה, וגודל הפלח בטבעת משקף את חלקה היחסי מתוך הסך הכולל."
-            tip="פלח גדול = הקטגוריה הדומיננטית. כך רואים במבט אחד היכן מרוכזת רוב הפעילות."/></div><select value={donutSlice} onChange={e=>setDonutSlice(e.target.value)} style={{padding:"3px 6px",fontSize:11,width:"auto"}}><option value="status">סטטוס יחידות</option><option value="phase">מיקום בקו</option><option value="branch">סניפים</option><option value="project">פרויקטים</option><option value="stage">שלבים</option></select></div>
+            tip="פלח גדול = הקטגוריה הדומיננטית. כך רואים במבט אחד היכן מרוכזת רוב הפעילות."/></div><select value={donutSlice} onChange={e=>setDonutSlice(e.target.value)} style={{padding:"3px 6px",fontSize:11,width:"auto"}}><option value="status">סטטוס יחידות</option><option value="phase">שלב בתהליך</option><option value="branch">סניפים</option><option value="project">פרויקטים</option><option value="stage">שלבים</option></select></div>
           <div style={{flex:1,display:"flex",alignItems:"center",justifyContent:"center"}}><DonutChart data={donutData} size={170}/></div>
         </Card>
       </div>
@@ -3524,6 +3529,9 @@ function Orders({orders,projects,stages,stageBlocks,updO,workLogs,onWorkLog,onDe
   const filtered=useMemo(()=>{
     const q=search.trim().toLowerCase();
     const list=orders.filter(o=>{
+      // "לא להציג" is part of what מבוטלת means, so it is held out of the list
+      // unless its own chip is the one selected.
+      if(filterStat!=="ph_cancelled"&&isCancelled(o))return false;
       if(filterProj!=="all"&&o.projectId!==filterProj)return false;
       // Branch = the business division the פק"ע belongs to, straight from the ERP.
       if(filterBranch!=="all"){
@@ -3557,12 +3565,17 @@ function Orders({orders,projects,stages,stageBlocks,updO,workLogs,onWorkLog,onDe
   // How many פק"ע sit in each status, so the filter chips say what they will show
   // — and so a run of "everything is open" is visible before anyone goes looking.
   const statCount=useMemo(()=>{
-    const c={open:0,partial:0,complete:0,blocked:0,nounits:0,gap:0,ph_pre:0,ph_line:0,ph_stuck:0,ph_done:0};
+    const c={all:0,open:0,partial:0,complete:0,blocked:0,nounits:0,gap:0,ph_pre:0,ph_line:0,ph_stuck:0,ph_done:0,ph_cancelled:0};
     orders.forEach(o=>{
+      const ph=orderPhase(o);
+      c["ph_"+ph]++;
+      // A hidden פק"ע is counted on its own chip only — otherwise every other
+      // number on the bar would promise rows the list will not show.
+      if(ph==="cancelled")return;
+      c.all++;
       const k=o.status||"open";if(c[k]!==undefined)c[k]++;
       const rs=orderReportState(o,orderRoute(o,stages),workLogs,doneIdx,qtyIdx);
       if(c[rs]!==undefined)c[rs]++;
-      c["ph_"+orderPhase(o)]++;
     });
     return c;
   },[orders,stages,workLogs,doneIdx,qtyIdx]);
@@ -3608,7 +3621,7 @@ function Orders({orders,projects,stages,stageBlocks,updO,workLogs,onWorkLog,onDe
         <div style={{fontSize:12,color:"var(--c-dim)",paddingBottom:4}}>{filtered.length} פק"ע</div>
         <div style={{display:"flex",gap:6,flexWrap:"wrap",width:"100%",alignItems:"center"}}>
           <span style={{fontSize:11,color:"var(--c-dim)",fontWeight:600}} title='הסטטוס כפי שהגיע מה-ERP בייבוא'>סטטוס:</span>
-          {[["all",'הכל',orders.length,"#8b95a8",""],
+          {[["all",'הכל',statCount.all,"#8b95a8",""],
             ...ST_ORDER.map(k=>[k,SL[k],statCount[k],SC[k],"הסטטוס כפי שהגיע מה-ERP בייבוא"]),
             ["nounits",`${REPORT_STATE.nounits.icon} ${REPORT_STATE.nounits.label}`,statCount.nounits,REPORT_STATE.nounits.color,REPORT_STATE.nounits.hint],
             ["gap",`${REPORT_STATE.gap.icon} ${REPORT_STATE.gap.label}`,statCount.gap,REPORT_STATE.gap.color,REPORT_STATE.gap.hint],
@@ -3622,8 +3635,8 @@ function Orders({orders,projects,stages,stageBlocks,updO,workLogs,onWorkLog,onDe
             both open and both mean nobody has started — separating them from the
             ones already in the queue is the whole point of this row. */}
         <div style={{display:"flex",gap:6,flexWrap:"wrap",width:"100%",alignItems:"center"}}>
-          <span style={{fontSize:11,color:"var(--c-dim)",fontWeight:600}} title='נגזר מהסטטוס המקורי של Priority ששמור על כל פק"ע'>מיקום בקו:</span>
-          {PHASE_ORDER.map(k=>{const ph=ST_PHASE[k],key="ph_"+k,n=statCount[key]||0;return(
+          <span style={{fontSize:11,color:"var(--c-dim)",fontWeight:600}} title='נגזר מהסטטוס המקורי של Priority ששמור על כל פק"ע'>שלב בתהליך:</span>
+          {PHASE_ORDER.filter(k=>k!=="cancelled"||statCount.ph_cancelled>0).map(k=>{const ph=ST_PHASE[k],key="ph_"+k,n=statCount[key]||0;return(
             <button key={key} title={ph.hint} onClick={()=>setFilterStat(filterStat===key?"all":key)} style={{background:filterStat===key?ph.color+"26":"var(--c-deep)",
               border:`1px solid ${filterStat===key?ph.color+"88":"var(--c-border)"}`,color:filterStat===key?ph.color:"var(--c-muted)",
               borderRadius:16,padding:"3px 11px",fontSize:11.5,fontWeight:600,fontFamily:"inherit",cursor:"pointer"}}>{ph.icon} {ph.label} · {n}</button>
@@ -7735,7 +7748,7 @@ function doExport(ctx){
   addSheet(wb,"סיכום כללי",["מדד","ערך"],sumRows,[30,26],null,"0F2942");
 
   // ── 1: פקודות עבודה ─────────────────────────────────────────────────────
-  const h1=['מספר פק"ע','P/N (מק"ט)','תיאור','פרויקט','סניף','חטיבה','מחלקות הסניף','סטטוס','סטטוס פק"ע ב-Priority','מיקום בקו','הערת סטטוס','כמות מוזמנת','סידוריים','נמסרו','% השלמה','מחיר ליחידה','שווי כולל','תאריך קבלה','יעד אספקה','ימים ליעד','שלבים','בלוק','זמן תקן ליח\' (דק\')','זמן מכירה ליח\' (דק\')','זמן תקן שנצבר (שע\')','זמן מכירה שנצבר (שע\')','זמן בפועל (שע\')','פער מול תקן (שע\')','עמידה בתקן %','פער מכירה (שע\')','ניצול %','תקלות פתוחות','תקלות סה"כ','חוסרים פתוחים'];
+  const h1=['מספר פק"ע','P/N (מק"ט)','תיאור','פרויקט','סניף','חטיבה','מחלקות הסניף','סטטוס','סטטוס פק"ע ב-Priority','שלב בתהליך','הערת סטטוס','כמות מוזמנת','סידוריים','נמסרו','% השלמה','מחיר ליחידה','שווי כולל','תאריך קבלה','יעד אספקה','ימים ליעד','שלבים','בלוק','זמן תקן ליח\' (דק\')','זמן מכירה ליח\' (דק\')','זמן תקן שנצבר (שע\')','זמן מכירה שנצבר (שע\')','זמן בפועל (שע\')','פער מול תקן (שע\')','עמידה בתקן %','פער מכירה (שע\')','ניצול %','תקלות פתוחות','תקלות סה"כ','חוסרים פתוחים'];
   const r1=orders.map(o=>{
     const sers=o.serials||[],logs=byOrder.get(o.id)||[];
     const act=logs.reduce((s,w)=>s+Number(w.durationMin||0),0);
@@ -8000,13 +8013,13 @@ const TPL_PROGRESS=['פק"ע','שלב','כמות שהושלמה'];
 // to the production line.
 function addStatusSheet(wb){
   const rows=Object.entries(PRI_STATUS_INFO).map(([raw,v])=>[
-    raw,SL[v.st]||v.st,(ST_PHASE[v.phase]||{}).label||"",v.desc]);
-  rows.push(["","","",""]);
-  PHASE_ORDER.forEach(k=>rows.push(["— "+ST_PHASE[k].label+" —","","",ST_PHASE[k].hint]));
-  rows.push(["","","",""]);
-  rows.push(['סטטוס שאינו ברשימה',"—","—",'סטטוס שהוזן ב-Priority ואינו ברשימה הזו משויך אוטומטית לפי הניסוח שלו (״חוסר״/״בעיה״ ← תקועה, ״נסגרה״/COC ← הושלמה, ״שוחררה״/״פתוחה״ ← טרם נכנסה לייצור), ומסומן באפליקציה בסימן ❓']);
-  addSheet(wb,'מילון סטטוס פק"ע',['סטטוס פק"ע ב-Priority',"נכנס לאפליקציה כ־","מיקום בקו הייצור","מה זה אומר"],
-    rows,[24,14,20,100],(ri,c,row)=>String(row[0]||"").startsWith("—")?xlTag("1E40AF","DBEAFE"):null,"334155");
+    raw,SL[v.st]||v.st,(ST_PHASE[v.phase]||{}).label||"",v.official?"כן":"לא",v.desc]);
+  rows.push(["","","","",""]);
+  PHASE_ORDER.forEach(k=>rows.push(["— "+ST_PHASE[k].label+" —","","","",ST_PHASE[k].hint]));
+  rows.push(["","","","",""]);
+  rows.push(['סטטוס שאינו ברשימה',"—","—","לא",'סטטוס שהוזן ב-Priority ואינו ברשימה הזו משויך אוטומטית לפי הניסוח שלו (״חוסר״/״בעיה״ ← תקועה, ״נסגרה״/״דווח אחרון״ ← הסתיימה, ״מבוטלת״ ← לא להציג, ״שוחררה״/״פתוחה״ ← טרם התחיל תהליך ייצור), ומסומן באפליקציה בסימן ❓']);
+  addSheet(wb,'מילון סטטוס פק"ע',['סטטוס פק"ע ב-Priority',"נכנס לאפליקציה כ־","שלב בתהליך","ברשימה הרשמית","מה זה אומר"],
+    rows,[24,14,20,15,100],(ri,c,row)=>String(row[0]||"").startsWith("—")?xlTag("1E40AF","DBEAFE"):null,"334155");
 }
 function doTemplate(ctx){
   const {projects=[],stages=[],stageBlocks=[]}=ctx||{};
@@ -8141,115 +8154,122 @@ const PRI_NOTE_H=["סיבת עיכוב","סיבת העיכוב","סיבת תקי
 // "הועבר לייצור" (also open, but already in the queue) made the open pile
 // unreadable, so the phase is carried beside the status and filtered on its own.
 //
-//   pre    על הנייר בלבד — טרם נכנסה לקו הייצור
-//   line   בקו — עובדים עליה, או שהיא ממתינה לתחנה הבאה
-//   stuck  נעצרה מסיבה מזוהה; הסטטוס עצמו הוא הסיבה
-//   done   יצאה מהקו
+//   pre        תהליך הייצור לא התחיל — פתוחה או שוחררה, ותו לא
+//   line       בתהליך ייצור, מהדפסת התיק ועד ההמתנה לאריזה
+//   stuck      בתהליך, אבל נעצרה מסיבה מזוהה; הסטטוס עצמו הוא הסיבה
+//   done       הסתיימה — דווח אחרון, נסגרה, COC
+//   cancelled  מבוטלת — ״לא להציג״: מדולגת בייבוא ומוסתרת במסכים
 const ST_PHASE={
-  pre:{key:"pre",label:"טרם נכנסה לייצור",icon:"🚧",color:"#f59e0b",
-    hint:'הפק"ע קיימת ב-ERP אך עוד לא נכנסה לקו הייצור — נפתחה, הודפסה, שוחררה או ממתינה ליצור. אין עליה עבודה לדווח, והיא לא אמורה להיספר כ"בתהליך".'},
-  line:{key:"line",label:"בקו הייצור",icon:"🏭",color:"#3b82f6",
-    hint:'הפק"ע נמצאת בתוך קו הייצור — מבוצעת עליה עבודה או שהיא ממתינה לתחנה הבאה, לביקורת או לאריזה.'},
+  pre:{key:"pre",label:"טרם התחיל ייצור",icon:"🚧",color:"#f59e0b",
+    hint:'הפק"ע נפתחה או שוחררה ב-ERP ותהליך הייצור עוד לא התחיל. אין עליה עבודה לדווח, והיא לא אמורה להיספר כ"בתהליך".'},
+  line:{key:"line",label:"בתהליך ייצור",icon:"🏭",color:"#3b82f6",
+    hint:'תהליך הייצור של הפק"ע התחיל — מהכנת התיק והליקוט ועד הביקורת והאריזה. גם המתנה לתחנה הבאה היא חלק מהתהליך.'},
   stuck:{key:"stuck",label:"עצורה",icon:"⛔",color:"#ef4444",
-    hint:'הייצור נעצר מסיבה מזוהה — חוסר, בעיה הנדסית, הקפאה או המתנה ללקוח. הסטטוס מה-ERP הוא סיבת התקיעה.'},
-  done:{key:"done",label:"יצאה מהקו",icon:"✅",color:"#10b981",
-    hint:'הפק"ע הסתיימה — קיבלה COC, נסגרה או בוטלה. לא צפויה עליה עוד עבודה.'}
+    hint:'הפק"ע בתהליך ייצור אבל נעצרה מסיבה מזוהה — חוסר, בעיה הנדסית או המתנה. הסטטוס מה-ERP הוא סיבת התקיעה.'},
+  done:{key:"done",label:"הסתיימה",icon:"✅",color:"#10b981",
+    hint:'הפק"ע סיימה את התהליך — דווח אחרון, נסגרה או קיבלה COC. לא צפויה עליה עוד עבודה.'},
+  cancelled:{key:"cancelled",label:"מבוטלת",icon:"🚫",color:"#8b95a8",
+    hint:'הפק"ע בוטלה ולא תיוצר. לפי הגדרת התהליך היא לא מוצגת — לא ברשימות, לא בדשבורד ולא באיחורים — אלא אם בוחרים במפורש להציג אותה. בייבוא היא מדולגת כברירת מחדל.'}
 };
-const PHASE_ORDER=["pre","line","stuck","done"];
-// status text (as Priority writes it) → {st: app status, phase, desc}
+const PHASE_ORDER=["pre","line","stuck","done","cancelled"];
+// status text (as Priority writes it) → {st: app status, phase, official, desc}
+// `official` marks the twenty values that came over on the אנה status list. The
+// rest are values seen in earlier exports and kept as a safety net — they are
+// placed by the same rules, and the dictionary says they are not on the list, so
+// nobody reads an inference as a decision.
 const PRI_STATUS_INFO={
-  // ── טרם נכנסה לקו הייצור ────────────────────────────────────────────────
-  "פתוחה":{st:"open",phase:"pre",
-    desc:'הפק"ע נפתחה ב-ERP ועדיין לא שוחררה לייצור. אין הקצאת חומרים פעילה, אף פעולה לא נפתחה לדיווח, והיא לא נמצאת בקו.'},
-  "הודפסה":{st:"open",phase:"pre",
-    desc:'תיק העבודה של הפק"ע הודפס. היא מוכנה לשחרור אך טרם נכנסה לקו הייצור.'},
-  "שוחררה":{st:"open",phase:"pre",
-    desc:'הפק"ע שוחררה לייצור והחומרים הוקצו — אך אף פעולה עדיין לא בוצעה. היא ממתינה בתור לתחנה הראשונה ולא נכנסה בפועל לקו.'},
-  "ממתין ליצור":{st:"open",phase:"pre",
-    desc:'כל התנאים לייצור מולאו והפק"ע ממתינה בתור. עדיין לא התחילה.'},
-  "קדם יצור":{st:"open",phase:"pre",
-    desc:'שלב ההכנה שלפני הייצור — תיק עבודה, חומרים, כלים ותוכניות. הפק"ע עוד לא בקו.'},
-  // ── בקו הייצור ──────────────────────────────────────────────────────────
-  "הועבר לייצור":{st:"open",phase:"line",
-    desc:'הפק"ע הועברה רשמית לרצפת הייצור ונמצאת בתור של הקו, אך טרם נקלט עליה דיווח ראשון.'},
-  "מאושרת לקיוט":{st:"open",phase:"line",
-    desc:'הפק"ע אושרה לליקוט ערכת החומרים (Kitting). התהליך התחיל, לפני העבודה עצמה.'},
-  "בתהליך קיוט":{st:"partial",phase:"line",
+  // ── טרם התחיל תהליך ייצור ───────────────────────────────────────────────
+  "פתוחה":{st:"open",phase:"pre",official:true,
+    desc:'הפק"ע נפתחה ב-ERP ותהליך הייצור לא התחיל. אין הקצאת חומרים פעילה ואין מה לדווח עליה.'},
+  "שוחררה":{st:"open",phase:"pre",official:true,
+    desc:'הפק"ע שוחררה לייצור והחומרים הוקצו — אבל תהליך הייצור עדיין לא התחיל. היא ממתינה בתור.'},
+  // ── בתהליך ייצור ────────────────────────────────────────────────────────
+  "הודפסה":{st:"partial",phase:"line",official:true,
+    desc:'תיק העבודה של הפק"ע הודפס — התהליך התחיל בהכנת התיק לרצפה.'},
+  "קדם יצור":{st:"partial",phase:"line",official:true,
+    desc:'שלב ההכנה שלפני העבודה עצמה: תיק, חומרים, כלים ותוכניות.'},
+  "ממתין ליצור":{st:"partial",phase:"line",official:true,
+    desc:'כל התנאים מולאו והפק"ע ממתינה בתור לתחנה. זמן המתנה בתוך התהליך, לא זמן עבודה.'},
+  "הועבר לייצור":{st:"partial",phase:"line",official:true,
+    desc:'הפק"ע הועברה רשמית לרצפת הייצור ונמצאת בתור של הקו.'},
+  "מאושרת לקיוט":{st:"partial",phase:"line",official:true,
+    desc:'הפק"ע אושרה לליקוט ערכת החומרים (Kitting).'},
+  "בתהליך קיוט":{st:"partial",phase:"line",official:true,
     desc:'ערכת החומרים של הפק"ע מלוקטת כעת במחסן.'},
-  "בתהליך ייצור":{st:"partial",phase:"line",
+  "בתהליך ייצור":{st:"partial",phase:"line",official:true,
     desc:'העבודה על הפק"ע רצה בפועל — דווחו עליה פעולות ייצור.'},
-  "דווח ראשון":{st:"partial",phase:"line",
-    desc:'נקלט הדיווח הראשון על הפק"ע — הפעולה הראשונה במסלול בוצעה.'},
-  "חיווט":{st:"partial",phase:"line",
-    desc:'הפק"ע נמצאת בשלב החיווט.'},
-  "ביצור קבמ":{st:"partial",phase:"line",
-    desc:'הפק"ע בייצור בקו הקב"מ (קבלן משנה / קו ייעודי).'},
-  'מוכן לקב"מ':{st:"partial",phase:"line",
-    desc:'החלק הפנימי הסתיים והפק"ע ממתינה להעברה לקב"מ.'},
-  "בקרת יצור":{st:"partial",phase:"line",
+  "בקרת יצור":{st:"partial",phase:"line",official:true,
     desc:'בקרת ייצור — התאמת הביצוע לתוכנית נבדקת לפני המשך.'},
-  "סיום יצור":{st:"partial",phase:"line",
-    desc:'פעולות הייצור הסתיימו. הפק"ע ממתינה לביקורת, לאריזה או לסגירה — עדיין בקו.'},
-  "בתהליך בקורת":{st:"partial",phase:"line",
+  "בתהליך בקורת":{st:"partial",phase:"line",official:true,
     desc:'הפק"ע נמצאת בביקורת איכות.'},
-  "ביקורת ראשונ":{st:"partial",phase:"line",
-    desc:'ביקורת ראשונה (ביקורת פתיחה / First Article) מתבצעת על הפק"ע.'},
-  "ביקורת חלקית":{st:"partial",phase:"line",
+  "ביקורת חלקית":{st:"partial",phase:"line",official:true,
     desc:'חלק מהיחידות בפק"ע עברו ביקורת, השאר עדיין ממתינות.'},
-  "ביקורת סופית":{st:"partial",phase:"line",
+  "ביקורת סופית":{st:"partial",phase:"line",official:true,
     desc:'הפק"ע בביקורת הסופית שלפני השחרור והאריזה.'},
-  "תהליך מבקר":{st:"partial",phase:"line",
-    desc:'הפק"ע נמצאת אצל המבקר.'},
-  "ממתין למבקר":{st:"partial",phase:"line",
-    desc:'הפק"ע סיימה את השלב הקודם וממתינה בתור למבקר — זמן המתנה, לא זמן עבודה.'},
-  "ממתין א.FAI":{st:"partial",phase:"line",
-    desc:'הפק"ע ממתינה לאישור FAI (בדיקת פריט ראשון) לפני שאפשר להמשיך.'},
-  "ממתין לאריזה":{st:"partial",phase:"line",
-    desc:'הפק"ע גמורה מבחינת ייצור וממתינה בתור לאריזה.'},
-  "אריזה":{st:"partial",phase:"line",
-    desc:'הפק"ע נארזת למשלוח.'},
-  "בתהליך סגירה":{st:"partial",phase:"line",
-    desc:'הפק"ע בתהליך סגירה ב-ERP — הדיווחים נסגרים והעלויות נאספות.'},
-  // ── עצורה ───────────────────────────────────────────────────────────────
-  "בעיה הנדסית":{st:"blocked",phase:"stuck",
-    desc:'הייצור נעצר בגלל בעיה הנדסית — שרטוט, תוכנית, הוראת עבודה או תקלה טכנית שדורשת החלטה של הנדסה.'},
-  'בעית ח"ג חסר':{st:"blocked",phase:"stuck",
-    desc:'חסר חומר גלם. הפק"ע לא יכולה להתקדם עד שהחומר יגיע.'},
-  "בעית כלי חסר":{st:"blocked",phase:"stuck",
-    desc:'חסר כלי או ציוד ייעודי (Tooling, ג\'יג, מכשור) שנדרש לפעולה.'},
-  "חוסרים ביצור":{st:"blocked",phase:"stuck",
+  "ממתין לאריזה":{st:"partial",phase:"line",official:true,
+    desc:'הייצור הסתיים והפק"ע ממתינה בתור לאריזה — עדיין בתוך התהליך.'},
+  // ── עצורה (בתהליך ייצור, אבל תקועה) ─────────────────────────────────────
+  "חוסרים ביצור":{st:"blocked",phase:"stuck",official:true,
     desc:'חסרים רכיבים בקו הייצור עצמו — הפק"ע נעצרה באמצע המסלול.'},
-  "חוסר נגדי":{st:"blocked",phase:"stuck",
-    desc:'רכיב של הפק"ע נלקח לטובת פק"ע אחרת (חוסר נגדי), והיא ממתינה להשלמה.'},
-  "הוקפאה":{st:"blocked",phase:"stuck",
-    desc:'הפק"ע הוקפאה בהחלטת ניהול — שינוי עדיפויות, המתנה ללקוח או לתקציב.'},
-  "הוחזר לתיקון":{st:"blocked",phase:"stuck",
-    desc:'הפק"ע חזרה לתיקון אחרי שנפסלה בביקורת או בבדיקה.'},
-  "בטיפול לקוח":{st:"blocked",phase:"stuck",
-    desc:'הפק"ע ממתינה להחלטה, לאישור או לחומר מהלקוח.'},
-  // ── יצאה מהקו ───────────────────────────────────────────────────────────
+  "בעיה הנדסית":{st:"blocked",phase:"stuck",official:true,
+    desc:'הייצור נעצר בגלל בעיה הנדסית — שרטוט, תוכנית, הוראת עבודה או תקלה טכנית שדורשת החלטה של הנדסה.'},
+  'בעית ח"ג חסר':{st:"blocked",phase:"stuck",official:true,
+    desc:'חסר חומר גלם. הפק"ע לא יכולה להתקדם עד שהחומר יגיע.'},
+  // ── הסתיימה ─────────────────────────────────────────────────────────────
+  "דווח אחרון":{st:"complete",phase:"done",official:true,
+    desc:'הפעולה האחרונה במסלול דווחה — הפק"ע עברה את כל התהליך.'},
+  "נסגרה":{st:"complete",phase:"done",official:true,
+    desc:'הפק"ע נסגרה ב-ERP. לא צפויה עליה עוד עבודה.'},
+  // ── לא להציג ────────────────────────────────────────────────────────────
+  "מבוטלת":{st:"complete",phase:"cancelled",official:true,
+    desc:'הפק"ע בוטלה ולא תיוצר. לפי הגדרת התהליך היא לא מוצגת — מדולגת בייבוא, ומוסתרת מהרשימות ומהדשבורד אם היא כבר במערכת.'},
+
+  // ── ערכים שאינם ברשימה הרשמית, נשמרים כרשת ביטחון ──────────────────────
   "פקע COC":{st:"complete",phase:"done",
     desc:'הפק"ע קיבלה COC (תעודת התאמה) — סופקה ואושרה. פק"ע גמורה.'},
-  "נסגרה":{st:"complete",phase:"done",
-    desc:'הפק"ע נסגרה ב-ERP. לא צפויה עליה עוד עבודה.'},
-  "בוטלה":{st:"complete",phase:"done",
-    desc:'הפק"ע בוטלה ולא תיוצר. היא יוצאת מהקו בלי אספקה.'}
+  "בוטלה":{st:"complete",phase:"cancelled",
+    desc:'ניסוח אחר של ״מבוטלת״ — הפק"ע בוטלה ולא תיוצר, ואינה מוצגת.'},
+  "דווח ראשון":{st:"partial",phase:"line",
+    desc:'הדיווח הראשון על הפק"ע נקלט — הפעולה הראשונה במסלול בוצעה.'},
+  "חיווט":{st:"partial",phase:"line",desc:'הפק"ע נמצאת בשלב החיווט.'},
+  "ביצור קבמ":{st:"partial",phase:"line",desc:'הפק"ע בייצור בקו הקב"מ (קבלן משנה / קו ייעודי).'},
+  'מוכן לקב"מ':{st:"partial",phase:"line",desc:'החלק הפנימי הסתיים והפק"ע ממתינה להעברה לקב"מ.'},
+  "סיום יצור":{st:"partial",phase:"line",desc:'פעולות הייצור הסתיימו. הפק"ע ממתינה לביקורת, לאריזה או לסגירה.'},
+  "ביקורת ראשונ":{st:"partial",phase:"line",desc:'ביקורת ראשונה (ביקורת פתיחה / First Article) מתבצעת על הפק"ע.'},
+  "תהליך מבקר":{st:"partial",phase:"line",desc:'הפק"ע נמצאת אצל המבקר.'},
+  "ממתין למבקר":{st:"partial",phase:"line",desc:'הפק"ע ממתינה בתור למבקר — זמן המתנה, לא זמן עבודה.'},
+  "ממתין א.FAI":{st:"partial",phase:"line",desc:'הפק"ע ממתינה לאישור FAI (בדיקת פריט ראשון) לפני שאפשר להמשיך.'},
+  "אריזה":{st:"partial",phase:"line",desc:'הפק"ע נארזת למשלוח.'},
+  "בתהליך סגירה":{st:"partial",phase:"line",desc:'הפק"ע בתהליך סגירה ב-ERP — הדיווחים נסגרים והעלויות נאספות.'},
+  "בעית כלי חסר":{st:"blocked",phase:"stuck",desc:'חסר כלי או ציוד ייעודי (Tooling, ג\'יג, מכשור) שנדרש לפעולה.'},
+  "חוסר נגדי":{st:"blocked",phase:"stuck",desc:'רכיב של הפק"ע נלקח לטובת פק"ע אחרת (חוסר נגדי), והיא ממתינה להשלמה.'},
+  "הוקפאה":{st:"blocked",phase:"stuck",desc:'הפק"ע הוקפאה בהחלטת ניהול — שינוי עדיפויות, המתנה ללקוח או לתקציב.'},
+  "הוחזר לתיקון":{st:"blocked",phase:"stuck",desc:'הפק"ע חזרה לתיקון אחרי שנפסלה בביקורת או בבדיקה.'},
+  "בטיפול לקוח":{st:"blocked",phase:"stuck",desc:'הפק"ע ממתינה להחלטה, לאישור או לחומר מהלקוח.'}
 };
 // Priority statuses get renamed and added to over time, so an unfamiliar one is
 // still placed sensibly instead of silently landing on "open" — and the guess
 // says which phase it belongs to as well, because that is what the filters read.
 function priStatus(raw){
   const s=String(raw==null?"":raw).trim();
-  const out=(st,phase,guessed,desc)=>({st,phase,guessed,desc:desc||"",raw:s});
-  if(!s)return out("open","pre",false,'הקובץ לא נשא סטטוס פק"ע לשורה הזו — היא נכנסת כפתוחה שטרם נכנסה לייצור.');
+  const out=(st,phase,guessed,desc,official)=>({st,phase,guessed,official:!!official,desc:desc||"",raw:s});
+  if(!s)return out("open","pre",false,'הקובץ לא נשא סטטוס פק"ע לשורה הזו — היא נכנסת כפתוחה שתהליך הייצור שלה לא התחיל.');
   const hit=PRI_STATUS_INFO[s];
-  if(hit)return out(hit.st,hit.phase,false,hit.desc);
+  if(hit)return out(hit.st,hit.phase,false,hit.desc,hit.official);
   const g='הסטטוס הזה אינו ברשימת הסטטוסים המוכרים של Priority — הוא שויך לפי הניסוח שלו. אפשר לעדכן את הפק"ע ידנית אם השיוך שגוי.';
+  if(/בוטל|מבוטל/.test(s))return out("complete","cancelled",true,g);
   if(/בעי|חוסר|חסר|הוקפא|מוקפא|תקוע|עיכוב/.test(s))return out("blocked","stuck",true,g);
-  if(/coc|נסגר|הושלמ|בוטל/i.test(s))return out("complete","done",true,g);
-  if(/ממתין ליצור|שוחרר|הודפס|פתוח|טרם/.test(s))return out("open","pre",true,g);
+  if(/coc|נסגר|הושלמ|דווח אחרון/i.test(s))return out("complete","done",true,g);
+  // Only פתוחה and שוחררה are before the process starts — everything else that
+  // sounds early (הודפסה, ממתין ליצור, קדם יצור) is already inside it.
+  if(/שוחרר|פתוח|טרם/.test(s))return out("open","pre",true,g);
   return out("partial","line",true,g);
 }
+// A פק"ע the ERP calls מבוטלת is not history to browse — the process says do not
+// show it. It is skipped on import, and one already in the app is kept (so the
+// hours somebody reported against it are not silently erased) but held out of
+// every list and every figure unless it is asked for by name.
+const isCancelled=o=>orderPhase(o)==="cancelled";
 // The phase a פק"ע is in, from whatever the ERP said about it. Orders imported
 // before the raw status was kept have nothing to read, so the app status stands
 // in: "פתוחה" there means nothing was reported, which is the pre-line case.
@@ -8426,7 +8446,7 @@ function priAutoMap(ops,stages,saved){
 // זמן תקן record per מק"ט built from the ז.תקן column.
 function priBuild(scan,ctx,map,opts){
   const {projects=[],stages=[],pnStandards=[]}=ctx||{};
-  const {onlyOpen=false,makeStages=true,makeProjects=true,importStd=true,fillSerials=false,serialMax=100,importProgress=true}=opts||{};
+  const {onlyOpen=false,skipCancelled=true,makeStages=true,makeProjects=true,importStd=true,fillSerials=false,serialMax=100,importProgress=true}=opts||{};
   const issues=[],addIssue=(level,msg)=>{if(issues.length<300)issues.push({level,msg})};
 
   // ── stages ────────────────────────────────────────────────────────────
@@ -8457,13 +8477,19 @@ function priBuild(scan,ctx,map,opts){
   };
 
   // ── orders ────────────────────────────────────────────────────────────
-  const orders=[];let closedSkipped=0,noStage=0,guessed=0,serialTotal=0,serialCapped=0,noQty=0,serialFilled=0,fromSheet=0;
+  const orders=[];let closedSkipped=0,cancelledSkipped=0,noStage=0,guessed=0,serialTotal=0,serialCapped=0,noQty=0,serialFilled=0,fromSheet=0;
+  // Skipped מבוטלת are still reported by number: a פק"ע that is already in the
+  // app and has since been cancelled has to be marked, or it lingers in the list
+  // looking live because the file that cancelled it left it out.
+  const cancelledWos=[];
   // Progress carried over from the ERP — see the block inside the loop.
   const logs=[];let progWos=0,progQtyWos=0,progNoSerials=0,progClamped=0;
   scan.wos.forEach(w=>{
     const s=priStatus(w.statusRaw);
     if(s.guessed)guessed++;
-    if(onlyOpen&&s.st==="complete"){closedSkipped++;return}
+    // מבוטלת means "do not show" — so by default it does not come in at all.
+    if(s.phase==="cancelled"){if(skipCancelled){cancelledSkipped++;cancelledWos.push({wo:w.wo,statusRaw:w.statusRaw});return}}
+    else if(onlyOpen&&s.st==="complete"){closedSkipped++;return}
     // The route is this פק"ע's own, in its own order: the stages it actually has,
     // sequenced by שלב בפק"ע. Not a subset of one company-wide route — two פק"ע
     // can run the same two operations in opposite order, and both are right.
@@ -8598,7 +8624,8 @@ function priBuild(scan,ctx,map,opts){
   if(noStage)addIssue("warn",`${noStage} פק"ע ללא שלבים — כל הפעולות שלהן לא שויכו`);
   if(noQty)addIssue("warn",`${noQty} פק"ע ללא כמות`);
   if(guessed)addIssue("info",`${guessed} פק"ע עם סטטוס Priority שאינו ברשימה — שויך לפי הדמיון`);
-  if(closedSkipped)addIssue("info",`${closedSkipped} פק"ע סגורות (COC / נסגרה) לא יובאו`);
+  if(closedSkipped)addIssue("info",`${closedSkipped} פק"ע סגורות (COC / נסגרה / דווח אחרון) לא יובאו`);
+  if(cancelledSkipped)addIssue("info",`${cancelledSkipped} פק"ע מבוטלות לא יובאו — לפי הגדרת התהליך הן לא מוצגות`);
   if(scan.skipped)addIssue("info",`${scan.skipped} שורות ללא מספר פק"ע — דולגו`);
   if(serialCapped)addIssue("warn",`${serialCapped} פק"ע קיבלו פחות סידוריים מהכמות בגלל התקרה`);
   if(progQtyWos)addIssue("info",`${progQtyWos} פק"ע ללא סידוריים קיבלו את ההתקדמות שלהן כחתימה לפי כמות — אפשר להמשיך לחתום עליהן בכרטיס הפק"ע`);
@@ -8609,7 +8636,7 @@ function priBuild(scan,ctx,map,opts){
   if(sn.dup)addIssue("warn",`${sn.dup} סידוריים כפולים באותה פק"ע — דולגו`);
   if(sn.pnMismatch)addIssue("info",`${sn.pnMismatch} סידוריים עם מק"ט שונה מזה שבגיליון הפעולות — נלקח המק"ט של הפק"ע`);
 
-  return{mode:"priority",orders,newStages,newProjects,stds,logs,issues,opStage:Object.fromEntries(stageOf),
+  return{mode:"priority",orders,newStages,newProjects,stds,logs,issues,cancelledWos,opStage:Object.fromEntries(stageOf),
     stats:{orders:orders.length,rows:scan.rows,ops:scan.ops.length,mapped:stageOf.size,
       byBranch:orders.reduce((m,o)=>{const c=branchCode(o.branch)||"—";m[c]=(m[c]||0)+1;return m},{}),
       serials:serialTotal,serialWos:fromSheet,serialFilled,sheetSerials:(scan.serials||{}).rows||0,
@@ -8621,7 +8648,9 @@ function priBuild(scan,ctx,map,opts){
       byRaw:(()=>{const m=new Map();orders.forEach(o=>{const k=String(o.erpStatus||"").trim()||"(ריק)";
         const e=m.get(k)||{raw:k,n:0,st:o.status,phase:orderPhase(o)};e.n++;m.set(k,e)});
         return[...m.values()].sort((a,b)=>PHASE_ORDER.indexOf(a.phase)-PHASE_ORDER.indexOf(b.phase)||b.n-a.n)})(),
-      newStages:newStages.length,newProjects:newProjects.length,stds:stds.length,closedSkipped}};
+      newStages:newStages.length,newProjects:newProjects.length,stds:stds.length,closedSkipped,cancelledSkipped,
+      // How many מבוטלת the file carries at all, whether or not they are skipped.
+      cancelledInFile:scan.wos.filter(w=>priStatus(w.statusRaw).phase==="cancelled").length}};
 }
 // ── ייבוא חוזר: עדכון במקום כפילות ────────────────────────────────────────
 // The Priority report is a snapshot of everything currently open, so the same
@@ -8770,7 +8799,18 @@ function priMergePlan(built,existing,workLogs){
     if(changes.length<400)changes.push({wo:next.woNumber,fields,
       from:String(prev.erpStatus||SL[prev.status||"open"]||""),to:String(next.erpStatus||SL[next.status||"open"]||"")});
   });
-  return{added,updated,unchanged,changes,logs,dropLogIds,newSerials,progressChanged};
+  // A פק"ע the file cancelled was skipped rather than built, so it never reached
+  // the loop above. It is still a change to the row that is already here.
+  let cancelled=0;
+  (built.cancelledWos||[]).forEach(({wo,statusRaw})=>{
+    const prev=byWo.get(woKey(wo));
+    if(!prev||isCancelled(prev))return;
+    const next={...prev,status:"complete",erpStatus:statusRaw||"מבוטלת"};
+    updated.push(next);cancelled++;
+    if(changes.length<400)changes.push({wo:next.woNumber,fields:["בוטלה — תוסתר"],
+      from:String(prev.erpStatus||SL[prev.status||"open"]||""),to:next.erpStatus});
+  });
+  return{added,updated,unchanged,changes,logs,dropLogIds,newSerials,progressChanged,cancelled};
 }
 // ── כפילויות שכבר נוצרו ───────────────────────────────────────────────────
 // Before the import learned to update in place, every "הוסף לקיימים" run added
@@ -9035,7 +9075,7 @@ function ExcelTab({orders,projects,stages,stageBlocks,workLogs,users,customTasks
   // Skipping closed פק"ע used to be the default, which quietly threw away every
   // סגורה in the file — the import looked like it worked and the history was gone.
   // Now everything in the file comes in, and dropping the closed ones is a choice.
-  const [priOpts,setPriOpts]=useState({onlyOpen:false,makeStages:true,makeProjects:true,importStd:true,fillSerials:false,serialMax:100,importProgress:true});
+  const [priOpts,setPriOpts]=useState({onlyOpen:false,skipCancelled:true,makeStages:true,makeProjects:true,importStd:true,fillSerials:false,serialMax:100,importProgress:true});
   const [showMap,setShowMap]=useState(false);const[mapQ,setMapQ]=useState("");
   // The status legend is long by design — it is the full dictionary — so it opens
   // on demand rather than pushing the import controls off the screen.
@@ -9133,7 +9173,7 @@ function ExcelTab({orders,projects,stages,stageBlocks,workLogs,users,customTasks
       if(importWorkLogs&&(plan.logs.length||plan.dropLogIds.length))importWorkLogs(plan.logs,null,plan.dropLogIds);
       if(r.stds.length&&importPnStds)importPnStds(r.stds);
       recordImport({action:"ייבוא Priority (עדכון)",target:`${plan.added.length} חדשות · ${plan.updated.length} עודכנו`,
-        details:`עדכון על הקיים | ${plan.unchanged} פק"ע ללא שינוי | ${plan.newSerials} סידוריים חדשים | ${plan.progressChanged} פק"ע עם התקדמות שהשתנתה | ${r.stats.newStages} שלבים חדשים | ${r.stats.newProjects} פרויקטים | ${r.stats.stds} זמני תקן`,
+        details:`עדכון על הקיים | ${plan.unchanged} פק"ע ללא שינוי | ${plan.newSerials} סידוריים חדשים | ${plan.progressChanged} פק"ע עם התקדמות שהשתנתה | ${plan.cancelled||0} בוטלו | ${r.stats.newStages} שלבים חדשים | ${r.stats.newProjects} פרויקטים | ${r.stats.stds} זמני תקן`,
         list:[...plan.added,...plan.updated],gone:[],newLogs:plan.logs,newStages:r.newStages,newProjects:r.newProjects,
         droppedLogs:(workLogs||[]).filter(w=>dropSet.has(w.id))});
       setPri(null);
@@ -9277,7 +9317,7 @@ function ExcelTab({orders,projects,stages,stageBlocks,workLogs,users,customTasks
                 </span>
               )}
             </div>
-            <div style={{fontSize:11.5,color:"var(--c-dim)",marginBottom:5}}>ומאיפה הן בקו הייצור:</div>
+            <div style={{fontSize:11.5,color:"var(--c-dim)",marginBottom:5}}>ובאיזה שלב של התהליך הן:</div>
             <div style={{display:"flex",gap:7,flexWrap:"wrap"}}>
               {PHASE_ORDER.map(k=>{const ph=ST_PHASE[k];const n=(priRes.stats.byPhase||{})[k]||0;return(
                 <span key={k} title={ph.hint} style={{background:ph.color+"1a",color:n?ph.color:"var(--c-dim)",border:`1px solid ${ph.color}44`,borderRadius:14,padding:"3px 11px",fontWeight:600,fontSize:12}}>{ph.icon} {ph.label} · {n}</span>
@@ -9290,13 +9330,16 @@ function ExcelTab({orders,projects,stages,stageBlocks,workLogs,users,customTasks
               <div style={{marginTop:8,overflowX:"auto"}}>
                 <table style={{fontSize:12}}><thead><tr>
                   <th style={{minWidth:130}}>סטטוס פק"ע ב-Priority</th><th style={{width:60}}>כמה</th>
-                  <th style={{width:110}}>נכנס כ־</th><th style={{width:150}}>מיקום בקו</th><th>מה זה אומר</th>
+                  <th style={{width:110}}>נכנס כ־</th><th style={{width:150}}>שלב בתהליך</th><th>מה זה אומר</th>
                 </tr></thead><tbody>
                   {(priRes.stats.byRaw||[]).map(r2=>{
                     const info=priStatus(r2.raw==="(ריק)"?"":r2.raw);
                     const ph=ST_PHASE[r2.phase]||ST_PHASE.line;
                     return(<tr key={r2.raw}>
-                      <td style={{fontWeight:600,whiteSpace:"nowrap"}}>{r2.raw}{info.guessed&&<span title="הסטטוס אינו ברשימה המוכרת — שויך לפי הניסוח" style={{color:"#f59e0b",marginRight:4}}>❓</span>}</td>
+                      <td style={{fontWeight:600,whiteSpace:"nowrap"}}>{r2.raw}
+                        {info.guessed
+                          ?<span title="הסטטוס אינו ברשימת הסטטוסים המוכרת — שויך לפי הניסוח" style={{color:"#f59e0b",marginRight:4}}>❓</span>
+                          :!info.official&&<span title="מוכר לאפליקציה, אך אינו מופיע ברשימת הסטטוסים הרשמית" style={{color:"#8b95a8",marginRight:4}}>◦</span>}</td>
                       <td style={{fontWeight:700}}>{r2.n}</td>
                       <td><Badge status={r2.st}/></td>
                       <td style={{color:ph.color,fontWeight:600,whiteSpace:"nowrap"}}>{ph.icon} {ph.label}</td>
@@ -9305,8 +9348,10 @@ function ExcelTab({orders,projects,stages,stageBlocks,workLogs,users,customTasks
                   })}
                 </tbody></table>
                 <div style={{fontSize:11.5,color:"var(--c-dim)",marginTop:6,lineHeight:1.7}}>
-                  ״מיקום בקו״ הוא ההפרדה שארבעת הסטטוסים לא יודעים לעשות: <b style={{color:"#f59e0b"}}>פתוחה</b> ו<b style={{color:"#f59e0b"}}>שוחררה</b> שתיהן ״פתוחה״, ושתיהן פק"ע שעדיין לא נכנסה לקו — לעומת <b>הועבר לייצור</b> שכבר בתור. אפשר לסנן לפי זה במסך פקודות העבודה ובדשבורד.
+                  ״שלב בתהליך״ הוא ההפרדה שארבעת הסטטוסים לא יודעים לעשות: <b style={{color:"#f59e0b"}}>פתוחה</b> ו<b style={{color:"#f59e0b"}}>שוחררה</b> שתיהן ״פתוחה״ ובשתיהן תהליך הייצור לא התחיל — לעומת <b>הודפסה</b> או <b>הועבר לייצור</b> שכבר בתוכו. אפשר לסנן לפי זה במסך פקודות העבודה ובדשבורד.
                   {" "}הסטטוס המקורי נשמר על כל פק"ע, ובפק"ע <b style={{color:"#ef4444"}}>תקועה</b> הוא מוצג בכרטיס כסיבת התקיעה.
+                  {" "}<b style={{color:"var(--c-text)"}}>מבוטלת</b> מוגדרת כ״לא להציג״ — היא מדולגת בייבוא, ופק"ע שכבר במערכת ובוטלה יוצאת מהרשימות ומהדשבורד.
+                  {" "}<span style={{color:"#8b95a8"}}>◦</span> = מוכר לאפליקציה אך אינו ברשימת הסטטוסים הרשמית · <span style={{color:"#f59e0b"}}>❓</span> = אינו מוכר, שויך לפי הניסוח.
                 </div>
               </div>
             )}
@@ -9314,10 +9359,14 @@ function ExcelTab({orders,projects,stages,stageBlocks,workLogs,users,customTasks
 
           <div style={{background:"var(--c-deep)",border:"1px solid var(--c-border)",borderRadius:10,padding:"8px 13px",marginBottom:12}}>
             <div style={{fontWeight:700,fontSize:12.5,marginBottom:2}}>מה נכנס לאפליקציה</div>
-            <ChkOpt checked={priOpts.onlyOpen} onChange={v=>setOpt("onlyOpen",v)} color="#f59e0b" label='דלג על פק"ע סגורות'
+            <ChkOpt checked={priOpts.skipCancelled} onChange={v=>setOpt("skipCancelled",v)} label='דלג על פק"ע מבוטלות'
+              hint={priOpts.skipCancelled
+                ?`״מבוטלת״ מוגדרת כ״לא להציג״ — ${priRes.stats.cancelledSkipped} פק"ע בקובץ לא ייובאו כלל`
+                :`כבוי — ${priRes.stats.cancelledInFile} הפק"ע המבוטלות נכנסות, אבל נשארות מוסתרות ברשימות ובדשבורד עד שבוחרים במפורש להציג אותן`}/>
+            <ChkOpt checked={priOpts.onlyOpen} onChange={v=>setOpt("onlyOpen",v)} color="#f59e0b" label='דלג על פק"ע שהסתיימו'
               hint={priOpts.onlyOpen
-                ?`פק"ע בסטטוס פקע COC / נסגרה לא ייובאו כלל — ${priRes.stats.closedSkipped} פק"ע יישארו בחוץ`
-                :'כבוי — כל הפק"ע שבקובץ נכנסות, והסגורות נכנסות בסטטוס ״הושלמה״'}/>
+                ?`פק"ע בסטטוס דווח אחרון / נסגרה / פקע COC לא ייובאו כלל — ${priRes.stats.closedSkipped} פק"ע יישארו בחוץ`
+                :'כבוי — כל הפק"ע שבקובץ נכנסות, ושהסתיימו נכנסות בסטטוס ״הושלמה״'}/>
             <ChkOpt checked={priOpts.importProgress} onChange={v=>setOpt("importProgress",v)} label="ייבא התקדמות בייצור"
               hint='עמודות ״כמות מדווחת״ / ״יתרה לבצוע״ — כל יחידה שדווחה בפעולה נרשמת כשלב שהושלם, כך שסרגלי ההתקדמות באפליקציה מראים את המצב האמיתי ולא 0%'/>
             <ChkOpt checked={priOpts.makeStages} onChange={v=>setOpt("makeStages",v)} label="צור שלבים חסרים"
@@ -9401,7 +9450,8 @@ function ExcelTab({orders,projects,stages,stageBlocks,workLogs,users,customTasks
                   [`${mergePlan.updated.length} יתעדכנו`,mergePlan.updated.length?"#3b82f6":"#8b95a8"],
                   [`${mergePlan.unchanged} ללא שינוי — לא ייכתבו`,"#8b95a8"],
                   [`${mergePlan.newSerials} סידוריים חדשים`,mergePlan.newSerials?"#a78bfa":"#8b95a8"],
-                  [`${mergePlan.progressChanged} עם התקדמות שהשתנתה`,mergePlan.progressChanged?"#06b6d4":"#8b95a8"]].map(([t,c])=>(
+                  [`${mergePlan.progressChanged} עם התקדמות שהשתנתה`,mergePlan.progressChanged?"#06b6d4":"#8b95a8"],
+                  ...(mergePlan.cancelled?[[`${mergePlan.cancelled} בוטלו — יוסתרו`,"#8b95a8"]]:[])].map(([t,c])=>(
                   <span key={t} style={{background:c+"1a",color:c,border:`1px solid ${c}44`,borderRadius:14,padding:"3px 11px",fontWeight:600,fontSize:12}}>{t}</span>
                 ))}
               </div>
@@ -9409,6 +9459,7 @@ function ExcelTab({orders,projects,stages,stageBlocks,workLogs,users,customTasks
                 הזיהוי הוא לפי <b style={{color:"var(--c-text)"}}>מספר הפק"ע</b>. מה שמגיע מה-ERP מתעדכן — סטטוס, כמות, מחיר, פרויקט, סניף, תאריכים ומסלול הפעולות.
                 מה שנוצר באפליקציה נשמר כפי שהוא — סידוריים שכבר עבדו עליהם, תקלות, חוסרים ואספקות, וכל דיווח עבודה של עובד.
                 מדיווחי הייבוא הקודם נמחקים רק אלה של פק"ע שההתקדמות שלהן בקובץ השתנתה.
+                פק"ע שסומנה ב-ERP כ<b style={{color:"var(--c-text)"}}>מבוטלת</b> לא נמחקת — היא מסומנת ככזו ויוצאת מהרשימות ומהדשבורד, כדי שהשעות שדווחו עליה לא ייעלמו.
               </div>
               {mergePlan.changes.length>0&&(<>
                 <button onClick={()=>setShowDiff(p=>!p)} style={{background:"none",border:"none",color:"#60a5fa",fontSize:12,fontWeight:700,fontFamily:"inherit",padding:"7px 0 0",cursor:"pointer"}}>
@@ -9511,7 +9562,7 @@ function AlertsPanel({orders,stages,workLogs,users,onClose,dismissedAlerts,onDis
       a.push({id:`def_${o.id}_${d.id}`,sev:d.severity==="critical"?0:1,icon:d.severity==="critical"?"🔴":"🟠",text:`תקלה ${d.severity==="critical"?"קריטית":"גבוהה"}: ${d.title}`,sub:`פק"ע ${o.woNumber}${d.discoveredDate?` | ${fmt(d.discoveredDate)}`:""}`,color:d.severity==="critical"?"#dc2626":"#f97316"})}));
     // Late is measured against תאריך סיום ייצור (ת. סיום יצור from Priority). A
     // פק"ע that already left the line is not late, however old its date is.
-    orders.filter(o=>o.targetDate&&new Date(o.targetDate)<new Date()&&orderPhase(o)!=="done").forEach(o=>{const d=daysBetween(o.targetDate,todays());if(d>0)a.push({id:`late_${o.id}`,sev:1,icon:"🚨",text:`פק"ע ${o.woNumber} באיחור ${d} ימים`,sub:`תאריך סיום ייצור: ${fmt(o.targetDate)}`,color:"#ef4444"})});
+    orders.filter(o=>o.targetDate&&new Date(o.targetDate)<new Date()&&!["done","cancelled"].includes(orderPhase(o))).forEach(o=>{const d=daysBetween(o.targetDate,todays());if(d>0)a.push({id:`late_${o.id}`,sev:1,icon:"🚨",text:`פק"ע ${o.woNumber} באיחור ${d} ימים`,sub:`תאריך סיום ייצור: ${fmt(o.targetDate)}`,color:"#ef4444"})});
     const sMap=new Map((stages||[]).map(s=>[s.id,s]));
     workLogs.filter(w=>!w.completed).forEach(w=>{const m=Math.round((Date.now()-new Date(w.startTime).getTime())/60000);if(m>120)a.push({id:`stuck_${w.id}`,sev:2,icon:"⏳",text:`${w.userName} תקוע ${fmtTime(m)} על ${logUnitLabel(w)}`,sub:sMap.get(w.stageId)?.name||"",color:"#f59e0b"})});
     orders.forEach(o=>{const sn=(o.serials||[]).length,df=(o.defects||[]).filter(d=>d.status!=="closed").length;if(sn>0&&df/sn>.2)a.push({id:`yield_${o.id}`,sev:2,icon:"📉",text:`Yield נמוך ב-${o.woNumber}: ${df}/${sn} תקלות`,sub:`${Math.round(df/sn*100)}% שיעור תקלות`,color:"#f97316"})});
@@ -11561,7 +11612,7 @@ function App(){
   },[isAdmin,isLead]);
 
   // Alert count for badge
-  const alertCount=useMemo(()=>{let c=0;const dm=dismissedAlerts;filteredOrders.forEach(o=>(o.defects||[]).filter(d=>d.status!=="closed"&&(d.severity==="critical"||d.severity==="high")).forEach(d=>{if(!dm.includes(`def_${o.id}_${d.id}`))c++}));filteredOrders.filter(o=>o.targetDate&&new Date(o.targetDate)<new Date()&&orderPhase(o)!=="done").forEach(o=>{if(!dm.includes(`late_${o.id}`))c++});filteredWorkLogs.filter(w=>!w.completed).forEach(w=>{if(Math.round((Date.now()-new Date(w.startTime).getTime())/60000)>120&&!dm.includes(`stuck_${w.id}`))c++});return c},[filteredOrders,filteredWorkLogs,dismissedAlerts]);
+  const alertCount=useMemo(()=>{let c=0;const dm=dismissedAlerts;filteredOrders.forEach(o=>(o.defects||[]).filter(d=>d.status!=="closed"&&(d.severity==="critical"||d.severity==="high")).forEach(d=>{if(!dm.includes(`def_${o.id}_${d.id}`))c++}));filteredOrders.filter(o=>o.targetDate&&new Date(o.targetDate)<new Date()&&!["done","cancelled"].includes(orderPhase(o))).forEach(o=>{if(!dm.includes(`late_${o.id}`))c++});filteredWorkLogs.filter(w=>!w.completed).forEach(w=>{if(Math.round((Date.now()-new Date(w.startTime).getTime())/60000)>120&&!dm.includes(`stuck_${w.id}`))c++});return c},[filteredOrders,filteredWorkLogs,dismissedAlerts]);
 
   const [showDemoPanel,setShowDemoPanel]=useState(false);
   const [showPilotReset,setShowPilotReset]=useState(false);
