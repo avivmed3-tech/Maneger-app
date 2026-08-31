@@ -4,7 +4,8 @@
   "private": true,
   "description": "OmniView — מערכת ניהול רצפת ייצור (PWA)",
   "scripts": {
-    "build": "node vercel-build.js"
+    "build": "node vercel-build.js",
+    "test": "node --max-old-space-size=4096 tools/sync-test.js"
   },
   "devDependencies": {
     "@babel/standalone": "7.23.2"
