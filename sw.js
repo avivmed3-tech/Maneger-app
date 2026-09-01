@@ -1,4 +1,4 @@
-const CACHE='omniview-v32';
+const CACHE='omniview-v33';
 const ASSETS=['./','./index.html','./manifest.json','./app-icon-192.png','./app-icon-512.png','./app-icon-maskable-512.png'];
 
 self.addEventListener('install',e=>{

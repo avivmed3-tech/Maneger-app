@@ -224,7 +224,7 @@ button{font-family:inherit;cursor:pointer}
 const {useState,useEffect,useCallback,useRef,useMemo}=React;
 
 // ── Config ─────────────────────────────────────────────────────────────────
-const APP_VERSION="4.6.0";const APP_DATE="2026-08-24";
+const APP_VERSION="4.7.0";const APP_DATE="2026-08-31";
 const SB_URL="https://lwiurzkiojctwzllpnmr.supabase.co";
 const SB_KEY="eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imx3aXVyemtpb2pjdHd6bGxwbm1yIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzQ2MjU4NTAsImV4cCI6MjA5MDIwMTg1MH0.jWOnAtsjbefoY18ofSd46WMdgY47Vv4k7LgcHdOrj6Q";
 const SB_H={"Content-Type":"application/json","apikey":SB_KEY,"Authorization":"Bearer "+SB_KEY};
@@ -332,7 +332,7 @@ function setCompanyId(id){
   // says nothing about the other — and carried across, it would narrow the very
   // first sweep after a switch to a window that misses everything. Cleared here
   // rather than beside each switch, so a switch added later cannot forget to.
-  if(next!==_companyId)LOG_WATERMARK="";
+  if(next!==_companyId)resetWatermarks();
   _companyId=next;
 }
 function getCompanyId(){return _companyId}
@@ -613,6 +613,59 @@ const SB={
   }
 };
 
+// ── Only the columns the app actually reads ───────────────────────────────
+// PostgREST returns every column unless told otherwise, and on a table this size
+// the ones nobody looks at are not free. company_id is the clearest case: every
+// read is already filtered to one company, so the column repeats a value the
+// client supplied — 2.8 MB of the 40 MB a full work_logs read weighs. created_at
+// is another 2.5 MB, and only two of these tables map it.
+//
+// A select list is an optimisation, never a requirement. A database that has not
+// had the latest migration run is missing a column named here, and PostgREST
+// answers the whole query with 42703 rather than the rows minus one field — so a
+// refused list is remembered and that table falls back to "*" for the rest of the
+// session. Slower, and still correct.
+const COLS={
+  orders:"id,wo_number,pn,description,qty,unit_price,project_id,branch,received_date,target_date,stage_ids,block_id,serials,shortages,defects,delivered_serials,status,erp_status,erp_note,updated_at",
+  work_logs:"id,user_id,user_name,serial_id,serial_sn,stage_id,order_id,start_time,end_time,completed,duration_min,paused,pause_start,total_pause_min,pause_log,bulk,bulk_group_id,bulk_count,updated_at",
+  projects:"id,name,updated_at",
+  stages:"id,name,stage_order,color,price,hourly_rate,role_id,minutes,updated_at",
+  stage_blocks:"id,name,stages,updated_at",
+  custom_tasks:"id,user_id,user_name,name,description,price,active,completed,partial,start_time,end_time,duration_min,paused,pause_start,total_pause_min,pause_log,created_at,updated_at",
+  departments:"id,name,color,manager_id,branch_codes,updated_at",
+  daily_plans:"id,user_id,user_name,plan_date,order_id,stage_id,target_qty,serial_ids,note,done,created_by,created_by_name,created_at,updated_at",
+  pn_standards:"id,pn,stage_minutes,total_min,note,updated_by,updated_at",
+  app_users:"id,username,password_hash,password_plain,role,name,project_access,stage_access,branch_access,branch_none,can_edit,can_view,active,hourly_rate,sale_rate,department_id,manager_id,login_attempts,locked_until,last_login,updated_at"
+};
+const SEL_OFF={};
+// 42703 is "column does not exist"; PGRST100/PGRST202 are the parse errors
+// PostgREST raises for a select list it cannot resolve.
+const sbColErr=e=>/42703|PGRST100|PGRST202|does not exist/i.test(String((e&&e.message)||e||""));
+// One read of one table, narrowed to the columns above wherever the database
+// allows it. Everything that reads a mirrored table goes through here.
+async function sbRead(table,params,cap){
+  const sel=(!SEL_OFF[table]&&COLS[table])?`select=${COLS[table]}&`:"";
+  try{return await SB.getAll(table,sel+params,cap)}
+  catch(e){
+    if(!sel||!sbColErr(e))throw e;
+    SEL_OFF[table]=true;
+    console.warn(`[SB] ${table} — רשימת העמודות נדחתה, חוזרים לקריאת כל העמודות`);
+    return SB.getAll(table,params,cap);
+  }
+}
+
+// Why the database is not answering, in words a person on the floor can act on.
+// The quota case is the one worth naming: it looks exactly like a working app
+// until someone notices the numbers have stopped moving.
+function dbDownReason(e){
+  const s=String((e&&e.message)||e||"");
+  if(/quota|exceeded|over.?limit|\b402\b|\b429\b|too many requests/i.test(s))
+    return "מכסת השימוש של מסד הנתונים נגמרה — השרת דוחה בקשות";
+  if(/\b40[13]\b|jwt|apikey|unauthorized/i.test(s))return "המסד דחה את ההרשאה של האפליקציה";
+  if(/\b5\d\d\b|timeout|network|failed to fetch/i.test(s))return "אין תשובה ממסד הנתונים";
+  return "אין חיבור למסד הנתונים";
+}
+
 // PostgREST hands back a JSON blob as the error text — pull out the part a person
 // can actually act on instead of dumping the raw payload into a toast.
 function sbErrMsg(e){
@@ -722,7 +775,7 @@ const dbToUser=r=>({id:r.id,username:r.username,password_hash:r.password_hash,pa
   branchNone:r.branch_none===true,
   canEdit:r.can_edit,canView:r.can_view,active:r.active,hourlyRate:r.hourly_rate,saleRate:r.sale_rate||0,
   departmentId:r.department_id||"",managerId:r.manager_id||"",
-  companyId:r.company_id||DEFAULT_COMPANY_ID,loginAttempts:r.login_attempts||0,lockedUntil:r.locked_until,lastLogin:r.last_login});
+  companyId:r.company_id||_companyId||DEFAULT_COMPANY_ID,loginAttempts:r.login_attempts||0,lockedUntil:r.locked_until,lastLogin:r.last_login});
 const userToDb=u=>({id:u.id,username:u.username,password_hash:u.password_hash||u.passwordHash||"",password_plain:u.passwordPlain||null,
   role:u.role,name:u.name,project_access:u.projectAccess,stage_access:u.stageAccess,
   branch_access:u.branchAccess==="all"?"all":sortBranches(Array.isArray(u.branchAccess)?u.branchAccess:[]),
@@ -738,7 +791,7 @@ const dbToOrder=r=>({id:r.id,woNumber:r.wo_number,pn:r.pn,description:r.descript
   // statuses it folds onto — it is the only place the reason a פק"ע is stuck
   // ("בעית ח\"ג חסר", "הוקפאה") survives the import.
   erpStatus:r.erp_status||"",erpNote:r.erp_note||"",
-  companyId:r.company_id||DEFAULT_COMPANY_ID});
+  companyId:r.company_id||_companyId||DEFAULT_COMPANY_ID});
 const orderToDb=o=>({id:o.id,wo_number:o.woNumber,pn:o.pn||null,description:o.description||null,
   qty:Number(o.qty)||0,unit_price:Number(o.unitPrice)||0,project_id:o.projectId||null,
   branch:branchCode(o.branch)||null,
@@ -751,7 +804,7 @@ const dbToLog=r=>({id:r.id,userId:r.user_id,userName:r.user_name,serialId:r.seri
   serialSn:r.serial_sn,stageId:r.stage_id,orderId:r.order_id,startTime:r.start_time,
   endTime:r.end_time,completed:r.completed,durationMin:r.duration_min,paused:r.paused,
   pauseStart:r.pause_start,totalPauseMin:r.total_pause_min,pauseLog:r.pause_log,
-  bulk:r.bulk,bulkGroupId:r.bulk_group_id,bulkCount:r.bulk_count,companyId:r.company_id||DEFAULT_COMPANY_ID});
+  bulk:r.bulk,bulkGroupId:r.bulk_group_id,bulkCount:r.bulk_count,companyId:r.company_id||_companyId||DEFAULT_COMPANY_ID});
 const logToDb=w=>({id:w.id,user_id:w.userId,user_name:w.userName,serial_id:w.serialId||null,
   serial_sn:w.serialSn||null,stage_id:w.stageId||null,order_id:w.orderId||null,
   start_time:w.startTime||null,end_time:w.endTime||null,completed:w.completed||false,
@@ -763,32 +816,32 @@ const dbToTask=r=>({id:r.id,userId:r.user_id,userName:r.user_name,name:r.name,
   description:r.description,price:r.price,active:r.active,completed:r.completed,partial:r.partial,
   startTime:r.start_time,endTime:r.end_time,durationMin:r.duration_min,paused:r.paused,
   pauseStart:r.pause_start,totalPauseMin:r.total_pause_min,pauseLog:r.pause_log,
-  createdAt:r.created_at,companyId:r.company_id||DEFAULT_COMPANY_ID});
+  createdAt:r.created_at,companyId:r.company_id||_companyId||DEFAULT_COMPANY_ID});
 const taskToDb=t=>({id:t.id,user_id:t.userId,user_name:t.userName,name:t.name,
   description:t.description||null,price:Number(t.price||0),active:t.active||false,
   completed:t.completed||false,partial:t.partial||false,start_time:t.startTime||null,
   end_time:t.endTime||null,duration_min:Number(t.durationMin||0),paused:t.paused||false,
   pause_start:t.pauseStart||null,total_pause_min:Number(t.totalPauseMin||0),
   pause_log:t.pauseLog||[],company_id:rowCid(t),updated_at:new Date().toISOString()});
-const dbToStage=r=>({id:r.id,name:r.name,order:r.stage_order,color:r.color,price:r.price,hourlyRate:r.hourly_rate||0,roleId:r.role_id||"",minutes:Number(r.minutes||0),companyId:r.company_id||DEFAULT_COMPANY_ID});
+const dbToStage=r=>({id:r.id,name:r.name,order:r.stage_order,color:r.color,price:r.price,hourlyRate:r.hourly_rate||0,roleId:r.role_id||"",minutes:Number(r.minutes||0),companyId:r.company_id||_companyId||DEFAULT_COMPANY_ID});
 const stageToDb=s=>({id:s.id,name:s.name,stage_order:s.order||0,color:s.color||"#3b82f6",price:Number(s.price||0),hourly_rate:Number(s.hourlyRate||0),role_id:s.roleId||null,minutes:Number(s.minutes||0),company_id:rowCid(s)});
-const dbToBlock=r=>({id:r.id,name:r.name,stages:r.stages,companyId:r.company_id||DEFAULT_COMPANY_ID});
+const dbToBlock=r=>({id:r.id,name:r.name,stages:r.stages,companyId:r.company_id||_companyId||DEFAULT_COMPANY_ID});
 const blockToDb=b=>({id:b.id,name:b.name,stages:b.stages||[],company_id:rowCid(b)});
-const dbToProject=r=>({id:r.id,name:r.name,companyId:r.company_id||DEFAULT_COMPANY_ID});
+const dbToProject=r=>({id:r.id,name:r.name,companyId:r.company_id||_companyId||DEFAULT_COMPANY_ID});
 const projectToDb=p=>({id:p.id,name:p.name,company_id:rowCid(p)});
 const dbToDept=r=>({id:r.id,name:r.name,color:r.color||"#3b82f6",managerId:r.manager_id||"",
   branches:Array.isArray(r.branch_codes)?r.branch_codes.map(branchCode).filter(Boolean):[],
-  companyId:r.company_id||DEFAULT_COMPANY_ID});
+  companyId:r.company_id||_companyId||DEFAULT_COMPANY_ID});
 const deptToDb=d=>({id:d.id,name:d.name,color:d.color||"#3b82f6",manager_id:d.managerId||null,
   branch_codes:deptBranches(d),company_id:rowCid(d)});
 // Daily work plans — a manager assigns a worker an order+stage to work on for a given day.
-const dbToPlan=r=>({id:r.id,userId:r.user_id,userName:r.user_name,date:r.plan_date,orderId:r.order_id||"",stageId:r.stage_id||"",targetQty:Number(r.target_qty||0),serialIds:Array.isArray(r.serial_ids)?r.serial_ids:[],note:r.note||"",done:r.done||false,createdBy:r.created_by||"",createdByName:r.created_by_name||"",createdAt:r.created_at,companyId:r.company_id||DEFAULT_COMPANY_ID});
+const dbToPlan=r=>({id:r.id,userId:r.user_id,userName:r.user_name,date:r.plan_date,orderId:r.order_id||"",stageId:r.stage_id||"",targetQty:Number(r.target_qty||0),serialIds:Array.isArray(r.serial_ids)?r.serial_ids:[],note:r.note||"",done:r.done||false,createdBy:r.created_by||"",createdByName:r.created_by_name||"",createdAt:r.created_at,companyId:r.company_id||_companyId||DEFAULT_COMPANY_ID});
 const planToDb=p=>({id:p.id,user_id:p.userId,user_name:p.userName||null,plan_date:p.date,order_id:p.orderId||null,stage_id:p.stageId||null,target_qty:Number(p.targetQty||0),serial_ids:Array.isArray(p.serialIds)?p.serialIds:[],note:p.note||null,done:p.done||false,created_by:p.createdBy||null,created_by_name:p.createdByName||null,company_id:rowCid(p),updated_at:new Date().toISOString()});
 // זמן תקן — the target minutes defined up-front for a מק"ט, stage by stage.
 // Independent of what the floor actually measures (זמן בפועל, from the work logs)
 // and of what the price list sells (זמן מכירה).
 const dbToPnStd=r=>({id:r.id,pn:r.pn||"",stageMin:(r.stage_minutes&&typeof r.stage_minutes==="object")?r.stage_minutes:{},
-  total:Number(r.total_min||0),note:r.note||"",updatedBy:r.updated_by||"",updatedAt:r.updated_at||"",companyId:r.company_id||DEFAULT_COMPANY_ID});
+  total:Number(r.total_min||0),note:r.note||"",updatedBy:r.updated_by||"",updatedAt:r.updated_at||"",companyId:r.company_id||_companyId||DEFAULT_COMPANY_ID});
 const pnStdToDb=p=>({id:p.id,pn:p.pn||"",stage_minutes:p.stageMin||{},total_min:Number(p.total||0),
   note:p.note||null,updated_by:p.updatedBy||null,company_id:rowCid(p),updated_at:new Date().toISOString()});
 
@@ -800,167 +853,179 @@ const pnStdToDb=p=>({id:p.id,pn:p.pn||"",stage_minutes:p.stageMin||{},total_min:
 // rows with the same created_at / name / מק"ט.
 const ORDER_BY={
   orders:"order=created_at.asc,id.asc",work_logs:"order=created_at.asc,id.asc",
-  // The delta read filters on updated_at, so it pages on updated_at too: ordering
-  // it by created_at instead makes the database walk the whole table and discard
-  // everything that did not move. Any total order will do here — the rows are
-  // merged by id, not by position.
-  work_logs_changed:"order=updated_at.asc,id.asc",
   projects:"order=name.asc,id.asc",stages:"order=stage_order.asc,id.asc",
   stage_blocks:"order=created_at.asc,id.asc",custom_tasks:"order=created_at.asc,id.asc",
   departments:"order=name.asc,id.asc",daily_plans:"order=created_at.asc,id.asc",
   pn_standards:"order=pn.asc,id.asc",app_users:"order=name.asc,id.asc"
 };
-// ── The one table too big to re-read on a timer ───────────────────────────
-// A full read of work_logs is 56,000 rows — fifty-odd round trips, because
-// PostgREST caps a page at a thousand. Right on load; wrong every fifteen
-// seconds. What can actually change is a small, knowable set: work_logs has no
-// updated_at, but a row is created open and later completed in place, so the
-// mutable rows are the ones still open plus the ones created recently. Add the
-// ids that were open at the last sweep — a job finished since then is in
-// neither of the other two sets — and the sweep sees every change without
-// re-reading the finished history, which cannot move.
+// ── Incremental reads ─────────────────────────────────────────────────────
+// The sweep used to re-read every table whole, every few seconds: 2 MB of orders
+// and 337 KB of standards per pass, plus the whole of work_logs — 75,807 rows,
+// 40 MB of JSON — every five minutes, per open tab. A floor with three tablets
+// open spent something like a gigabyte an hour finding out that nothing had
+// changed, which is how a monthly allowance disappears in a day.
 //
-// What this does *not* catch is a finished row deleted on another device; the
-// periodic full sweep is what reconciles that.
-// How far back the sweep looks when it has nothing better to go on. This used to
-// be the whole answer, and on real data it is a terrible one: a bulk import stamps
-// a day's worth of rows at once, so "the last two days" matched 24,400 of the
-// 39,983 rows — twelve megabytes re-read every fifteen seconds to discover that
-// nothing had changed. It survives only as the fallback for a database whose
-// updated_at migration has not been run.
-const HOT_LOG_DAYS=2;
-// The newest updated_at this browser has read *and applied*. The sweep asks for
-// everything at or after it, which is exactly the set of rows that can have moved.
+// Every mirrored table now carries updated_at, maintained by a trigger rather
+// than by a client clock, so the sweep asks the only question worth asking —
+// what moved since I last looked? — and normally gets an empty array back.
 //
-// ">=" and not ">": a batch upsert writes its 200 rows inside one transaction, so
-// they share a timestamp to the microsecond, and a strict ">" would step over the
-// rest of the batch the watermark was taken from. The overlap that costs is one
-// batch; the window it replaces was two days.
-let LOG_WATERMARK="";
-// Cleared the first time the server refuses a query on updated_at, so a project
-// that has not run the migration falls back to the window above instead of failing
-// to sync at all.
-let LOG_HAS_UPDATED_AT=true;
-// The watermark is only ever moved by a caller that actually *applied* what it
-// read. A sweep whose data is thrown away — which happens whenever a local edit
-// lands mid-fetch — must leave it where it was, or those rows would be skipped by
-// every later sweep and not reappear until the next full read.
-function commitLogWatermark(data){
-  const w=data&&data.logWatermark;
-  if(w&&w>LOG_WATERMARK)LOG_WATERMARK=w;
-}
+// Two things a delta cannot see on its own:
+//   * a row deleted on another device. Counting rows is a HEAD request with no
+//     body at all, so every table is counted on the reconcile pass, and only a
+//     table whose count disagrees is read again — and then only its id column.
+//   * a database that has not had the migration run. That read is refused, the
+//     table is marked, and it falls back to being read whole: slower, and still
+//     correct.
+const WATERMARKS={};
+const DELTA_OFF={};
+// The delta filters on updated_at, so it pages on updated_at too: ordering by
+// created_at instead makes the database walk the whole table and discard
+// everything that did not move. Rows are merged by id, never by position, so any
+// total order will do here.
+const DELTA_ORDER="order=updated_at.asc,id.asc";
+// Switching companies invalidates every watermark: the next read must start from
+// nothing rather than from where the previous company happened to have got to.
+function resetWatermarks(){for(const k in WATERMARKS)delete WATERMARKS[k]}
 const maxUpdatedAt=rows=>{
   let m="";
   for(const r of (rows||[])){const u=r&&r.updated_at;if(u&&u>m)m=u}
   return m;
 };
-// Every row touched since the watermark, or — with no watermark yet, or no column
-// to hang one on — the fixed window. Falling back is a slow path, never a wrong
-// one: a wider question always contains the narrower one's answer.
-async function dbLoadChangedLogs(cf){
-  if(LOG_HAS_UPDATED_AT&&LOG_WATERMARK){
+// Watermarks are only ever moved by a caller that actually *applied* what it read.
+// A sweep whose data is thrown away — which happens whenever a local edit lands
+// mid-fetch — must leave them where they were, or those rows would be skipped by
+// every later sweep and not reappear until the next full read.
+//
+// The filter is ">=" and not ">": a batch upsert writes its 200 rows inside one
+// transaction, so they share a timestamp to the microsecond, and a strict ">"
+// would step over the rest of the batch the watermark was taken from. The overlap
+// costs one batch.
+function commitWatermarks(data){
+  const w=data&&data.watermarks;
+  if(!w)return;
+  for(const t in w)if(w[t]>(WATERMARKS[t]||""))WATERMARKS[t]=w[t];
+}
+
+// Every table the app mirrors locally: where its rows live in state, how a row is
+// converted each way, and the total order its pages are read in.
+//   soft     — the app works without it, so a failed read keeps what is held.
+//   optional — the table may not exist at all, and null (not []) tells the caller
+//              to keep the local copy rather than wipe it.
+const MIRROR=[
+  {t:"orders",       key:"orders",      map:dbToOrder,   toDb:orderToDb,   order:ORDER_BY.orders},
+  {t:"projects",     key:"projects",    map:dbToProject, toDb:projectToDb, order:ORDER_BY.projects},
+  {t:"stages",       key:"stages",      map:dbToStage,   toDb:stageToDb,   order:ORDER_BY.stages},
+  {t:"stage_blocks", key:"stageBlocks", map:dbToBlock,   toDb:blockToDb,   order:ORDER_BY.stage_blocks},
+  {t:"work_logs",    key:"workLogs",    map:dbToLog,     toDb:logToDb,     order:ORDER_BY.work_logs},
+  {t:"custom_tasks", key:"customTasks", map:dbToTask,    toDb:taskToDb,    order:ORDER_BY.custom_tasks},
+  {t:"departments",  key:"departments", map:dbToDept,    toDb:deptToDb,    order:ORDER_BY.departments, soft:true},
+  {t:"daily_plans",  key:"dailyPlans",  map:dbToPlan,    toDb:planToDb,    order:ORDER_BY.daily_plans, soft:true},
+  {t:"pn_standards", key:"pnStandards", map:dbToPnStd,   toDb:pnStdToDb,   order:ORDER_BY.pn_standards, optional:true},
+];
+const MIRROR_BY_TABLE={};
+MIRROR.forEach(s=>{MIRROR_BY_TABLE[s.t]=s});
+
+// One table: the rows that moved since the watermark when there is one to go on,
+// the whole table otherwise.
+async function dbReadTable(spec,cf,prev){
+  const wm=prev?WATERMARKS[spec.t]:"";
+  if(wm&&!DELTA_OFF[spec.t]){
     try{
-      return await SB.getAll("work_logs",cf+`updated_at=gte.${encodeURIComponent(LOG_WATERMARK)}&`+ORDER_BY.work_logs_changed);
+      return{rows:await sbRead(spec.t,cf+`updated_at=gte.${encodeURIComponent(wm)}&`+DELTA_ORDER),delta:true};
     }catch(e){
       if(!/updated_at/i.test(String((e&&e.message)||e)))throw e;
-      LOG_HAS_UPDATED_AT=false;
-      console.warn("[SB] work_logs.updated_at לא קיים במסד — הסנכרון המצטבר חוזר לחלון הזמן הישן");
+      DELTA_OFF[spec.t]=true;
+      console.warn(`[SB] ${spec.t}.updated_at לא קיים במסד — הסנכרון המצטבר חוזר לקריאה מלאה`);
     }
   }
-  const since=new Date(Date.now()-HOT_LOG_DAYS*86400000).toISOString();
-  return SB.getAll("work_logs",cf+`created_at=gte.${encodeURIComponent(since)}&`+ORDER_BY.work_logs);
+  return{rows:await sbRead(spec.t,cf+spec.order),delta:false};
 }
-async function dbLoadHotLogs(cid,openIds){
-  const cf=`company_id=eq.${cid}&`;
-  const watched=[...new Set((openIds||[]).filter(Boolean))];
-  const byIdQueries=[];
-  for(let i=0;i<watched.length;i+=SB_CHUNK){
-    const q=watched.slice(i,i+SB_CHUNK).map(id=>`"${String(id).replace(/"/g,'""')}"`).join(",");
-    byIdQueries.push(SB.get("work_logs",cf+`id=in.(${q})`));
+
+// Fold what came back into what is already held. Handing back the *same array*
+// when nothing moved is not a micro-optimisation: a new array identity
+// invalidates every useMemo hanging off it — the done-index over 75,000 progress
+// records, the visibility scan over every פק"ע, every dashboard aggregate — and
+// re-renders the whole tree. Twelve times a minute, for nothing.
+function mergeRows(prevRows,fresh,gone){
+  const prev=prevRows||[];
+  if(!fresh.length&&!(gone&&gone.size))return prev;
+  const byId=new Map();
+  let removed=0;
+  for(const r of prev){
+    if(gone&&gone.has(r.id)){removed++;continue}
+    byId.set(r.id,r);
   }
-  const parts=await Promise.all([
-    SB.getAll("work_logs",cf+"completed=is.false&"+ORDER_BY.work_logs),
-    dbLoadChangedLogs(cf),
-    ...byIdQueries,
-  ]);
-  const rows=[...new Map(parts.flat().map(r=>[r.id,r])).values()];
-  const seen=new Set(rows.map(r=>r.id));
-  // A watched row that did not come back was deleted.
-  return{rows,gone:watched.filter(id=>!seen.has(id))};
+  let touched=removed>0;
+  for(const r of fresh){
+    if(!touched&&!sameVal(byId.get(r.id),r))touched=true;
+    byId.set(r.id,r);
+  }
+  return (!touched&&byId.size===prev.length)?prev:[...byId.values()];
 }
-// `hot` — when given, work_logs is refreshed from the slice above and merged
-// into `hot.prev` instead of being read whole. Everything else is always read
-// in full; those tables are small enough that a page or three is nothing.
-async function dbLoadAll(hot){
+
+// How recently each table paid for the id sweep below. A mismatch that somehow
+// never resolves must not be able to spend 2 MB every five minutes forever.
+const LAST_ID_SWEEP={};
+const ID_SWEEP_MIN_MS=10*60*1000;
+// The ids the server no longer holds. A count is a HEAD request carrying no rows
+// at all, so every table is counted; the id column is read only when the count
+// says rows have actually gone missing, because on work_logs even the ids alone
+// are 2 MB.
+async function dbGoneIds(spec,cfNoAmp,rows){
+  const n=await SB.count(spec.t,cfNoAmp);
+  // Only *fewer* rows on the server can mean a deletion. More rows means inserts
+  // the delta has not caught up with yet, and reading the ids would not help:
+  // this pass can only remove.
+  if(n>=rows.length)return null;
+  const now=Date.now();
+  if(now-(LAST_ID_SWEEP[spec.t]||0)<ID_SWEEP_MIN_MS)return null;
+  LAST_ID_SWEEP[spec.t]=now;
+  const live=new Set((await SB.getAll(spec.t,`select=id&${cfNoAmp}&${spec.order}`)).map(r=>r.id));
+  const gone=new Set();
+  for(const r of rows)if(!live.has(r.id))gone.add(r.id);
+  return gone.size?gone:null;
+}
+
+// `prev` — the collections currently held, keyed as they are in state. Given, the
+// read is incremental; omitted, every table is read whole. `prev.reconcile` adds
+// the deletion check above, which is cheap enough to run every few minutes and
+// replaces the full re-read that used to serve the same purpose.
+async function dbLoadAll(prev){
   const cid=_companyId||DEFAULT_COMPANY_ID;
-  const cf=`company_id=eq.${cid}&`;
-  // Every table is read with paging. Which ones "can" outgrow a page is not a
-  // judgement worth making: pn_standards was assumed to be small and had 1,763
-  // rows, of which the app saw the first thousand.
-  const [orders,projects,stages,blocks,logs,tasks,depts,plans,pnStds]=await Promise.all([
-    SB.getAll("orders",cf+ORDER_BY.orders),
-    SB.getAll("projects",cf+ORDER_BY.projects),
-    SB.getAll("stages",cf+ORDER_BY.stages),
-    SB.getAll("stage_blocks",cf+ORDER_BY.stage_blocks),
-    hot?dbLoadHotLogs(cid,hot.openIds):SB.getAll("work_logs",cf+ORDER_BY.work_logs),
-    SB.getAll("custom_tasks",cf+ORDER_BY.custom_tasks),
-    SB.getAll("departments",cf+ORDER_BY.departments).catch(()=>[]),
-    SB.getAll("daily_plans",cf+ORDER_BY.daily_plans).catch(()=>[]),
-    // null (not []) when the table is missing — the caller then keeps whatever
-    // standards are cached locally instead of wiping them.
-    SB.getAll("pn_standards",cf+ORDER_BY.pn_standards).catch(()=>null),
-  ]);
-  // In hot mode `logs` is {rows, gone} rather than the whole table.
-  const rawLogs=hot?logs.rows:logs;
-  // Only a candidate — see commitLogWatermark. Sound either way: a full read covers
-  // the whole table, and a hot read covers everything from the current watermark on,
-  // so in both cases the rows behind this timestamp have all been seen.
-  const logWatermark=maxUpdatedAt(rawLogs);
-  const freshLogs=rawLogs.map(dbToLog);
-  let workLogs=freshLogs;
-  if(hot){
-    const gone=new Set(logs.gone);
-    const prev=hot.prev||[];
-    const byId=new Map(prev.filter(w=>!gone.has(w.id)).map(w=>[w.id,w]));
-    // A sweep that changed nothing should hand back the *same array*, not an equal
-    // copy: a new identity invalidates every useMemo keyed on the logs and re-renders
-    // the app. Only the hot slice can differ, so this is a walk over the handful of
-    // rows just read — not over all of them.
-    let touched=gone.size>0;
-    freshLogs.forEach(w=>{
-      const was=byId.get(w.id);
-      if(!touched&&!sameVal(was,w))touched=true;
-      byId.set(w.id,w);
-    });
-    workLogs=(!touched&&byId.size===prev.length)?prev:[...byId.values()];
-  }
-  const out={
-    orders:orders.map(dbToOrder),projects:projects.map(dbToProject),
-    stages:stages.map(dbToStage),stageBlocks:blocks.map(dbToBlock),
-    workLogs,customTasks:tasks.map(dbToTask),
-    departments:depts.map(dbToDept),dailyPlans:plans.map(dbToPlan),
-    pnStandards:pnStds?pnStds.map(dbToPnStd):null,
-    logWatermark
-  };
-  // Everything just read is, by definition, what the server holds — so the first
-  // save after a load sends the one row that changed, not the whole database.
-  SYNC.prime("orders",out.orders,orderToDb);
-  SYNC.prime("projects",out.projects,projectToDb);
-  SYNC.prime("stages",out.stages,stageToDb);
-  SYNC.prime("stage_blocks",out.stageBlocks,blockToDb);
-  // Only the rows actually read are known to match the server; fingerprinting
-  // the whole merged list every sweep is the cost this mode exists to avoid.
-  SYNC.prime("work_logs",freshLogs,logToDb);
-  if(hot)SYNC.forget("work_logs",logs.gone);
-  SYNC.prime("custom_tasks",out.customTasks,taskToDb);
-  SYNC.prime("departments",out.departments,deptToDb);
-  SYNC.prime("daily_plans",out.dailyPlans,planToDb);
-  if(out.pnStandards)SYNC.prime("pn_standards",out.pnStandards,pnStdToDb);
+  const cfNoAmp=`company_id=eq.${cid}`;
+  const cf=cfNoAmp+"&";
+  const out={},watermarks={};
+  await Promise.all(MIRROR.map(async spec=>{
+    let read;
+    try{read=await dbReadTable(spec,cf,prev)}
+    catch(e){
+      if(spec.optional){out[spec.key]=null;return}
+      if(spec.soft){out[spec.key]=(prev&&prev[spec.key])||[];return}
+      throw e;
+    }
+    const fresh=read.rows.map(r=>spec.map(r));
+    const wm=maxUpdatedAt(read.rows);
+    if(wm)watermarks[spec.t]=wm;
+    let rows=read.delta?mergeRows(prev&&prev[spec.key],fresh,null):fresh;
+    if(read.delta&&prev&&prev.reconcile){
+      let gone=null;
+      try{gone=await dbGoneIds(spec,cfNoAmp,rows)}
+      catch(e){console.warn("[SB] reconcile "+spec.t,e)}
+      if(gone){rows=mergeRows(rows,[],gone);SYNC.forget(spec.t,[...gone])}
+    }
+    out[spec.key]=rows;
+    // Everything just read is, by definition, what the server holds — so the first
+    // save after a load sends the one row that changed, not the whole database.
+    // Only the rows actually read are primed: fingerprinting a merged list on every
+    // sweep is exactly the cost this mode exists to avoid.
+    SYNC.prime(spec.t,fresh,spec.toDb);
+  }));
+  out.watermarks=watermarks;
   return out;
 }
 async function dbLoadUsers(){
   const cid=_companyId||DEFAULT_COMPANY_ID;
-  const rows=await SB.getAll("app_users",`company_id=eq.${cid}&`+ORDER_BY.app_users);
+  const rows=await sbRead("app_users",`company_id=eq.${cid}&`+ORDER_BY.app_users);
   return rows.map(dbToUser);
 }
 // Demo departments — each has one manager (dept_manager) + two team leads, every team lead has ≥3 workers.
@@ -1463,6 +1528,92 @@ const LS={
     }catch{}
   }
 };
+
+// ── The offline copy that localStorage cannot hold ────────────────────────
+// 75,807 progress records serialise to ~40 MB and the localStorage quota is a
+// few, so the cache above has always refused the one collection that matters —
+// which is why every open re-downloaded the whole of work_logs, and why a tablet
+// that had been running all week still started from nothing.
+//
+// IndexedDB has the room, stores structured values without a 40 MB
+// JSON.stringify on the main thread, and — the actual point — carries the
+// watermarks beside the rows. A device that opens with yesterday's snapshot asks
+// the server "what moved since?" instead of "give me everything", which is the
+// difference between a ten-second open on a factory tablet and an instant one.
+//
+// Every path here is best-effort. A browser in private mode, a device with no
+// room, a store that will not open: the snapshot comes back null and the app
+// loads exactly as it did before, whole.
+const IDB_NAME="omniview",IDB_STORE="mirror",IDB_VER=1;
+let _idbPromise=null;
+function idbOpen(){
+  if(_idbPromise)return _idbPromise;
+  _idbPromise=new Promise((res,rej)=>{
+    let rq;
+    try{rq=indexedDB.open(IDB_NAME,IDB_VER)}catch(e){return rej(e)}
+    rq.onupgradeneeded=()=>{
+      const db=rq.result;
+      if(!db.objectStoreNames.contains(IDB_STORE))db.createObjectStore(IDB_STORE);
+    };
+    rq.onsuccess=()=>res(rq.result);
+    rq.onerror=()=>rej(rq.error);
+    rq.onblocked=()=>rej(new Error("indexedDB blocked"));
+  });
+  _idbPromise.catch(()=>{_idbPromise=null});
+  return _idbPromise;
+}
+function idbRun(mode,fn){
+  return idbOpen().then(db=>new Promise((res,rej)=>{
+    let tx;
+    try{tx=db.transaction(IDB_STORE,mode)}catch(e){return rej(e)}
+    let rq;
+    try{rq=fn(tx.objectStore(IDB_STORE))}catch(e){return rej(e)}
+    tx.oncomplete=()=>res(rq?rq.result:undefined);
+    tx.onerror=()=>rej(tx.error);
+    tx.onabort=()=>rej(tx.error);
+  }));
+}
+const snapKey=cid=>`snapshot:${cid||DEFAULT_COMPANY_ID}`;
+// What a snapshot is allowed to seed. Anything else in the stored object — an
+// older shape, a collection since renamed — is ignored rather than trusted.
+async function snapshotLoad(cid){
+  try{
+    const s=await idbRun("readonly",st=>st.get(snapKey(cid)));
+    if(!s||typeof s!=="object"||s.cid!==cid||!s.rows)return null;
+    const rows={},watermarks={};
+    const stored=(s.watermarks&&typeof s.watermarks==="object")?s.watermarks:{};
+    let any=false;
+    for(const spec of MIRROR){
+      const r=s.rows[spec.key];
+      if(!Array.isArray(r))continue;
+      rows[spec.key]=r;any=true;
+      // A watermark kept without its rows is worse than no watermark at all: it
+      // says "everything up to here has been seen" about a collection that is not
+      // here, so the delta that follows returns only what moved since — and the
+      // app is left holding the tail of a table and nothing before it. The two
+      // travel together or not at all.
+      if(stored[spec.t])watermarks[spec.t]=stored[spec.t];
+    }
+    if(!any)return null;
+    return{rows,at:Number(s.at)||0,watermarks};
+  }catch(e){console.warn("[IDB] snapshot load",e);return null}
+}
+async function snapshotSave(cid,rows){
+  try{
+    // The watermarks are read in the same tick as the rows, so they describe
+    // exactly this set and not a sweep that landed in between.
+    const snap={cid,at:Date.now(),rows:{},watermarks:{...WATERMARKS}};
+    for(const spec of MIRROR){
+      const r=rows[spec.key];
+      if(Array.isArray(r))snap.rows[spec.key]=r;
+    }
+    await idbRun("readwrite",st=>st.put(snap,snapKey(cid)));
+    return true;
+  }catch(e){console.warn("[IDB] snapshot save",e);return false}
+}
+async function snapshotClear(cid){
+  try{await idbRun("readwrite",st=>st.delete(snapKey(cid)));return true}catch{return false}
+}
 function getUsers(){try{const u=localStorage.getItem(LS_PREFIX+"users");return u?JSON.parse(u):FALLBACK_USERS}catch{return FALLBACK_USERS}}
 async function saveUsers(users){
   LS.set("users",users);
@@ -9747,6 +9898,21 @@ function OfflineBanner({lm}){return(
   </div>
 )}
 
+// The device is online and the server is still not answering. Worth its own
+// banner: without one the app falls back to the local copy and shows month-old
+// numbers as though they were today's, which is indistinguishable from working —
+// and two devices with two different local copies then disagree with each other
+// and with the truth, with nothing on screen to say why.
+function DbDownBanner({lm,reason,since}){return(
+  <div style={{position:"fixed",top:0,left:0,right:0,zIndex:1001,background:lm?"#fffbeb":"linear-gradient(135deg,#451a03,#78350f)",borderBottom:lm?"2px solid #d97706":"2px solid #f59e0b",padding:"8px 16px",display:"flex",alignItems:"center",gap:10,boxShadow:"0 4px 20px #0003"}}>
+    <div style={{fontSize:20,flexShrink:0}}>⚠️</div>
+    <div style={{flex:1}}>
+      <div style={{fontWeight:700,fontSize:13,color:lm?"#b45309":"#fcd34d"}}>{reason}</div>
+      <div style={{fontSize:11,color:lm?"#d97706":"#fbbf24"}}>מוצגים הנתונים השמורים במכשיר{since?` מ-${since}`:""} — הם אינם מעודכנים, ושינויים חדשים לא נשמרים</div>
+    </div>
+  </div>
+)}
+
 // ══════════════════════════════════════════════════════════════════════════
 // ═══ NAVBAR ═════════════════════════════════════════════════════════════
 // ══════════════════════════════════════════════════════════════════════════
@@ -10853,6 +11019,12 @@ function App(){
   const [showUpdate,setShowUpdate]=useState(false);
   const [isStandalone,setIsStandalone]=useState(()=>window.matchMedia("(display-mode:standalone)").matches||!!window.navigator.standalone);
   const [isOffline,setIsOffline]=useState(()=>!navigator.onLine);
+  // Online, but the database is not answering — quota spent, key rejected, service
+  // down. null while everything is fine; the reason text otherwise.
+  const [dbDown,setDbDown]=useState(null);
+  // How old the copy on screen is, once it is the only copy there is.
+  const [snapAge,setSnapAge]=useState("");
+  const dbFailsRef=useRef(0);
   const [companyPlan,setCompanyPlan]=useState("free");
   const lastActivityRef=useRef(Date.now());
   const canUseFeature=useCallback((key)=>{if(currentUser?.role==="admin")return true;const f=PLAN_FEATURES[companyPlan]||PLAN_FEATURES.free;return f[key]===true||(typeof f[key]==="number"&&f[key]>0)},[companyPlan,currentUser]);
@@ -10882,6 +11054,12 @@ function App(){
     return()=>{events.forEach(e=>window.removeEventListener(e,resetActivity));clearInterval(checker)};
   },[currentUser]);
 
+  // Where each mirrored collection lands in state. Used by the snapshot seed on
+  // boot, which has to fill all nine without knowing them one by one.
+  const SET_BY_KEY={orders:setOrders,projects:setProjects,stages:setStages,
+    stageBlocks:setStageBlocks,workLogs:setWorkLogs,customTasks:setCustomTasks,
+    departments:setDepartments,dailyPlans:setDailyPlans,pnStandards:setPnStandards};
+
   useEffect(()=>{
     // Check if we migrated to Supabase already — if not, clear old Google Sheets localStorage
     const migrated=LS.get("sb_migrated");
@@ -10907,8 +11085,40 @@ function App(){
       const lps=LS.get("pnStandards");if(lps)setPnStandards(lps);
     }
 
-    // Then always load from Supabase (Supabase is the source of truth)
-    Promise.all([dbLoadAll(),dbLoadUsers()]).then(async([data,users])=>{
+    // Then always load from Supabase (Supabase is the source of truth) — but ask
+    // it only for what this device does not already hold.
+    //
+    // The snapshot in IndexedDB is seeded into state first, so the app is usable
+    // while the network is still talking, and its watermarks turn the read below
+    // into a delta: on a tablet that was open yesterday that is a few dozen rows
+    // instead of 75,807. With no snapshot this is exactly what it always was —
+    // one full read of everything.
+    const bootLoad=async()=>{
+      let prev;
+      if(sessionCid===_companyId){
+        const snap=await snapshotLoad(_companyId);
+        if(snap){
+          prev={reconcile:true};
+          for(const spec of MIRROR){
+            const rows=snap.rows[spec.key];
+            if(!Array.isArray(rows))continue;
+            prev[spec.key]=rows;
+            const set=SET_BY_KEY[spec.key];
+            if(set)set(rows);
+            // Primed as "what the server holds": these rows came from it, and the
+            // first save after a load must send the one row that changed, not the
+            // whole database back again.
+            SYNC.prime(spec.t,rows,spec.toDb);
+          }
+          // A watermark is only usable next to the rows it was taken with, which is
+          // why both live in the same snapshot record.
+          commitWatermarks({watermarks:snap.watermarks});
+          if(snap.at)setSnapAge(new Date(snap.at).toLocaleString("he-IL",{day:"2-digit",month:"2-digit",hour:"2-digit",minute:"2-digit"}));
+        }
+      }
+      return Promise.all([dbLoadAll(prev),dbLoadUsers()]);
+    };
+    bootLoad().then(async([data,users])=>{
       if(data){
         // Always prefer Supabase data — update state and cache
         setOrders(data.orders||[]);LS.set("orders",data.orders||[]);
@@ -10922,9 +11132,10 @@ function App(){
         // null = the pn_standards table isn't there yet — keep the local copy
         if(data.pnStandards){setPnStandards(data.pnStandards);LS.set("pnStandards",data.pnStandards)}
         LS.set("session_company",_companyId);
-        // This was a full read; the sweeps that follow can go incremental.
-        lastFullSweepRef.current=Date.now();
-        commitLogWatermark(data);
+        // This read covered every row, so nothing can have been deleted behind it:
+        // the reconcile clock starts here, and the sweeps that follow go incremental.
+        lastReconcileRef.current=Date.now();
+        commitWatermarks(data);
       }
       if(users?.length){LS.set("users",users)}
 
@@ -10979,7 +11190,7 @@ function App(){
               if(d2.pnStandards){setPnStandards(d2.pnStandards);LS.set("pnStandards",d2.pnStandards)}
               if(u2?.length)LS.set("users",u2);
               LS.set("session_company",realCid);
-              commitLogWatermark(d2);
+              commitWatermarks(d2);
             }
           }else{localStorage.removeItem(LS_PREFIX+"session");setCurrentUser(null)}
         }
@@ -10988,6 +11199,15 @@ function App(){
     }).catch(()=>{
       // Supabase unreachable — use local cache
       try{const saved=localStorage.getItem(LS_PREFIX+"session");if(saved){const s3=JSON.parse(saved);const found=getUsers().find(u=>u.id===s3.id&&u.username===s3.username&&u.active!==false);if(found)setCurrentUser(found)}}catch{}
+      setLoading(false);
+    }).catch(e=>{
+      // Falling back to the local copy is right; doing it silently is not. Without
+      // this the app looks like it is working and shows whatever it last managed to
+      // download — which is how the same database ended up displaying two different
+      // sets of numbers on two devices with nothing on screen to explain it.
+      console.warn("Initial load failed",e);
+      setDbDown(dbDownReason(e));
+      setSync("error");
       setLoading(false);
     });
   },[]);
@@ -10999,10 +11219,17 @@ function App(){
 
   // ── Refresh from Supabase ──────────────────────────────────────
   const lastPersistRef=useRef(0);
-  // When the whole of work_logs was last read. Between full sweeps the refresh
-  // only reads the rows that can have changed — see dbLoadHotLogs.
-  const FULL_SWEEP_MS=5*60*1000;
-  const lastFullSweepRef=useRef(0);
+  // A delta cannot see a row deleted on another device, so every so often the
+  // sweep also compares row counts with the server — a HEAD request per table,
+  // carrying no rows at all. This replaces the five-minute re-read of the whole
+  // database that used to serve the same purpose and cost 40 MB a time.
+  const RECONCILE_MS=5*60*1000;
+  const lastReconcileRef=useRef(0);
+  // Assigned below, once the collection refs exist: the collections as they stand,
+  // in the shape an incremental read merges into, and one row straight from a
+  // realtime message.
+  const mirrorPrevRef=useRef(null);
+  const applyRowRef=useRef(null);
   const pendingSaveRef=useRef(false); // local changes not yet confirmed saved to Supabase
   const saveRunningRef=useRef(false); // an upsert batch is currently in flight
   const doSaveRef=useRef(null);
@@ -11023,8 +11250,8 @@ function App(){
       for(let i=0;i<50&&saveRunningRef.current;i++)await new Promise(r=>setTimeout(r,100));
       if(pendingSaveRef.current){clearTimeout(saveTimer);await doSaveRef.current?.()}
       if(pendingSaveRef.current||saveRunningRef.current)throw new Error("unsaved local changes");
-      const [data,users]=await Promise.all([dbLoadAll(),dbLoadUsers()]);
-      lastFullSweepRef.current=Date.now();
+      const [data,users]=await Promise.all([dbLoadAll(mirrorPrevRef.current?.(true)),dbLoadUsers()]);
+      lastReconcileRef.current=Date.now();
       if(data)applyRemoteRef.current(data);
       if(users?.length)LS.set("users",users);
       setSync("ok");
@@ -11050,7 +11277,12 @@ function App(){
     // update path and has to stay quick. A sweep skipped because of an in-flight
     // save retries in a moment, never a whole interval later: that wait was what
     // made a finished job keep showing as active for more than a minute.
-    const POLL_LIVE=15000,POLL_FALLBACK=5000,POLL_BLOCKED=1500;
+    // With realtime confirmed, changes arrive on the socket and the sweep is only
+    // the safety net that catches what the socket missed — it does not need to run
+    // four times a minute. Without realtime it is the only update path, so it stays
+    // brisk. A sweep is ~2 KB now either way, but twenty tablets sweeping every
+    // fifteen seconds is still 5 GB a month of finding nothing.
+    const POLL_LIVE=45000,POLL_FALLBACK=10000,POLL_BLOCKED=1500;
     const pollDelay=()=>realtimeWorking?POLL_LIVE:POLL_FALLBACK;
     // Set whenever fresh data had to be turned away, so the sweep that re-arms
     // afterwards stays quick even if an in-flight poll finishes in between and
@@ -11059,23 +11291,24 @@ function App(){
     const arm=ms=>{if(dead)return;clearTimeout(pollTimer);pollTimer=setTimeout(poll,ms)};
     const pollSoon=()=>{sweepSoon=true;arm(POLL_BLOCKED)};
 
-    // How the sweep asks for work_logs: the hot slice normally, the whole table
-    // every FULL_SWEEP_MS so a row deleted elsewhere eventually disappears here
-    // too. See dbLoadHotLogs.
-    const hotArg=()=>{
-      if(Date.now()-lastFullSweepRef.current>FULL_SWEEP_MS)return null;
-      const prev=wRef.current||[];
-      return{prev,openIds:prev.filter(w=>!w.completed).map(w=>w.id)};
-    };
+    // What the sweep asks for: everything that moved since the last watermark,
+    // which on an idle floor is nothing at all. Every few minutes it also asks
+    // each table for its row count, which is the only way a row deleted on
+    // another device can be noticed.
+    const prevArg=due=>mirrorPrevRef.current?.(due);
     const poll=async()=>{
       if(dead)return;
+      // A tablet face-down on a bench, or an app in the background, is not showing
+      // anyone anything — and on a floor of twenty that is most of them, most of
+      // the time. The sweep resumes the moment the screen comes back, below.
+      if(document.visibilityState==="hidden"){arm(POLL_LIVE);return}
       // Skip while a local change is unsaved / just saved (avoid overwriting it)
       if(remoteApplyBlocked()){arm(POLL_BLOCKED);return}
       try{
         sweepSoon=false;
-        const hot=hotArg();
-        const data=await dbLoadAll(hot);
-        if(!hot)lastFullSweepRef.current=Date.now();
+        const due=Date.now()-lastReconcileRef.current>RECONCILE_MS;
+        const data=await dbLoadAll(prevArg(due));
+        if(due)lastReconcileRef.current=Date.now();
         if(dead)return;
         // Re-check — the user may have clicked an action while the fetch was in flight,
         // in which case this data is stale and applying it would undo the click.
@@ -11083,13 +11316,22 @@ function App(){
         if(data){
           // Only the collections that actually moved are applied — see applyRemote.
           applyRemoteRef.current(data);
+          dbFailsRef.current=0;setDbDown(null);
           setSync("ok");
         }
-      }catch(e){console.warn("Poll error",e)}
+      }catch(e){
+        console.warn("Poll error",e);
+        // One failed sweep is a blip on a factory wifi; two in a row is the server.
+        if(++dbFailsRef.current>=2){setDbDown(dbDownReason(e));setSync("error")}
+      }
       arm(sweepSoon?POLL_BLOCKED:pollDelay());
     };
     // Start polling after a short delay
     pollTimer=setTimeout(poll,2000);
+    // Coming back to the app should show the floor as it is now, not as it was
+    // when the screen went off.
+    const onVisible=()=>{if(document.visibilityState==="visible")arm(200)};
+    document.addEventListener("visibilitychange",onVisible);
 
     // Try Supabase Realtime WebSocket
     const wsUrl=`wss://lwiurzkiojctwzllpnmr.supabase.co/realtime/v1/websocket?apikey=${SB_KEY}&vsn=1.0.0`;
@@ -11141,44 +11383,41 @@ function App(){
             const tbl=msg.payload?.data?.table||msg.payload?.table||msg.topic?.split(":")?.[2];
             if(!tbl)return;
             console.log("Realtime change:",tbl);
-            // Never refetch/apply while a local change is unsaved — the change event may be
-            // ours (mid-save) or someone else's, and either way stale rows would undo the click.
-            // But the event must not be thrown away either: re-sweep in a moment, or the
-            // change waits for the next full interval before anyone sees it.
+            // Never apply while a local change is unsaved — the event may be ours
+            // (mid-save) or someone else's, and either way stale rows would undo the
+            // click. It must not be thrown away either: re-sweep in a moment, or the
+            // change waits for the next interval before anyone sees it.
             if(remoteApplyBlocked()){pollSoon();return}
-            // Small delay to let write finish
-            await new Promise(r=>setTimeout(r,300));
-            const cf=`company_id=eq.${_companyId}&`;
-            // apply() re-checks the guard — a click may have happened during the fetch
-            const apply=(setter,lsKey,rows)=>{if(remoteApplyBlocked()){pollSoon();return}setter(rows);LS.set(lsKey,rows)};
-            if(["orders"].includes(tbl)){const rows=(await SB.getAll("orders",cf+ORDER_BY.orders)).map(dbToOrder);SYNC.prime("orders",rows,orderToDb);apply(setOrders,"orders",rows)}
-            if(["work_logs"].includes(tbl)){
-              // Same reasoning as the sweep: read the rows that can have moved,
-              // not the whole progress history, on every stage a worker closes.
-              const prev=wRef.current||[];
-              const full=Date.now()-lastFullSweepRef.current>FULL_SWEEP_MS;
-              let rows;
-              if(full){
-                rows=(await SB.getAll("work_logs",cf+ORDER_BY.work_logs)).map(dbToLog);
-                SYNC.prime("work_logs",rows,logToDb);
-                lastFullSweepRef.current=Date.now();
-              }else{
-                const {rows:hotRows,gone}=await dbLoadHotLogs(_companyId,prev.filter(w=>!w.completed).map(w=>w.id));
-                const fresh=hotRows.map(dbToLog);
-                SYNC.prime("work_logs",fresh,logToDb);SYNC.forget("work_logs",gone);
-                const goneSet=new Set(gone);
-                const byId=new Map(prev.filter(w=>!goneSet.has(w.id)).map(w=>[w.id,w]));
-                fresh.forEach(w=>byId.set(w.id,w));
-                rows=[...byId.values()];
-              }
-              apply(setWorkLogs,"workLogs",rows);
+            const spec=MIRROR_BY_TABLE[tbl];
+            if(!spec)return;
+            // The changed row is *in the message*. Re-reading the whole table on every
+            // event is what made this the most expensive thing the app did: one worker
+            // closing one stage woke every other tablet into a full read of work_logs
+            // and of orders, so the traffic grew with the square of the number of
+            // people on the floor. Twenty tablets turned a 300-byte change into
+            // 40 MB of reads.
+            const d=(msg.payload&&msg.payload.data)||msg.payload||{};
+            const kind=String(d.type||d.eventType||msg.event||"").toUpperCase();
+            const rec=d.record||d.new||null;
+            const was=d.old_record||d.old||null;
+            // Another company's row is not ours to hold, and not worth a sweep either.
+            if(rec&&rec.company_id&&rec.company_id!==_companyId)return;
+            let applied=false;
+            // A message carrying only an old row is a delete, whatever it calls
+            // itself — the field naming the event type has moved twice between
+            // realtime versions and is not worth depending on.
+            const goneId=(kind==="DELETE"||(!rec&&was))?((was&&was.id)||(rec&&rec.id)):null;
+            if(goneId){
+              applyRowRef.current?.(spec.t,null,goneId);applied=true;
+            }else if(rec&&rec.id!=null&&rec.updated_at){
+              // updated_at missing means a truncated payload (realtime caps a message)
+              // or a server that does not send the column — either way, sweep instead
+              // of applying half a row.
+              applyRowRef.current?.(spec.t,rec,null);applied=true;
             }
-            if(["custom_tasks"].includes(tbl)){const rows=(await SB.getAll("custom_tasks",cf+ORDER_BY.custom_tasks)).map(dbToTask);apply(setCustomTasks,"customTasks",rows)}
-            if(["stages"].includes(tbl)){const rows=(await SB.getAll("stages",cf+ORDER_BY.stages)).map(dbToStage);apply(setStages,"stages",rows)}
-            if(["projects"].includes(tbl)){const rows=(await SB.getAll("projects",cf+ORDER_BY.projects)).map(dbToProject);apply(setProjects,"projects",rows)}
-            if(["stage_blocks"].includes(tbl)){const rows=(await SB.getAll("stage_blocks",cf+ORDER_BY.stage_blocks)).map(dbToBlock);apply(setStageBlocks,"stageBlocks",rows)}
-            if(["departments"].includes(tbl)){const rows=(await SB.getAll("departments",cf+ORDER_BY.departments)).map(dbToDept);apply(setDepartments,"departments",rows)}
-            if(["daily_plans"].includes(tbl)){const rows=(await SB.getAll("daily_plans",cf+ORDER_BY.daily_plans)).map(dbToPlan);apply(setDailyPlans,"dailyPlans",rows)}
+            // Anything this could not read is covered by the delta sweep, which asks
+            // only for what moved and normally comes back empty.
+            if(!applied)pollSoon();
           }catch(err){console.warn("Realtime msg error",err)}
         };
         ws.onclose=()=>{
@@ -11192,7 +11431,7 @@ function App(){
     };
     connect();
 
-    return()=>{dead=true;clearInterval(heartbeat);clearTimeout(reconnectTimer);clearTimeout(pollTimer);try{ws?.close()}catch{}};
+    return()=>{dead=true;document.removeEventListener("visibilitychange",onVisible);clearInterval(heartbeat);clearTimeout(reconnectTimer);clearTimeout(pollTimer);try{ws?.close()}catch{}};
   },[currentUser?.id]);
 
   const ctRef=useRef(customTasks);
@@ -11246,10 +11485,28 @@ function App(){
   // What each cache key was last written from, so an unchanged collection is
   // skipped instead of re-serialised.
   const lsSeen=useRef({});
+  const snapTimer=useRef(0);
+  const snapDirty=useRef(false);
+  // The IndexedDB copy is written on a timer rather than on every change: one
+  // sweep can touch several collections at once, and what matters is what the
+  // device holds the *next* time it opens, not what it held a second ago.
+  const writeSnapshot=()=>{
+    if(!snapDirty.current)return;
+    snapDirty.current=false;
+    const rows={};
+    for(const [key,ref] of remoteSlots)rows[key]=ref.current;
+    snapshotSave(_companyId,rows);
+  };
+  const scheduleSnapshot=()=>{
+    snapDirty.current=true;
+    clearTimeout(snapTimer.current);
+    snapTimer.current=setTimeout(writeSnapshot,8000);
+  };
   const cacheLS=(key,val)=>{
     if(lsSeen.current[key]===val)return;
     lsSeen.current[key]=val;
     LS.set(key,val);
+    scheduleSnapshot();
   };
   // ── Applying what a sweep read ──────────────────────────────────────────────
   // A sweep that found nothing new must cost nothing. Each collection is compared
@@ -11277,7 +11534,7 @@ function App(){
     if(!data)return 0;
     // Reaching here is what makes the rows "applied": the caller has already checked
     // that no local edit is in flight, so the watermark may safely move past them.
-    commitLogWatermark(data);
+    commitWatermarks(data);
     let changed=0;
     for(const [key,ref,setter,lsKey] of remoteSlots){
       const rows=data[key];
@@ -11291,6 +11548,48 @@ function App(){
     return changed;
   };
   applyRemoteRef.current=applyRemote;
+  // What an incremental read merges into: the collections as they stand right now,
+  // read from the refs because a sweep's closure is older than the current render.
+  const mirrorPrev=(reconcile)=>{
+    const prev={reconcile:!!reconcile};
+    for(const [key,ref] of remoteSlots)prev[key]=ref.current;
+    return prev;
+  };
+  mirrorPrevRef.current=mirrorPrev;
+  // One row, straight off a realtime message — the same folding a sweep does, for
+  // a single row and without asking the server for anything. `gone` is an id that
+  // was deleted. Returns whether anything actually moved.
+  const applyRow=(table,row,gone)=>{
+    const spec=MIRROR_BY_TABLE[table];
+    if(!spec)return false;
+    const slot=remoteSlots.find(s=>s[0]===spec.key);
+    if(!slot)return false;
+    const [,ref,setter,lsKey]=slot;
+    const fresh=row?[spec.map(row)]:[];
+    const next=mergeRows(ref.current,fresh,gone?new Set([gone]):null);
+    if(next===ref.current)return false;
+    ref.current=next;setter(next);cacheLS(lsKey,next);
+    // The row came from the server, so it is what the server holds — no need to
+    // send it back on the next save.
+    //
+    // The watermark is deliberately *not* moved here. A socket that dropped and
+    // reconnected has missed everything in between, and a later row's timestamp
+    // taken as the watermark would put those missed rows permanently behind it.
+    // Only the sweep, which reads in updated_at order and cannot skip, moves it —
+    // and re-reading this one row next sweep costs a few hundred bytes.
+    if(fresh.length)SYNC.prime(spec.t,fresh,spec.toDb);
+    if(gone)SYNC.forget(spec.t,[gone]);
+    return true;
+  };
+  applyRowRef.current=applyRow;
+  // pagehide is the one event a phone reliably fires when the app is backgrounded
+  // or closed; visibilitychange covers the tab being switched away from.
+  useEffect(()=>{
+    const onHide=()=>{if(document.visibilityState==="hidden")writeSnapshot()};
+    window.addEventListener("pagehide",writeSnapshot);
+    document.addEventListener("visibilitychange",onHide);
+    return()=>{window.removeEventListener("pagehide",writeSnapshot);document.removeEventListener("visibilitychange",onHide)};
+  });
   const persist=(no,np,ns,nw,nct,nsb,ndp,npl,nps)=>{
     const o=no??oRef.current,p=np??pRef.current,s=ns??sRef.current,w=nw??wRef.current,ct=nct??ctRef.current,sb=nsb??sbRef.current,dp=ndp??dpRef.current,pl=npl??plRef.current,ps=nps??psRef.current;
     // Refs lag one render behind the state — sync them now so doSave sees this change
@@ -11881,7 +12180,7 @@ function App(){
       if(data.customTasks){setCustomTasks(data.customTasks);LS.set("customTasks",data.customTasks)}
       if(data.pnStandards?.length){setPnStandards(data.pnStandards);LS.set("pnStandards",data.pnStandards)}
       if(freshUsers?.length){LS.set("users",freshUsers)}
-      commitLogWatermark(data);
+      commitWatermarks(data);
       setSync("ok");
       toast(skipped.length?`נתוני דמו נטענו. ${skipped.length} משתמשי דמו דולגו — שם המשתמש תפוס בחברה אחרת (${skipped.join(", ")})`:"נתוני דמו נטענו בהצלחה!","success",skipped.length?7000:undefined);
     }catch(e){console.error(e);setSync("error");toast("שגיאה: "+sbErrMsg(e),"error")}
@@ -11988,7 +12287,7 @@ function App(){
   };
   useEffect(()=>{const isi=window.matchMedia("(display-mode:standalone)").matches||window.navigator.standalone;if(isi){setIsStandalone(true);return;}const h=e=>{e.preventDefault();setInstallPrompt(e);setShowInstall(true)};window.addEventListener("beforeinstallprompt",h);window.addEventListener("appinstalled",()=>{setShowInstall(false);setInstallPrompt(null);setIsStandalone(true)});return()=>window.removeEventListener("beforeinstallprompt",h)},[]);
   // Service Worker
-  useEffect(()=>{if(!("serviceWorker" in navigator))return;navigator.serviceWorker.register("./sw.js?v=30").then(reg=>{swRegRef.current=reg;if(reg.waiting)setShowUpdate(true);reg.addEventListener("updatefound",()=>{const nw=reg.installing;if(!nw)return;nw.addEventListener("statechange",()=>{if(nw.state==="installed"&&navigator.serviceWorker.controller)setShowUpdate(true)})});setInterval(()=>reg.update(),30*60*1000)}).catch(()=>{});
+  useEffect(()=>{if(!("serviceWorker" in navigator))return;navigator.serviceWorker.register("./sw.js?v=33").then(reg=>{swRegRef.current=reg;if(reg.waiting)setShowUpdate(true);reg.addEventListener("updatefound",()=>{const nw=reg.installing;if(!nw)return;nw.addEventListener("statechange",()=>{if(nw.state==="installed"&&navigator.serviceWorker.controller)setShowUpdate(true)})});setInterval(()=>reg.update(),30*60*1000)}).catch(()=>{});
     // Reload only when a *replacement* worker takes over an already-controlled page
     // — i.e. a real update, which is what the update banner triggers.
     //
@@ -12025,7 +12324,8 @@ function App(){
   return(
     <AuthCtx.Provider value={{currentUser,canEdit,canViewProject}}>
       {isOffline&&<OfflineBanner lm={lm}/>}
-      {showUpdate&&!isOffline&&<UpdateBanner onUpdate={handleUpdate} onDismiss={()=>setShowUpdate(false)} lm={lm}/>}
+      {!isOffline&&dbDown&&<DbDownBanner lm={lm} reason={dbDown} since={snapAge}/>}
+      {showUpdate&&!isOffline&&!dbDown&&<UpdateBanner onUpdate={handleUpdate} onDismiss={()=>setShowUpdate(false)} lm={lm}/>}
       <Navbar tab={tab} setTab={setTab} tabs={TABS} lightMode={lightMode} toggleLight={()=>setLightMode(p=>!p)} sync={sync} onAdmin={()=>setShowAdmin(true)} onLogout={handleLogout} alertCount={alertCount} onAlerts={()=>setShowAlerts(true)} onRefresh={()=>refreshFromDB(true)} onLiveBoard={()=>setShowLiveBoard(true)} onReport={()=>setShowReport(true)} onHistory={()=>setShowHistory(true)} isAdmin={isAdmin} isManager={isAdmin||isDeptMgr} onLoadDemo={loadDemoData} onDeleteDemo={deleteDemoData} onPilotReset={()=>setShowPilotReset(true)} onInstall={handleInstall} canInstall={!isStandalone}/>
       {currentUser?.isDemo&&(
         <div style={{background:lm?"#eff6ff":"#0c1e3a",borderBottom:`1px solid ${lm?"#bfdbfe":"#1e3a5f"}`,padding:"8px 16px",display:"flex",alignItems:"center",justifyContent:"center",gap:10,flexWrap:"wrap"}}>
