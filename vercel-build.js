@@ -43,6 +43,10 @@ const SHIP = [
   // were left out, however present they are in the repo.
   { file: "robots.txt" },
   { file: "sitemap.xml" },
+  // The employee training deck, served at /training/employee-guide.html. It is a
+  // single self-contained file — its screenshots are inlined — so a manager can
+  // also just save it and open it on a laptop with no network.
+  { file: "training/employee-guide.html" },
 ];
 
 const r = spawnSync(process.execPath, [path.join(ROOT, "build.js")], { stdio: "inherit" });
@@ -60,7 +64,11 @@ for (const { file, optional } of SHIP) {
     console.error(`✗ missing required file: ${file}`);
     process.exit(1);
   }
-  fs.copyFileSync(src, path.join(DIST, file));
+  const dest = path.join(DIST, file);
+  // A file listed under a folder keeps that folder in dist/, so the URL it is
+  // linked by stays the URL it is served at.
+  fs.mkdirSync(path.dirname(dest), { recursive: true });
+  fs.copyFileSync(src, dest);
   console.log(`  → dist/${file} (${(fs.statSync(src).size / 1024).toFixed(0)} KB)`);
 }
 
