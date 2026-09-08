@@ -322,6 +322,17 @@ function overseeingUserIds(currentUser,users,departments){
 // The department a manager runs — by their own department id, or by being named
 // as its manager. Both are set independently, so either one counts.
 const managerDept=(currentUser,departments)=>(departments||[]).find(d=>d.id===currentUser?.departmentId||d.managerId===currentUser?.id)||null;
+// The department a user belongs to, seen from the user's side — the mirror of
+// managerDept. Their own assignment wins; a manager named on a department also
+// belongs to it even when nobody filled the field on their user card, because
+// the two are set in separate screens and either one counts. Returns "" for
+// someone with no department and a stale id (a deleted department) alike.
+const userDeptId=(u,departments)=>{
+  if(!u)return "";
+  const list=departments||[];
+  if(u.departmentId&&list.some(d=>d.id===u.departmentId))return u.departmentId;
+  return list.find(d=>d.managerId===u.id)?.id||"";
+};
 // Who may open user management at all: the system admin, and department managers
 // for their own people (creating them, editing them, setting their passwords).
 const canManageUsers=u=>u?.role==="admin"||u?.role==="dept_manager";
@@ -1644,8 +1655,18 @@ async function snapshotClear(cid){
   try{await idbRun("readwrite",st=>st.delete(snapKey(cid)));return true}catch{return false}
 }
 function getUsers(){try{const u=localStorage.getItem(LS_PREFIX+"users");return u?JSON.parse(u):FALLBACK_USERS}catch{return FALLBACK_USERS}}
+// The user list lives in localStorage, not in React state, so nothing re-renders
+// when it changes. Every write goes through here and announces itself, and the
+// screens that read it (App and the admin panel) listen. Without this, the admin
+// panel showed the new departments while the rest of the app — the factory
+// diagram above all — kept rendering the list it had read at login.
+function publishUsers(list){
+  const ok=LS.set("users",list);
+  try{window.dispatchEvent(new CustomEvent("pml:users"))}catch{}
+  return ok;
+}
 async function saveUsers(users){
-  LS.set("users",users);
+  publishUsers(users);
   // Only this company's users — state can still be holding a list from a previous
   // session, and re-writing those rows would hand them to the wrong company.
   const here=getCompanyId();
@@ -2302,7 +2323,7 @@ function LoginScreen({onLogin,lightMode,toggleLight}){
       toast("החברה נוצרה בהצלחה! 14 יום ניסיון חינם","success",5000);
       // Auto login
       const u=dbToUser({...adminUser,login_attempts:0,locked_until:null,last_login:new Date().toISOString()});
-      LS.set("users",[u]);
+      publishUsers([u]);
       onLogin(u);
     }catch(e){setErr("שגיאה ביצירת חשבון: "+(e.message||e))}
     setLoading(false);
@@ -2336,7 +2357,7 @@ function LoginScreen({onLogin,lightMode,toggleLight}){
       const u=dbToUser(row);
       const cached=getUsers();
       const upd=cached.some(c=>c.id===u.id)?cached.map(c=>c.id===u.id?u:c):[...cached,u];
-      LS.set("users",upd);
+      publishUsers(upd);
       addAuditEntry({userId:u.id,username:u.username,name:u.name,action:"התחברות",target:"",details:""});
       onLogin(u);
     }catch(e){
@@ -2467,8 +2488,7 @@ function OrgStructure({users,departments,workLogs,customTasks}){
       </div>
     );
   };
-  const assignedDeptIds=new Set(departments.map(d=>d.id));
-  const noDept=staff.filter(u=>!u.departmentId||!assignedDeptIds.has(u.departmentId));
+  const noDept=staff.filter(u=>!userDeptId(u,departments));
   return(
     <Card style={{marginBottom:14}}>
       <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:4,flexWrap:"wrap",gap:8}}>
@@ -2478,7 +2498,7 @@ function OrgStructure({users,departments,workLogs,customTasks}){
       <div style={{fontSize:11.5,color:"var(--c-dim)",marginBottom:14}}>כל עובד מוצג תחת ראש הצוות / מנהל המחלקה שלו, כולל סטטוס בזמן אמת</div>
       <div style={{display:"flex",flexDirection:"column",gap:12}}>
         {departments.map(d=>{
-          const members=staff.filter(u=>u.departmentId===d.id);
+          const members=staff.filter(u=>userDeptId(u,departments)===d.id);
           const mgr=users.find(u=>u.id===d.managerId);
           return(
             <div key={d.id} style={{background:"var(--c-card)",border:"1px solid var(--c-border)",borderRadius:12,overflow:"hidden"}}>
@@ -6317,7 +6337,7 @@ function AdminPanel({projects,stages,orders=[],onClose,lightMode,departments,upd
               {(departments||[]).length===0?<EmptyState icon="🏢" title="אין מחלקות עדיין" subtitle="צור מחלקה ראשונה כדי להתחיל לארגן את הצוות"/>:(
                 <div style={{display:"flex",flexDirection:"column",gap:8}}>
                   {(departments||[]).map(d=>{
-                    const members=users.filter(u=>u.departmentId===d.id&&u.active!==false);
+                    const members=users.filter(u=>u.active!==false&&userDeptId(u,departments)===d.id);
                     return(
                       <div key={d.id} style={{background:lm?"#f7f8fa":"#0d1120",borderRadius:10,padding:"12px 14px",border:`1px solid ${d.color}33`}}>
                         <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",flexWrap:"wrap",gap:8}}>
@@ -8311,7 +8331,7 @@ function doExport(ctx){
 
   // ── 12: עובדים ומחלקות ──────────────────────────────────────────────────
   const h12=['שם','שם משתמש','תפקיד','מחלקה','מנהל ישיר','פעיל','תעריף שעתי','תעריף מכירה','הרשאת פרויקטים','הרשאת שלבים','הרשאת סניפים','כניסה אחרונה'];
-  const r12=users.map(u=>[u.name||"",u.username||"",ROLES[u.role]?.label||u.role||"",dMap.get(u.departmentId)||"",uMap.get(u.managerId)?.name||"",
+  const r12=users.map(u=>[u.name||"",u.username||"",ROLES[u.role]?.label||u.role||"",dMap.get(userDeptId(u,departments))||"",uMap.get(u.managerId)?.name||"",
     u.active!==false?"כן":"לא",Number(u.hourlyRate||0),Number(u.saleRate||0),
     u.projectAccess==="all"?"כל הפרויקטים":(Array.isArray(u.projectAccess)?u.projectAccess.map(id=>pMap.get(id)||id).join(", "):pMap.get(u.projectAccess)||""),
     u.stageAccess==="all"?"כל השלבים":(Array.isArray(u.stageAccess)?u.stageAccess.map(id=>sMap.get(id)?.name||id).join(", "):""),
@@ -8321,7 +8341,7 @@ function doExport(ctx){
 
   const h13=['מחלקה','מנהל','מספרי סניף','חטיבות','פק"ע בסניפים','עובדים','פעולות','שעות בפועל','שעות מכירה','יעילות %'];
   const r13=departments.map(d=>{
-    const mem=users.filter(u=>u.departmentId===d.id&&u.active!==false);
+    const mem=users.filter(u=>u.active!==false&&userDeptId(u,departments)===d.id);
     const ids=new Set(mem.map(u=>u.id));
     const logs=done.filter(w=>ids.has(w.userId));
     const act=logs.reduce((s,w)=>s+Number(w.durationMin||0),0);
@@ -10432,9 +10452,13 @@ function LiveFactoryBoard({orders,workLogs,stages,customTasks,users,departments,
   const liveCount=s=>floor.filter(u=>userStatus(u.id)===s).length;
 
   const deptList=(departments||[]);
-  const unassigned=floor.filter(u=>!u.departmentId||!deptList.some(d=>d.id===u.departmentId));
+  // A department's manager counts as one of its people even if only the department
+  // side of the link was filled in — otherwise a department with a manager and no
+  // one else drew as empty while its manager sat under "no department".
+  const deptOf=u=>userDeptId(u,deptList);
+  const unassigned=floor.filter(u=>!deptOf(u));
   // Departments + the pseudo "no department" group, for the diagram
-  const deptData=deptList.map(d=>({d,members:floor.filter(u=>u.departmentId===d.id)}));
+  const deptData=deptList.map(d=>({d,members:floor.filter(u=>deptOf(u)===d.id)}));
   if(unassigned.length>0)deptData.push({d:{id:"__none__",name:"ללא מחלקה",color:"#8b95a8",dashed:true},members:unassigned});
   const totalPerf=perfFor(floor.map(u=>u.id));
   const activeNowCount=floor.filter(u=>{const st=userStatus(u.id);return st==="working"||st==="task"}).length;
@@ -11213,7 +11237,7 @@ function App(){
         lastReconcileRef.current=Date.now();
         commitWatermarks(data);
       }
-      if(users?.length){LS.set("users",users)}
+      if(users?.length){publishUsers(users)}
 
       // Seed default projects/stages/users if DB is empty
       if(!data?.projects?.length){
@@ -11233,7 +11257,7 @@ function App(){
           await SB.upsert("departments",DEF_DEPTS.map(d=>deptToDb({...d,managerId:idMap[d.managerId]||"",companyId:cid}))).catch(()=>{});
           const seeded=await buildDemoUserRows(FALLBACK_USERS,idMap,cid);
           await SB.upsert("app_users",seeded);
-          LS.set("users",seeded.map(dbToUser));
+          publishUsers(seeded.map(dbToUser));
         }catch(e){console.warn("Seed users error",e)}
       }
 
@@ -11264,7 +11288,7 @@ function App(){
               setDepartments(d2.departments||[]);LS.set("departments",d2.departments||[]);
               setDailyPlans(d2.dailyPlans||[]);LS.set("dailyPlans",d2.dailyPlans||[]);
               if(d2.pnStandards){setPnStandards(d2.pnStandards);LS.set("pnStandards",d2.pnStandards)}
-              if(u2?.length)LS.set("users",u2);
+              if(u2?.length)publishUsers(u2);
               LS.set("session_company",realCid);
               commitWatermarks(d2);
             }
@@ -11329,7 +11353,7 @@ function App(){
       const [data,users]=await Promise.all([dbLoadAll(mirrorPrevRef.current?.(true)),dbLoadUsers()]);
       lastReconcileRef.current=Date.now();
       if(data)applyRemoteRef.current(data);
-      if(users?.length)LS.set("users",users);
+      if(users?.length)publishUsers(users);
       setSync("ok");
     }catch{setSync("error")}
   },[]);
@@ -11708,8 +11732,6 @@ function App(){
     if(coll==="users"){
       const next=merge(getUsers());
       await saveUsers(next);
-      setUsersTick(t=>t+1);
-      window.dispatchEvent(new CustomEvent("pml:users"));
     }else{
       const setter=undoSetter[coll];
       const args=[null,null,null,null,null,null,null,null,null];
@@ -11746,6 +11768,17 @@ function App(){
   // ── Role-based data visibility ──────────────────────────────────────────
   // Only admins, department managers and team leads see beyond their own work.
   const isDeptMgr=currentUser?.role==="dept_manager";
+  // getUsers() reads localStorage, which React cannot observe — so every write
+  // (the admin panel, a sync sweep, an undo) announces itself and this bumps the
+  // memo key. Before this, assigning someone to a department in the admin panel
+  // left the whole app — the factory diagram included — on the user list it had
+  // read at login, so the new departments showed up empty and their people were
+  // still counted as "no department" until the page was reloaded.
+  useEffect(()=>{
+    const h=()=>setUsersTick(t=>t+1);
+    window.addEventListener("pml:users",h);
+    return()=>window.removeEventListener("pml:users",h);
+  },[]);
   const allUsers=useMemo(()=>getUsers(),[usersTick,currentUser]);
   // Every derived list below is memoised, and that is not a micro-optimisation:
   // this block runs on *every* render of App — every keystroke, every timer tick,
@@ -12255,7 +12288,7 @@ function App(){
       if(data.workLogs){setWorkLogs(data.workLogs);LS.set("workLogs",data.workLogs)}
       if(data.customTasks){setCustomTasks(data.customTasks);LS.set("customTasks",data.customTasks)}
       if(data.pnStandards?.length){setPnStandards(data.pnStandards);LS.set("pnStandards",data.pnStandards)}
-      if(freshUsers?.length){LS.set("users",freshUsers)}
+      if(freshUsers?.length){publishUsers(freshUsers)}
       commitWatermarks(data);
       setSync("ok");
       toast(skipped.length?`נתוני דמו נטענו. ${skipped.length} משתמשי דמו דולגו — שם המשתמש תפוס בחברה אחרת (${skipped.join(", ")})`:"נתוני דמו נטענו בהצלחה!","success",skipped.length?7000:undefined);
@@ -12316,8 +12349,6 @@ function App(){
       if(uSet.size){
         const next=getUsers().filter(u=>!uSet.has(u.id));
         await saveUsers(next);
-        setUsersTick(t=>t+1);
-        window.dispatchEvent(new CustomEvent("pml:users"));
       }
       // The rows have to leave the server too, or the next sweep pulls every one
       // of them straight back in.
