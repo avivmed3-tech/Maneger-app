@@ -235,19 +235,32 @@ const LS_PREFIX="pml_";
 const SESSION_TIMEOUT_MIN=60; // דקות חוסר פעילות לפני logout אוטומטי
 const MAX_LOGIN_ATTEMPTS=5;
 const LOCKOUT_MIN=15;
+// Guards public sign-up only. A password an admin or a department manager types
+// for one of their people is deliberately exempt — see MANAGED_PASSWORD_POLICY.
 const PASSWORD_POLICY={minLength:8,requireUppercase:true,requireNumber:true,requireSpecial:true};
+// Managers pick passwords their workers will actually remember and can be told
+// over a noisy production floor, so nothing is demanded of those beyond existing.
+// A weak one is reported as a hint next to the field, never as a block.
+const MANAGED_PASSWORD_POLICY={minLength:1,requireUppercase:false,requireNumber:false,requireSpecial:false};
 const PLAN_FEATURES={
   free:{max_users:3,max_orders:10,pdf_reports:false,push_notifications:false,live_board:false,excel_export:true,excel_import:false,api_access:false,custom_branding:false,audit_log:false},
   pro:{max_users:20,max_orders:999999,pdf_reports:true,push_notifications:true,live_board:true,excel_export:true,excel_import:true,api_access:false,custom_branding:false,audit_log:true},
   enterprise:{max_users:999999,max_orders:999999,pdf_reports:true,push_notifications:true,live_board:true,excel_export:true,excel_import:true,api_access:true,custom_branding:true,audit_log:true}
 };
-function validatePassword(pw){
-  const p=PASSWORD_POLICY;const errors=[];
+function validatePassword(pw,policy){
+  const p=policy||PASSWORD_POLICY;const errors=[];
   if(pw.length<p.minLength)errors.push(`מינימום ${p.minLength} תווים`);
   if(p.requireUppercase&&!/[A-Z]/.test(pw))errors.push("אות גדולה באנגלית");
   if(p.requireNumber&&!/[0-9]/.test(pw))errors.push("ספרה");
   if(p.requireSpecial&&!/[!@#$%^&*()_+\-=\[\]{};':"|,.<>?]/.test(pw))errors.push("תו מיוחד (!@#$...)");
   return errors;
+}
+// Advisory only: what the sign-up policy would have asked for, so a manager who
+// sets a simple password for a worker sees how weak it is without being stopped.
+function passwordHint(pw){
+  if(!pw)return "";
+  const missing=validatePassword(pw,PASSWORD_POLICY);
+  return missing.length?`סיסמה חלשה (חסר: ${missing.join(", ")}) — תישמר בכל זאת`:"סיסמה חזקה ✓";
 }
 
 // ── Roles & hierarchy ───────────────────────────────────────────────────────
@@ -305,6 +318,22 @@ function overseeingUserIds(currentUser,users,departments){
   }
   // every other employee sees only their own work
   return [currentUser.id];
+}
+// The department a manager runs — by their own department id, or by being named
+// as its manager. Both are set independently, so either one counts.
+const managerDept=(currentUser,departments)=>(departments||[]).find(d=>d.id===currentUser?.departmentId||d.managerId===currentUser?.id)||null;
+// Who may open user management at all: the system admin, and department managers
+// for their own people (creating them, editing them, setting their passwords).
+const canManageUsers=u=>u?.role==="admin"||u?.role==="dept_manager";
+// The people that user may administer. Admins: everyone. A department manager:
+// their own department, deactivated members included — overseeingUserIds drops
+// those on purpose, but they still need editing here — and never another admin.
+function manageableUsers(currentUser,users,departments){
+  if(!currentUser)return [];
+  if(currentUser.role==="admin")return users||[];
+  if(currentUser.role!=="dept_manager")return [];
+  const dept=managerDept(currentUser,departments);
+  return (users||[]).filter(u=>u.role!=="admin"&&(u.id===currentUser.id||(dept&&u.departmentId===dept.id)));
 }
 
 // ── SHA-256 password hashing ────────────────────────────────────────────────
@@ -1620,8 +1649,11 @@ async function saveUsers(users){
   // Only this company's users — state can still be holding a list from a previous
   // session, and re-writing those rows would hand them to the wrong company.
   const here=getCompanyId();
-  try{await SB.upsert("app_users",users.map(userToDb).filter(r=>r.company_id===here))}
-  catch(e){console.warn("saveUsers error",e)}
+  // The result is handed back rather than swallowed: login reads the *server*
+  // row, so a password the admin changed that never left the device would look
+  // saved on screen while the account still answers to the old one.
+  try{await SB.upsert("app_users",users.map(userToDb).filter(r=>r.company_id===here));return{ok:true}}
+  catch(e){console.warn("saveUsers error",e);return{ok:false,error:e}}
 }
 function getAuditLog(){return LS.get("audit")||[]}
 function addAuditEntry(entry){
@@ -5950,7 +5982,18 @@ function AdminPanel({projects,stages,orders=[],onClose,lightMode,departments,upd
   const {toast}=useToast();
   const {currentUser}=useAuth();
   const [users,setUsersLocal]=useState(getUsers());
+  // Admins run the whole panel; department managers get the users tab only,
+  // scoped to their own department (see manageableUsers).
+  const isAdmin=currentUser?.role==="admin";
+  const myDept=useMemo(()=>isAdmin?null:managerDept(currentUser,departments),[isAdmin,currentUser,departments]);
   const [tab,setTab]=useState("users");
+  // The rows this panel may show and touch. An admin sees the whole company; a
+  // department manager sees their own department and nobody else's.
+  const scopedUsers=useMemo(()=>manageableUsers(currentUser,users,departments),[currentUser,users,departments]);
+  const canEditUser=u=>!!u&&(isAdmin||scopedUsers.some(x=>x.id===u.id));
+  // Roles a department manager may hand out — never admin, so the panel cannot
+  // be used to mint someone with company-wide reach.
+  const roleOptions=useMemo(()=>Object.entries(ROLES).filter(([k])=>isAdmin||k!=="admin"),[isAdmin]);
   const [auditLog]=useState(getAuditLog());
   // The reversible half of the log — kept in its own state so a revert re-renders.
   const [journal,setJournal]=useState(()=>UNDO.list());
@@ -5983,6 +6026,7 @@ function AdminPanel({projects,stages,orders=[],onClose,lightMode,departments,upd
   const [addMode,setAddMode]=useState(false);
   const [revealPw,setRevealPw]=useState({}); // userId -> bool (show password in list)
   const [editShowPw,setEditShowPw]=useState(false);
+  const [newShowPw,setNewShowPw]=useState(false); // show the password being typed for a new user
   const [newUser,setNewUser]=useState({username:"",password:"",name:"",role:"worker",projectAccess:"all",stageAccess:"all",branchAccess:[],branchNone:false,canEdit:false,canView:true,active:true,hourlyRate:0,saleRate:0,departmentId:"",managerId:""});
   // Departments form
   const [deptName,setDeptName]=useState("");
@@ -6038,13 +6082,19 @@ function AdminPanel({projects,stages,orders=[],onClose,lightMode,departments,upd
   const addUser=async()=>{
     if(!newUser.username||!newUser.password||!newUser.name)return toast("כל השדות הם חובה","warning");
     if(users.find(u=>u.username===newUser.username))return toast("שם משתמש קיים","warning");
-    const pwErrors=validatePassword(newUser.password);
+    // Whatever the manager typed is the password — the sign-up complexity rules
+    // do not apply to a password set on someone else's behalf.
+    const pwErrors=validatePassword(newUser.password,MANAGED_PASSWORD_POLICY);
     if(pwErrors.length>0)return toast("הסיסמה חייבת לכלול: "+pwErrors.join(", "),"warning",5000);
+    if(!isAdmin&&(newUser.role==="admin"||!myDept))return toast("אפשר להוסיף עובדים למחלקה שלך בלבד","warning");
     const hash=await sha256(newUser.password);
     const u={...newUser,id:uid(),password_hash:hash,passwordPlain:newUser.password,password:undefined};
+    if(!isAdmin)u.departmentId=myDept.id;
     delete u.password;
     const updated=[...users,u];
-    saveUsers(updated);setUsersLocal(updated);
+    setUsersLocal(updated);
+    const res=await saveUsers(updated);
+    if(!res.ok)toast("המשתמש נשמר במכשיר אך לא הגיע לשרת: "+sbErrMsg(res.error),"error",7000);
     UNDO.record({user:currentUser,action:"הוספת משתמש",target:newUser.username,details:newUser.name,
       changes:[{coll:"users",before:[],after:[u.id]}]});
     setNewUser({username:"",password:"",name:"",role:"worker",projectAccess:"all",stageAccess:"all",branchAccess:[],branchNone:false,canEdit:false,canView:true,active:true,hourlyRate:0,saleRate:0,departmentId:"",managerId:""});
@@ -6052,22 +6102,32 @@ function AdminPanel({projects,stages,orders=[],onClose,lightMode,departments,upd
   };
   const saveUser=async()=>{
     if(!editUser.username||!editUser.name)return toast("שם משתמש ושם מלא חובה","warning");
+    if(!canEditUser(editUser))return toast("אין הרשאה לערוך את המשתמש הזה","warning");
+    if(!isAdmin&&editUser.role==="admin")return toast("רק מנהל מערכת יכול להגדיר תפקיד מנהל מערכת","warning");
     let u={...editUser};
-    // If password field was changed (not empty and not a hash), re-hash it
-    if(u.password&&u.password.length<60){
-      u.password_hash=await sha256(u.password);
-      u.passwordPlain=u.password;
-      delete u.password;
+    // The field carries a new password only when it was typed into — anything
+    // there is the password the manager wants, at any length, so hash it as is.
+    // (It used to be re-hashed only below 60 characters, which silently dropped
+    // longer ones and left the account on its old password.)
+    const typedPw=typeof u.password==="string"?u.password:"";
+    if(typedPw){
+      u.password_hash=await sha256(typedPw);
+      u.passwordPlain=typedPw;
     }
+    delete u.password;
     const before=users.find(usr=>usr.id===u.id);
     const updated=users.map(usr=>usr.id===u.id?u:usr);
-    saveUsers(updated);setUsersLocal(updated);
+    setUsersLocal(updated);
+    const res=await saveUsers(updated);
+    if(!res.ok)toast((typedPw?"הסיסמה החדשה נשמרה במכשיר אך לא הגיעה לשרת — ההתחברות עדיין תעבוד עם הישנה: ":"העדכון לא הגיע לשרת: ")+sbErrMsg(res.error),"error",8000);
+    else if(typedPw)toast("הסיסמה עודכנה","success");
     UNDO.record({user:currentUser,action:"עדכון משתמש",target:editUser.username,details:editUser.name,
       changes:before?[{coll:"users",before:[before],after:[u.id]}]:[]});
     setEditUser(null);
   };
   const toggleActive=id=>{
     const before=users.find(u=>u.id===id);
+    if(!canEditUser(before))return toast("אין הרשאה לשנות את המשתמש הזה","warning");
     const updated=users.map(u=>u.id===id?{...u,active:!u.active}:u);
     saveUsers(updated);setUsersLocal(updated);
     if(before)UNDO.record({user:currentUser,action:before.active===false?"הפעלת משתמש":"השבתת משתמש",
@@ -6078,6 +6138,7 @@ function AdminPanel({projects,stages,orders=[],onClose,lightMode,departments,upd
     const victim=users.find(u=>u.id===id);
     if(!victim)return;
     if(victim.id===currentUser?.id)return toast("אי אפשר למחוק את המשתמש שאיתו אתה מחובר","warning");
+    if(!canEditUser(victim))return toast("אין הרשאה למחוק את המשתמש הזה","warning");
     if(!confirm(`למחוק את "${victim.name||victim.username}" לצמיתות?\nאפשר יהיה לאחזר את המחיקה מיומן הפעילות.`))return;
     const updated=users.filter(u=>u.id!==id);
     saveUsers(updated);setUsersLocal(updated);
@@ -6093,12 +6154,12 @@ function AdminPanel({projects,stages,orders=[],onClose,lightMode,departments,upd
     <div onClick={onClose} style={{position:"fixed",inset:0,background:"#000000cc",zIndex:200,display:"flex",alignItems:"center",justifyContent:"center",padding:10,overflowY:"auto"}}>
       <div onClick={e=>e.stopPropagation()} style={{background:card,borderRadius:16,maxWidth:800,width:"100%",maxHeight:"92vh",overflowY:"auto",border:`1px solid ${border}`}}>
         <div style={{padding:"18px 24px",borderBottom:`1px solid ${border}`,display:"flex",justifyContent:"space-between",alignItems:"center",position:"sticky",top:0,background:card,zIndex:1,borderRadius:"16px 16px 0 0"}}>
-          <div style={{fontWeight:700,fontSize:18}}>🛡️ ניהול מערכת</div>
+          <div style={{fontWeight:700,fontSize:18}}>{isAdmin?"🛡️ ניהול מערכת":`👥 ניהול עובדים${myDept?` — ${myDept.name}`:""}`}</div>
           <button onClick={onClose} style={{background:"none",border:"none",fontSize:20,color:muted}}>✕</button>
         </div>
         <div style={{padding:"0 24px 24px"}}>
           <div style={{display:"flex",gap:6,margin:"14px 0",flexWrap:"wrap"}}>
-            {[["users","👥 משתמשים"],["departments","🏢 מחלקות"],["audit","↩️ יומן ואחזור"],["companies","🏭 חברות"]].map(([k,l])=>(
+            {(isAdmin?[["users","👥 משתמשים"],["departments","🏢 מחלקות"],["audit","↩️ יומן ואחזור"],["companies","🏭 חברות"]]:[["users","👥 משתמשים"]]).map(([k,l])=>(
               <button key={k} onClick={()=>setTab(k)} style={{background:tab===k?"var(--c-accent)":"transparent",border:`1px solid ${tab===k?"var(--c-accent)":border}`,color:tab===k?"#fff":muted,borderRadius:8,padding:"7px 14px",fontSize:13,fontWeight:600,fontFamily:"inherit"}}>{l}</button>
             ))}
           </div>
@@ -6106,10 +6167,10 @@ function AdminPanel({projects,stages,orders=[],onClose,lightMode,departments,upd
           {tab==="users"&&(
             <div>
               <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:12}}>
-                <div style={{fontSize:14,fontWeight:700,color:text}}>משתמשים ({users.length})</div>
+                <div style={{fontSize:14,fontWeight:700,color:text}}>משתמשים ({scopedUsers.length})</div>
                 <div style={{display:"flex",gap:7,flexWrap:"wrap"}}>
-                  {onPilotReset&&<Btn color="#ef4444" small onClick={()=>{onClose();onPilotReset()}} title="מחיקת עובדי הדמו והנתונים שלהם לפני תחילת פיילוט">🧹 ניקוי לפיילוט</Btn>}
-                  <Btn color="var(--c-accent)" small onClick={()=>setAddMode(true)}>+ הוסף משתמש</Btn>
+                  {isAdmin&&onPilotReset&&<Btn color="#ef4444" small onClick={()=>{onClose();onPilotReset()}} title="מחיקת עובדי הדמו והנתונים שלהם לפני תחילת פיילוט">🧹 ניקוי לפיילוט</Btn>}
+                  <Btn color="var(--c-accent)" small onClick={()=>{setNewShowPw(false);setNewUser(p=>({...p,departmentId:isAdmin?p.departmentId:(myDept?.id||"")}));setAddMode(true)}}>+ הוסף משתמש</Btn>
                 </div>
               </div>
               {addMode&&(
@@ -6117,17 +6178,29 @@ function AdminPanel({projects,stages,orders=[],onClose,lightMode,departments,upd
                   <div style={{fontWeight:700,marginBottom:10,color:text}}>משתמש חדש</div>
                   <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(150px,1fr))",gap:10,marginBottom:10}}>
                     {[["שם מלא","name","text"],["שם משתמש","username","text"],["סיסמה","password","password"],["תעריף עלות ₪/שעה","hourlyRate","number"],["תעריף מכירה ₪/שעה","saleRate","number"]].map(([l,k,t])=>(
-                      <div key={k}><label style={{fontSize:11,color:muted,display:"block",marginBottom:3}}>{l}</label><input style={inp} type={t} name={"nu_"+k} autoComplete={t==="password"?"new-password":"off"} value={newUser[k]||""} onChange={e=>setNewUser(p=>({...p,[k]:t==="number"?Number(e.target.value):e.target.value}))}/></div>
+                      <div key={k}><label style={{fontSize:11,color:muted,display:"block",marginBottom:3}}>{l}</label>
+                        {t==="password"?(
+                          <>
+                            <div style={{position:"relative"}}>
+                              <input style={inp} type={newShowPw?"text":"password"} name="nu_password" autoComplete="new-password" placeholder="כל סיסמה שתבחר" value={newUser.password||""} onChange={e=>setNewUser(p=>({...p,password:e.target.value}))}/>
+                              <button onClick={()=>setNewShowPw(v=>!v)} title={newShowPw?"הסתר סיסמה":"הצג סיסמה"} style={{position:"absolute",left:8,top:"50%",transform:"translateY(-50%)",background:"none",border:"none",fontSize:15,cursor:"pointer",lineHeight:1}}>{newShowPw?"🙈":"👁️"}</button>
+                            </div>
+                            {newUser.password&&<div style={{fontSize:10,color:validatePassword(newUser.password,PASSWORD_POLICY).length?"#f59e0b":"#10b981",marginTop:3}}>{passwordHint(newUser.password)}</div>}
+                          </>
+                        ):(
+                          <input style={inp} type={t} name={"nu_"+k} autoComplete="off" value={newUser[k]||""} onChange={e=>setNewUser(p=>({...p,[k]:t==="number"?Number(e.target.value):e.target.value}))}/>
+                        )}
+                      </div>
                     ))}
                     <div><label style={{fontSize:11,color:muted,display:"block",marginBottom:3}}>תפקיד</label>
                       <select style={inp} value={newUser.role} onChange={e=>setNewUser(p=>({...p,role:e.target.value,canEdit:["admin","editor","dept_manager"].includes(e.target.value)}))}>
-                        {Object.entries(ROLES).map(([k,r])=><option key={k} value={k}>{r.icon} {r.label}</option>)}
+                        {roleOptions.map(([k,r])=><option key={k} value={k}>{r.icon} {r.label}</option>)}
                       </select>
                     </div>
                     <div><label style={{fontSize:11,color:muted,display:"block",marginBottom:3}}>מחלקה</label>
-                      <select style={inp} value={newUser.departmentId||""} onChange={e=>setNewUser(p=>({...p,departmentId:e.target.value,managerId:""}))}>
-                        <option value="">— ללא מחלקה —</option>
-                        {(departments||[]).map(d=><option key={d.id} value={d.id}>{d.name}</option>)}
+                      <select style={inp} value={newUser.departmentId||""} disabled={!isAdmin} onChange={e=>setNewUser(p=>({...p,departmentId:e.target.value,managerId:""}))}>
+                        {isAdmin&&<option value="">— ללא מחלקה —</option>}
+                        {(isAdmin?(departments||[]):(myDept?[myDept]:[])).map(d=><option key={d.id} value={d.id}>{d.name}</option>)}
                       </select>
                     </div>
                     <div><label style={{fontSize:11,color:muted,display:"block",marginBottom:3}}>מנהל ישיר (ראש צוות)</label>
@@ -6180,8 +6253,9 @@ function AdminPanel({projects,stages,orders=[],onClose,lightMode,departments,upd
                   <div style={{display:"flex",gap:8}}><Btn color="#10b981" onClick={addUser}>✅ הוסף</Btn><Btn onClick={()=>setAddMode(false)}>ביטול</Btn></div>
                 </div>
               )}
+              {!isAdmin&&!myDept&&<div style={{background:"#f59e0b15",border:"1px solid #f59e0b44",borderRadius:8,padding:"10px 12px",fontSize:12,color:"#f59e0b",marginBottom:10}}>לא משויכת אליך מחלקה — פנה למנהל המערכת כדי לנהל את העובדים שלך</div>}
               <div style={{display:"flex",flexDirection:"column",gap:6}}>
-                {users.map(u=>(
+                {scopedUsers.map(u=>(
                   <div key={u.id} style={{background:lm?"#f7f8fa":"#0d1120",borderRadius:8,padding:"10px 14px",display:"flex",justifyContent:"space-between",alignItems:"center",opacity:u.active===false?.5:1,border:`1px solid ${border}`}}>
                     <div>
                       <div style={{fontWeight:600,color:text}}>{u.name} <span style={{fontSize:11,color:muted}}>({u.username})</span></div>
@@ -6201,7 +6275,7 @@ function AdminPanel({projects,stages,orders=[],onClose,lightMode,departments,upd
                     </div>
                     <div style={{display:"flex",gap:4}}>
                       <IBtn onClick={()=>{setEditUser({...u});setEditShowPw(false)}} title="ערוך">✏️</IBtn>
-                      {u.role!=="admin"&&<IBtn onClick={()=>toggleActive(u.id)} title={u.active!==false?"השבת":"הפעל"}>{u.active!==false?"🚫":"✅"}</IBtn>}
+                      {u.role!=="admin"&&u.id!==currentUser.id&&<IBtn onClick={()=>toggleActive(u.id)} title={u.active!==false?"השבת":"הפעל"}>{u.active!==false?"🚫":"✅"}</IBtn>}
                       {u.role!=="admin"&&u.id!==currentUser.id&&<IBtn onClick={()=>deleteUser(u.id)} title="מחק לצמיתות">🗑️</IBtn>}
                     </div>
                   </div>
@@ -6336,22 +6410,24 @@ function AdminPanel({projects,stages,orders=[],onClose,lightMode,departments,upd
               {[["שם מלא","name","text"],["שם משתמש","username","text"],["תעריף עלות ₪/שעה","hourlyRate","number"],["תעריף מכירה ₪/שעה","saleRate","number"]].map(([l,k,t])=>(
                 <div key={k}><label style={{fontSize:11,color:muted,display:"block",marginBottom:3}}>{l}</label><input style={inp} type={t} name={"eu_"+k} autoComplete="off" value={editUser[k]||""} onChange={e=>setEditUser(p=>({...p,[k]:t==="number"?Number(e.target.value):e.target.value}))}/></div>
               ))}
-              <div><label style={{fontSize:11,color:muted,display:"block",marginBottom:3}}>סיסמה (ריק = ללא שינוי)</label>
+              <div><label style={{fontSize:11,color:muted,display:"block",marginBottom:3}}>🔑 סיסמה חדשה (ריק = ללא שינוי)</label>
                 <div style={{position:"relative"}}>
                   <input style={inp} type={editShowPw?"text":"password"} name="eu_password" autoComplete="new-password" value={editUser.password||""} placeholder={editShowPw?(editUser.passwordPlain||"לא זמין"):"••••••"} onChange={e=>setEditUser(p=>({...p,password:e.target.value}))}/>
                   <button onClick={()=>setEditShowPw(s=>!s)} title={editShowPw?"הסתר":"הצג"} style={{position:"absolute",left:8,top:"50%",transform:"translateY(-50%)",background:"none",border:"none",fontSize:15,cursor:"pointer",lineHeight:1}}>{editShowPw?"🙈":"👁️"}</button>
                 </div>
-                {editShowPw&&<div style={{fontSize:10,color:editUser.passwordPlain?"#f59e0b":"#ef4444",marginTop:3}}>{editUser.passwordPlain?`נוכחית: ${editUser.passwordPlain}`:"הסיסמה הנוכחית לא נשמרה כטקסט — הקלד סיסמה חדשה"}</div>}
+                {editUser.password
+                  ?<div style={{fontSize:10,color:validatePassword(editUser.password,PASSWORD_POLICY).length?"#f59e0b":"#10b981",marginTop:3}}>{passwordHint(editUser.password)}</div>
+                  :editShowPw&&<div style={{fontSize:10,color:editUser.passwordPlain?"#f59e0b":"#ef4444",marginTop:3}}>{editUser.passwordPlain?`נוכחית: ${editUser.passwordPlain}`:"הסיסמה הנוכחית לא נשמרה כטקסט — הקלד סיסמה חדשה"}</div>}
               </div>
               <div><label style={{fontSize:11,color:muted,display:"block",marginBottom:3}}>תפקיד</label>
                 <select style={inp} value={editUser.role} onChange={e=>setEditUser(p=>({...p,role:e.target.value,canEdit:["admin","editor","dept_manager"].includes(e.target.value)}))}>
-                  {Object.entries(ROLES).map(([k,r])=><option key={k} value={k}>{r.icon} {r.label}</option>)}
+                  {roleOptions.map(([k,r])=><option key={k} value={k}>{r.icon} {r.label}</option>)}
                 </select>
               </div>
               <div><label style={{fontSize:11,color:muted,display:"block",marginBottom:3}}>מחלקה</label>
-                <select style={inp} value={editUser.departmentId||""} onChange={e=>setEditUser(p=>({...p,departmentId:e.target.value,managerId:""}))}>
-                  <option value="">— ללא מחלקה —</option>
-                  {(departments||[]).map(d=><option key={d.id} value={d.id}>{d.name}</option>)}
+                <select style={inp} value={editUser.departmentId||""} disabled={!isAdmin} onChange={e=>setEditUser(p=>({...p,departmentId:e.target.value,managerId:""}))}>
+                  {isAdmin&&<option value="">— ללא מחלקה —</option>}
+                  {(isAdmin?(departments||[]):(myDept?[myDept]:[])).map(d=><option key={d.id} value={d.id}>{d.name}</option>)}
                 </select>
               </div>
               <div><label style={{fontSize:11,color:muted,display:"block",marginBottom:3}}>מנהל ישיר (ראש צוות)</label>
@@ -10110,7 +10186,7 @@ function Navbar({tab,setTab,tabs,lightMode,toggleLight,sync,onAdmin,onLogout,ale
               </button>
               {menuOpen&&(
                 <div style={{position:"absolute",top:"calc(100% + 6px)",left:0,background:navBg,border:`1px solid ${navBorder}`,borderRadius:10,padding:8,minWidth:160,zIndex:200,boxShadow:"0 8px 24px #0004",display:"flex",flexDirection:"column",gap:4}}>
-                  {isAdmin&&<button onClick={()=>{onAdmin();setMenuOpen(false)}} style={{background:"transparent",border:"none",color:"#f59e0b",borderRadius:7,padding:"8px 12px",fontSize:13,fontWeight:600,fontFamily:"inherit",textAlign:"right",cursor:"pointer",whiteSpace:"nowrap"}}>🛡️ ניהול מערכת</button>}
+                  <button onClick={()=>{onAdmin();setMenuOpen(false)}} style={{background:"transparent",border:"none",color:"#f59e0b",borderRadius:7,padding:"8px 12px",fontSize:13,fontWeight:600,fontFamily:"inherit",textAlign:"right",cursor:"pointer",whiteSpace:"nowrap"}}>{isAdmin?"🛡️ ניהול מערכת":"👥 ניהול עובדים"}</button>
                   <button onClick={()=>{onLiveBoard();setMenuOpen(false)}} style={{background:"transparent",border:"none",color:"#06b6d4",borderRadius:7,padding:"8px 12px",fontSize:13,fontWeight:600,fontFamily:"inherit",textAlign:"right",cursor:"pointer",whiteSpace:"nowrap"}}>📡 מסך מפעל</button>
                   <button onClick={()=>{onReport();setMenuOpen(false)}} style={{background:"transparent",border:"none",color:"#10b981",borderRadius:7,padding:"8px 12px",fontSize:13,fontWeight:600,fontFamily:"inherit",textAlign:"right",cursor:"pointer",whiteSpace:"nowrap"}}>📄 דוח חודשי</button>
                   <button onClick={()=>{onHistory();setMenuOpen(false)}} style={{background:"transparent",border:"none",color:"#8b5cf6",borderRadius:7,padding:"8px 12px",fontSize:13,fontWeight:600,fontFamily:"inherit",textAlign:"right",cursor:"pointer",whiteSpace:"nowrap"}}>📋 היסטוריה</button>
@@ -10155,7 +10231,7 @@ function Navbar({tab,setTab,tabs,lightMode,toggleLight,sync,onAdmin,onLogout,ale
             <div style={{display:"flex",flexDirection:"column",gap:2,padding:"0 8px"}}>
               <button onClick={()=>{toggleLight();setMenuOpen(false)}} style={{background:"transparent",border:"none",borderRadius:8,padding:"10px 14px",fontSize:14,color:navMuted,fontFamily:"inherit",textAlign:"right",display:"flex",alignItems:"center",gap:10}}><span style={{fontSize:18}}>{lm?"🌙":"☀️"}</span>{lm?"מצב כהה":"מצב בהיר"}</button>
               {isManager&&<><div style={{padding:"8px 14px",fontSize:11,color:navMuted,fontWeight:700,textTransform:"uppercase",letterSpacing:".05em"}}>ניהול</div>
-              {isAdmin&&<button onClick={()=>{onAdmin();setMenuOpen(false)}} style={{background:"transparent",border:"none",borderRadius:8,padding:"10px 14px",fontSize:14,color:navMuted,fontFamily:"inherit",textAlign:"right",display:"flex",alignItems:"center",gap:10}}><span style={{fontSize:18}}>🛡️</span>ניהול מערכת</button>}
+              <button onClick={()=>{onAdmin();setMenuOpen(false)}} style={{background:"transparent",border:"none",borderRadius:8,padding:"10px 14px",fontSize:14,color:navMuted,fontFamily:"inherit",textAlign:"right",display:"flex",alignItems:"center",gap:10}}><span style={{fontSize:18}}>{isAdmin?"🛡️":"👥"}</span>{isAdmin?"ניהול מערכת":"ניהול עובדים"}</button>
               <button onClick={()=>{onLiveBoard();setMenuOpen(false)}} style={{background:"transparent",border:"none",borderRadius:8,padding:"10px 14px",fontSize:14,color:navMuted,fontFamily:"inherit",textAlign:"right",display:"flex",alignItems:"center",gap:10}}><span style={{fontSize:18}}>📡</span>מסך מפעל חי</button>
               <button onClick={()=>{onReport();setMenuOpen(false)}} style={{background:"transparent",border:"none",borderRadius:8,padding:"10px 14px",fontSize:14,color:navMuted,fontFamily:"inherit",textAlign:"right",display:"flex",alignItems:"center",gap:10}}><span style={{fontSize:18}}>📄</span>דוח חודשי</button>
               <button onClick={()=>{onHistory();setMenuOpen(false)}} style={{background:"transparent",border:"none",borderRadius:8,padding:"10px 14px",fontSize:14,color:navMuted,fontFamily:"inherit",textAlign:"right",display:"flex",alignItems:"center",gap:10}}><span style={{fontSize:18}}>📋</span>היסטוריה</button>
@@ -12350,7 +12426,7 @@ function App(){
       <FastScroll/>
       {showInstall&&<InstallBanner onInstall={handleInstall} onDismiss={()=>setShowInstall(false)} lm={lm}/>}
       {showPilotReset&&isAdmin&&<PilotResetModal users={allUsers} workLogs={workLogs} customTasks={customTasks} dailyPlans={dailyPlans} departments={departments} lightMode={lightMode} onClose={()=>setShowPilotReset(false)} onRun={runPilotReset}/>}
-      {showAdmin&&isAdmin&&<AdminPanel projects={projects} stages={stages} orders={orders} onClose={()=>setShowAdmin(false)} lightMode={lightMode} departments={departments} updD={updD} onPilotReset={()=>setShowPilotReset(true)}/>}
+      {showAdmin&&canManageUsers(currentUser)&&<AdminPanel projects={projects} stages={stages} orders={orders} onClose={()=>setShowAdmin(false)} lightMode={lightMode} departments={departments} updD={updD} onPilotReset={isAdmin?()=>setShowPilotReset(true):null}/>}
       {showAlerts&&<AlertsPanel orders={filteredOrders} stages={stages} workLogs={filteredWorkLogs} users={visibleUsers} onClose={()=>setShowAlerts(false)} dismissedAlerts={dismissedAlerts} onDismissAll={ids=>setDismissedAlerts(prev=>[...new Set([...prev,...ids])])}/>}
       {showLiveBoard&&(isAdmin||isDeptMgr)&&(canUseFeature("live_board")?<LiveFactoryBoard orders={filteredOrders} workLogs={filteredWorkLogs} stages={stages} customTasks={customTasks} users={visibleUsers} departments={visibleDepartments} onClose={()=>setShowLiveBoard(false)} lightMode={lightMode}/>:<Modal onClose={()=>setShowLiveBoard(false)}><UpgradePrompt feature="לוח חי"/></Modal>)}
       {showReport&&(isAdmin||isDeptMgr)&&(canUseFeature("pdf_reports")?<MonthlyReportModal orders={filteredOrders} workLogs={filteredWorkLogs} stages={stages} projects={filteredProjects} users={visibleUsers} onClose={()=>setShowReport(false)}/>:<Modal onClose={()=>setShowReport(false)}><UpgradePrompt feature="דוחות PDF"/></Modal>)}
