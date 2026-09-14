@@ -6045,6 +6045,7 @@ function AdminPanel({projects,stages,orders=[],onClose,lightMode,departments,upd
   const [editUser,setEditUser]=useState(null);
   const [addMode,setAddMode]=useState(false);
   const [revealPw,setRevealPw]=useState({}); // userId -> bool (show password in list)
+  const [credReport,setCredReport]=useState(false); // the printable username/password report
   const [editShowPw,setEditShowPw]=useState(false);
   const [newShowPw,setNewShowPw]=useState(false); // show the password being typed for a new user
   const [newUser,setNewUser]=useState({username:"",password:"",name:"",role:"worker",projectAccess:"all",stageAccess:"all",branchAccess:[],branchNone:false,canEdit:false,canView:true,active:true,hourlyRate:0,saleRate:0,departmentId:"",managerId:""});
@@ -6190,6 +6191,7 @@ function AdminPanel({projects,stages,orders=[],onClose,lightMode,departments,upd
                 <div style={{fontSize:14,fontWeight:700,color:text}}>משתמשים ({scopedUsers.length})</div>
                 <div style={{display:"flex",gap:7,flexWrap:"wrap"}}>
                   {isAdmin&&onPilotReset&&<Btn color="#ef4444" small onClick={()=>{onClose();onPilotReset()}} title="מחיקת עובדי הדמו והנתונים שלהם לפני תחילת פיילוט">🧹 ניקוי לפיילוט</Btn>}
+                  {isAdmin&&<Btn color="#8b5cf6" small onClick={()=>setCredReport(true)} title="דוח מסודר להדפסה של שמות המשתמש והסיסמאות — לכלל המפעל או לפי מחלקה">🔑 דוח סיסמאות</Btn>}
                   <Btn color="var(--c-accent)" small onClick={()=>{setNewShowPw(false);setNewUser(p=>({...p,departmentId:isAdmin?p.departmentId:(myDept?.id||"")}));setAddMode(true)}}>+ הוסף משתמש</Btn>
                 </div>
               </div>
@@ -6420,6 +6422,9 @@ function AdminPanel({projects,stages,orders=[],onClose,lightMode,departments,upd
           {tab==="companies"&&<CompaniesTab lightMode={lm} currentUser={currentUser}/>}
         </div>
       </div>
+
+      {/* Username / password report — admins only */}
+      {credReport&&isAdmin&&<CredentialsReport users={users} departments={departments} lightMode={lm} onClose={()=>setCredReport(false)}/>}
 
       {/* Edit User Modal */}
       {editUser&&(
@@ -7850,6 +7855,348 @@ function exportTeamReportXlsx(m){
   const r3=m.workers.flatMap(w=>w.tasks.map(t=>[t.day,t.userName,t.name,t.desc,fmtClock(t.start),fmtClock(t.end),Math.round(t.min),t.partial?"חלקית":"הושלמה",t.price]));
   addSheet(wb,"משימות",h3,r3,[12,16,24,30,10,10,11,11,10]);
   XLSX.writeFile(wb,`דוח_עובדים_${m.from}_${m.to}.xlsx`);
+}
+
+// ══════════════════════════════════════════════════════════════════════════
+// ═══ CREDENTIALS REPORT (שמות משתמש וסיסמאות) ═════════════════════════════
+// ══════════════════════════════════════════════════════════════════════════
+// Login details on a production floor are handed over on paper: the admin
+// prints the list once and gives each department its own page. The password is
+// printed as it was typed — the app already keeps it beside the hash for
+// exactly this reason (see `passwordPlain`) — so an account whose password was
+// set before that, or never through this panel, is listed as "not available"
+// instead of appearing blank and reading as an empty password.
+const credRole=r=>ROLES[r]?.label||r||"—";
+
+// Users the report covers, grouped by department. `deptIds` empty = every
+// department; the department-less are their own group, keyed by "".
+function buildCredentialsReport({users,departments,deptIds,includeInactive,includeAdmins,manager}){
+  const depts=departments||[];
+  const pick=new Set(deptIds||[]);
+  const rows=(users||[])
+    .filter(u=>includeInactive||u.active!==false)
+    .filter(u=>includeAdmins||u.role!=="admin")
+    .map(u=>{
+      // userDeptId, not u.departmentId — a manager named on a department belongs
+      // to it even when their own card was never filled in.
+      const d=depts.find(x=>x.id===userDeptId(u,depts));
+      return{id:u.id,name:u.name||u.username||"—",username:u.username||"—",
+        password:u.passwordPlain||"",role:u.role,active:u.active!==false,
+        deptId:d?d.id:"",deptName:d?d.name:"ללא מחלקה",color:d?(d.color||"#3b82f6"):"#64748b"};
+    })
+    .filter(r=>!pick.size||pick.has(r.deptId));
+  const byName=(a,b)=>String(a.name||"").localeCompare(String(b.name||""),"he");
+  const groups=[...depts.map(d=>({id:d.id,name:d.name,color:d.color||"#3b82f6"})),{id:"",name:"ללא מחלקה",color:"#64748b"}]
+    .map(g=>({...g,users:rows.filter(r=>r.deptId===g.id).sort(byName)}))
+    .filter(g=>g.users.length);
+  const totals={
+    users:rows.length,depts:groups.length,
+    withPw:rows.filter(r=>r.password).length,
+    noPw:rows.filter(r=>!r.password).length,
+    inactive:rows.filter(r=>!r.active).length
+  };
+  // Named from what was picked, not from what came back — a department whose
+  // people were all filtered out still belongs in the title of its own report.
+  const nameOf=id=>id?(depts.find(d=>d.id===id)?.name||id):"ללא מחלקה";
+  return{groups,rows,totals,
+    scopeLabel:pick.size?[...pick].map(nameOf).join(" · "):"כלל המפעל",
+    manager,generatedAt:new Date()};
+}
+
+// ── Printable HTML (the preview and the printout are the same document) ────
+function credentialsHTML(m,opt){
+  const layout=opt?.layout==="cards"?"cards":"table";
+  const brk=!!opt?.pageBreak;
+  const T=m.totals;
+  // A username or password is Latin text sitting inside an RTL line; without an
+  // isolate the browser reorders it around the Hebrew beside it.
+  const ltr=(s,cls)=>`<span class="ltr ${cls||""}">${esc(s)}</span>`;
+  const pwCell=r=>r.password?ltr(r.password,"pw"):'<span class="miss">לא זמין — יש לאפס</span>';
+  const kpi=(v,l,c)=>`<div class="kpi"><div class="kv" style="color:${c}">${esc(v)}</div><div class="kl">${esc(l)}</div></div>`;
+
+  const table=g=>`<table class="cred"><thead><tr>
+      <th style="width:32px">#</th><th>שם העובד</th><th style="width:26%">שם משתמש</th>
+      <th style="width:26%">סיסמה</th><th style="width:110px">תפקיד</th><th style="width:58px">סטטוס</th>
+    </tr></thead><tbody>${g.users.map((r,i)=>`<tr class="${r.active?"":"off"}">
+      <td class="ix">${i+1}</td>
+      <td class="nm">${esc(r.name)}</td>
+      <td>${ltr(r.username,"un")}</td>
+      <td>${pwCell(r)}</td>
+      <td class="ro">${esc(credRole(r.role))}</td>
+      <td>${r.active?'<span class="tag ok">פעיל</span>':'<span class="tag no">מושבת</span>'}</td>
+    </tr>`).join("")}</tbody></table>`;
+
+  // One slip per employee, cut along the dashed edge and handed over.
+  const cards=g=>`<div class="cards">${g.users.map(r=>`<div class="card${r.active?"":" off"}">
+      <div class="cn">${esc(r.name)}</div>
+      <div class="cmeta"><span class="dot" style="background:${esc(g.color)}"></span>${esc(g.name)} · ${esc(credRole(r.role))}${r.active?"":" · מושבת"}</div>
+      <div class="cf"><span class="cl">שם משתמש</span><span class="cv">${ltr(r.username,"un")}</span></div>
+      <div class="cf"><span class="cl">סיסמה</span><span class="cv">${pwCell(r)}</span></div>
+    </div>`).join("")}</div>`;
+
+  const sections=m.groups.map((g,i)=>`<section class="grp${brk&&i>0?" brk":""}">
+    <div class="ghead" style="border-right-color:${esc(g.color)}">
+      <span class="gdot" style="background:${esc(g.color)}"></span>
+      <span class="gname">${esc(g.name)}</span>
+      <span class="gcount">${g.users.length===1?"עובד אחד":`${g.users.length} עובדים`}</span>
+      ${g.users.some(r=>!r.password)?`<span class="gwarn">${g.users.filter(r=>!r.password).length} ללא סיסמה שמורה</span>`:""}
+    </div>
+    ${layout==="cards"?cards(g):table(g)}
+  </section>`).join("");
+
+  return`<!DOCTYPE html><html dir="rtl" lang="he"><head><meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>דוח משתמשים וסיסמאות — ${esc(m.scopeLabel)}</title>
+<style>
+@page{size:A4 portrait;margin:10mm}
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:'Heebo','Segoe UI',Arial,sans-serif;direction:rtl;background:#fff;color:#111827;font-size:11px;line-height:1.45;padding:18px}
+.wrap{max-width:960px;margin:0 auto}
+h1{font-size:20px;color:#1e3a5f;letter-spacing:-.02em}
+.head{border-bottom:3px solid #1e3a5f;padding-bottom:10px;margin-bottom:12px;display:flex;justify-content:space-between;align-items:flex-end;gap:14px;flex-wrap:wrap}
+.head .meta{font-size:10.5px;color:#6b7280;text-align:left;line-height:1.7}
+.sub{font-size:12.5px;color:#374151;margin-top:3px;font-weight:600}
+.conf{background:#fef2f2;border:1px solid #fecaca;border-right:4px solid #dc2626;border-radius:7px;padding:7px 11px;font-size:10.5px;color:#991b1b;margin-bottom:12px}
+.conf b{color:#7f1d1d}
+.kpis{display:flex;flex-wrap:wrap;gap:7px;margin-bottom:14px}
+.kpi{border:1px solid #dbe3ec;border-radius:8px;padding:8px 13px;min-width:96px;background:#f8fafc}
+.kv{font-size:17px;font-weight:800;letter-spacing:-.02em}
+.kl{font-size:9.5px;color:#6b7280;margin-top:2px}
+.grp{margin-top:14px}
+.grp.brk{page-break-before:always;break-before:page}
+.ghead{display:flex;align-items:baseline;gap:9px;flex-wrap:wrap;background:#f3f4f6;border-right:4px solid #1e3a5f;border-radius:5px;padding:5px 10px;margin-bottom:5px;page-break-after:avoid;break-after:avoid}
+.gdot{width:9px;height:9px;border-radius:3px;display:inline-block;align-self:center}
+.gname{font-size:13px;font-weight:800;color:#1e3a5f}
+.gcount{font-size:10px;color:#6b7280}
+.gwarn{font-size:9.5px;color:#b45309;background:#fffbeb;border:1px solid #fde68a;border-radius:9px;padding:1px 8px;margin-right:auto}
+table{width:100%;border-collapse:collapse;font-size:10.5px}
+th{background:#1e3a5f;color:#fff;padding:6px;text-align:center;font-weight:700;border:1px solid #2c4a70;font-size:10px}
+td{padding:5px 7px;border:1px solid #e5e7eb;text-align:center;vertical-align:middle}
+tbody tr:nth-child(even){background:#f4f8fd}
+tr.off{color:#9ca3af;background:#fafafa!important}
+.ix{color:#9ca3af;font-size:9.5px}
+.nm{font-weight:700;text-align:right;font-size:11.5px}
+.ro{color:#4b5563;font-size:10px}
+.ltr{direction:ltr;unicode-bidi:isolate;display:inline-block;white-space:nowrap;font-family:'Segoe UI',Consolas,monospace}
+.un{font-size:11px;color:#1d4ed8;font-weight:600}
+.pw{font-size:11.5px;font-weight:700;color:#7c2d12;background:#fff7ed;border:1px solid #fed7aa;border-radius:4px;padding:1px 8px;letter-spacing:.4px}
+.miss{color:#b91c1c;font-size:9.5px;font-weight:600}
+.tag{font-size:9px;font-weight:700;border-radius:9px;padding:1px 7px;display:inline-block}
+.ok{color:#047857;background:#d1fae5}
+.no{color:#b91c1c;background:#fee2e2}
+.cards{display:grid;grid-template-columns:repeat(auto-fill,minmax(224px,1fr));gap:8px}
+.card{border:1px dashed #94a3b8;border-radius:9px;padding:9px 11px;background:#fff;page-break-inside:avoid;break-inside:avoid}
+.card.off{opacity:.55}
+.cn{font-size:13px;font-weight:800;color:#1e3a5f}
+.cmeta{font-size:9.5px;color:#6b7280;margin:2px 0 7px}
+.dot{display:inline-block;width:7px;height:7px;border-radius:2px;margin-left:5px;vertical-align:middle}
+.cf{display:flex;align-items:center;gap:7px;margin-top:4px}
+.cl{font-size:9.5px;color:#6b7280;min-width:62px}
+.cv{flex:1}
+.none{font-size:11px;color:#9ca3af;padding:22px;text-align:center;border:1px dashed #e5e7eb;border-radius:8px}
+.legend{margin-top:12px;font-size:9.5px;color:#6b7280;background:#f9fafb;border:1px solid #eceff3;border-radius:7px;padding:7px 10px;line-height:1.7}
+.foot{margin-top:20px;padding-top:9px;border-top:1px solid #e5e7eb;font-size:9.5px;color:#9ca3af;display:flex;justify-content:space-between;gap:10px;flex-wrap:wrap}
+@media print{body{padding:0}.wrap{max-width:none}thead{display:table-header-group}tr{page-break-inside:avoid}}
+</style></head><body><div class="wrap">
+<div class="head">
+  <div>
+    <h1>🔑 דוח משתמשים וסיסמאות</h1>
+    <div class="sub">${esc(m.scopeLabel)}</div>
+  </div>
+  <div class="meta">
+    הופק על ידי: <b>${esc(m.manager?.name||"—")}</b><br/>
+    ${esc(ROLES[m.manager?.role]?.label||"")}<br/>
+    תאריך הפקה: ${esc(m.generatedAt.toLocaleDateString("he-IL"))} ${esc(m.generatedAt.toLocaleTimeString("he-IL",{hour:"2-digit",minute:"2-digit"}))}
+  </div>
+</div>
+<div class="conf">🔒 <b>מסמך חסוי — פרטי התחברות.</b> המסמך מכיל סיסמאות בטקסט גלוי. יש למסור אותו ליעדו בלבד, לגרוס עותק מודפס שאינו בשימוש ולהימנע משליחתו בדוא"ל או בהודעות.</div>
+<div class="kpis">
+  ${kpi(T.users,"משתמשים בדוח","#1d4ed8")}
+  ${kpi(T.depts,"מחלקות","#0891b2")}
+  ${kpi(T.withPw,"עם סיסמה שמורה","#047857")}
+  ${kpi(T.noPw,"ללא סיסמה שמורה",T.noPw?"#b91c1c":"#6b7280")}
+  ${kpi(T.inactive,"מושבתים",T.inactive?"#b45309":"#6b7280")}
+</div>
+${sections||'<div class="none">לא נמצאו משתמשים לפי הסינון שנבחר</div>'}
+<div class="legend">
+  <b>איך קוראים את הדוח:</b> לכל עובד מוצגים שם העובד, שם המשתמש להתחברות והסיסמה שלו. המשתמשים מקובצים לפי מחלקה, ועובד שאינו משויך למחלקה מופיע תחת "ללא מחלקה".
+  <b>"לא זמין — יש לאפס"</b> פירושו שהסיסמה של אותו עובד נקבעה לפני שהמערכת החלה לשמור אותה לצפייה; הגדרת סיסמה חדשה בכרטיס המשתמש (ניהול מערכת ← משתמשים) תציג אותה כאן.
+</div>
+<div class="foot">
+  <span>דוח זה הופק אוטומטית ממערכת OmniView v${esc(APP_VERSION)}</span>
+  <span>${esc(m.scopeLabel)} · ${T.users} משתמשים · ${T.depts} מחלקות</span>
+</div>
+</div></body></html>`;
+}
+
+// Excel sheet names: no []:*?/\, 31 chars, and no two alike in one workbook.
+const credSheetName=(name,used)=>{
+  const base=(String(name||"מחלקה").replace(/[\\\/\?\*\[\]:]/g,"-").trim().slice(0,28))||"מחלקה";
+  let out=base,n=2;
+  while(used.has(out))out=`${base} ${n++}`.slice(0,31);
+  used.add(out);return out;
+};
+
+// The same list as a workbook — a sheet with everyone, and, when the report
+// spans more than one department, a sheet per department to hand on as is.
+function exportCredentialsXlsx(m){
+  const wb=XLSX.utils.book_new();
+  const H=['מחלקה','שם העובד','שם משתמש','סיסמה','תפקיד','סטטוס'];
+  const CW=[20,22,20,20,16,10];
+  const mk=list=>list.map(r=>[r.deptName,r.name,r.username,r.password||"לא זמין",credRole(r.role),r.active?"פעיל":"מושבת"]);
+  const sp=(ri,c,row)=>c===3?(row[3]==="לא זמין"?XL_WARN:null):c===5?(row[5]==="פעיל"?XL_OK:XL_BAD):null;
+  const used=new Set();
+  // One department in the report needs no "everyone" sheet above its own.
+  const title=m.groups.length===1?m.groups[0].name:"כל המשתמשים";
+  addSheet(wb,credSheetName(title,used),H,mk(m.groups.flatMap(g=>g.users)),CW,sp);
+  if(m.groups.length>1)m.groups.forEach(g=>addSheet(wb,credSheetName(g.name,used),H,mk(g.users),CW,sp));
+  XLSX.writeFile(wb,`משתמשים_וסיסמאות_${isoOf(m.generatedAt)}.xlsx`);
+}
+
+// The admin's screen for it: pick departments, pick a layout, see exactly what
+// will come out of the printer, then print / save / export.
+function CredentialsReport({users,departments,onClose,lightMode}){
+  const {currentUser}=useAuth();
+  const {toast}=useToast();
+  // This screen has an Excel button — warm the on-demand library in the
+  // background so the click itself doesn't wait.
+  useEffect(()=>{loadXLSX().catch(()=>{})},[]);
+  const depts=departments||[];
+  const [sel,setSel]=useState([]);            // empty = every department
+  const [includeInactive,setIncludeInactive]=useState(false);
+  const [includeAdmins,setIncludeAdmins]=useState(true);
+  const [layout,setLayout]=useState("table");
+  const [pageBreak,setPageBreak]=useState(false);
+  const frameRef=useRef(null);
+
+  // The chips: every department, plus "no department" when anyone is there.
+  const chips=useMemo(()=>{
+    const counted=id=>(users||[]).filter(u=>userDeptId(u,depts)===id).length;
+    const list=depts.map(d=>({id:d.id,name:d.name,color:d.color||"#3b82f6",n:counted(d.id)}));
+    const none=counted("");
+    if(none)list.push({id:"",name:"ללא מחלקה",color:"#64748b",n:none});
+    return list;
+  },[users,depts]);
+
+  const model=useMemo(()=>buildCredentialsReport({users,departments:depts,deptIds:sel,
+    includeInactive,includeAdmins,manager:currentUser}),[users,depts,sel,includeInactive,includeAdmins,currentUser]);
+  const html=useMemo(()=>credentialsHTML(model,{layout,pageBreak}),[model,layout,pageBreak]);
+  const T=model.totals;
+
+  // Handing out passwords is worth a line in the audit log, whichever way out
+  // of the app they took.
+  const logOut=how=>addAuditEntry({userId:currentUser?.id,username:currentUser?.username,name:currentUser?.name,
+    action:"הפקת דוח סיסמאות",target:model.scopeLabel,
+    details:`${how} · ${T.users} משתמשים · ${T.depts} מחלקות`});
+
+  const printWindow=()=>{
+    const w=window.open("","_blank");
+    if(!w){toast("הדפדפן חסם את חלון ההדפסה — אפשר חלונות קופצים ונסה שוב","error");return}
+    w.document.open();w.document.write(html);w.document.close();
+    let fired=false;const go=()=>{if(fired)return;fired=true;try{w.focus();w.print()}catch{}};
+    w.onload=go;setTimeout(go,700);
+    logOut("חלון חדש");
+  };
+  const doPrint=()=>{
+    const f=frameRef.current;
+    try{if(f&&f.contentWindow){f.contentWindow.focus();f.contentWindow.print();logOut("הדפסה");return}}catch{}
+    printWindow();
+  };
+  const doDownload=()=>{
+    const blob=new Blob(["﻿"+html],{type:"text/html;charset=utf-8"});
+    const a=document.createElement("a");a.href=URL.createObjectURL(blob);
+    a.download=`משתמשים_וסיסמאות_${isoOf(model.generatedAt)}.html`;a.click();URL.revokeObjectURL(a.href);
+    logOut("שמירת HTML");
+    toast("הדוח הורד כקובץ HTML","success");
+  };
+  const doXlsx=()=>loadXLSX().then(()=>{exportCredentialsXlsx(model);logOut("ייצוא לאקסל")}).catch(()=>toast(XLSX_LOAD_ERR,"error"));
+  const toggle=id=>setSel(p=>p.includes(id)?p.filter(x=>x!==id):[...p,id]);
+
+  const lm=lightMode;
+  const card=lm?"#ffffff":"#131829",border=lm?"#dde1e8":"#1e2a42",text=lm?"#1a1f2e":"#e2e8f0",muted=lm?"#5a6478":"#8b95a8";
+  const panel=lm?"#f7f8fa":"#0d1120";
+  const chk={display:"flex",alignItems:"center",gap:7,fontSize:12.5,color:text,cursor:"pointer"};
+  const kpi=(v,l,c)=>(
+    <div style={{background:panel,border:`1px solid ${border}`,borderRadius:9,padding:"8px 12px",minWidth:92}}>
+      <div style={{fontSize:18,fontWeight:800,color:c,lineHeight:1.15}}>{v}</div>
+      <div style={{fontSize:10.5,color:muted,marginTop:2}}>{l}</div>
+    </div>
+  );
+
+  return(
+    <div onClick={e=>{e.stopPropagation();onClose()}} style={{position:"fixed",inset:0,background:"#000000cc",zIndex:260,display:"flex",alignItems:"flex-start",justifyContent:"center",padding:10,overflowY:"auto"}}>
+      <div onClick={e=>e.stopPropagation()} style={{background:card,borderRadius:16,maxWidth:1000,width:"100%",maxHeight:"94vh",overflowY:"auto",border:`1px solid ${border}`,color:text,margin:"auto"}}>
+        <div style={{padding:"16px 22px",borderBottom:`1px solid ${border}`,display:"flex",justifyContent:"space-between",alignItems:"center",gap:10,position:"sticky",top:0,background:card,zIndex:1,borderRadius:"16px 16px 0 0"}}>
+          <div style={{fontWeight:700,fontSize:17}}>🔑 דוח שמות משתמש וסיסמאות</div>
+          <button onClick={onClose} style={{background:"none",border:"none",fontSize:20,color:muted}}>✕</button>
+        </div>
+        <div style={{padding:"14px 22px 22px"}}>
+          <div style={{background:"#ef444412",border:"1px solid #ef444440",borderRight:"4px solid #ef4444",borderRadius:9,padding:"9px 12px",fontSize:12,color:lm?"#991b1b":"#fca5a5",marginBottom:14,lineHeight:1.6}}>
+            🔒 <b>הדוח מציג סיסמאות בטקסט גלוי.</b> מסרו אותו ליעדו בלבד, אל תשלחו אותו בדוא"ל או בהודעות, וגרסו עותק מודפס שאינו בשימוש. הפקת הדוח נרשמת ביומן הפעילות.
+          </div>
+
+          <div style={{background:panel,border:`1px solid ${border}`,borderRadius:11,padding:14,marginBottom:12}}>
+            <div style={{fontSize:11,color:muted,fontWeight:700,marginBottom:7}}>
+              מחלקות בדוח {sel.length?`(${sel.length} נבחרו)`:"(כל המחלקות)"}
+            </div>
+            {chips.length===0?(
+              <div style={{fontSize:12,color:muted}}>לא הוגדרו מחלקות — הדוח יכלול את כל המשתמשים</div>
+            ):(
+              <div style={{display:"flex",gap:7,flexWrap:"wrap"}}>
+                {chips.map(c=>{const on=sel.includes(c.id);return(
+                  <button key={c.id||"none"} onClick={()=>toggle(c.id)} style={{background:on?c.color+"22":"transparent",border:`1px solid ${on?c.color:border}`,color:on?c.color:muted,borderRadius:18,padding:"5px 13px",fontSize:12,fontWeight:on?700:500,fontFamily:"inherit",display:"flex",alignItems:"center",gap:6}}>
+                    <span style={{width:8,height:8,borderRadius:3,background:c.color,display:"inline-block"}}/>
+                    {c.name} <span style={{opacity:.7,fontSize:11}}>({c.n})</span>
+                  </button>
+                )})}
+                {sel.length>0&&<button onClick={()=>setSel([])} style={{background:"none",border:"none",color:"var(--c-accent)",fontSize:12,fontWeight:600,fontFamily:"inherit"}}>נקה בחירה</button>}
+              </div>
+            )}
+            <div style={{display:"flex",gap:18,flexWrap:"wrap",alignItems:"center",marginTop:12,paddingTop:11,borderTop:`1px solid ${border}`}}>
+              <label style={chk}><input type="checkbox" style={{width:"auto"}} checked={includeAdmins} onChange={e=>setIncludeAdmins(e.target.checked)}/> כלול מנהלי מערכת</label>
+              <label style={chk}><input type="checkbox" style={{width:"auto"}} checked={includeInactive} onChange={e=>setIncludeInactive(e.target.checked)}/> כלול עובדים מושבתים</label>
+              <label style={chk}><input type="checkbox" style={{width:"auto"}} checked={pageBreak} onChange={e=>setPageBreak(e.target.checked)}/> עמוד נפרד לכל מחלקה</label>
+              <div style={{display:"flex",alignItems:"center",gap:7,marginRight:"auto"}}>
+                <span style={{fontSize:11,color:muted,fontWeight:600}}>תצוגה</span>
+                <SegBtn options={[["table","📋 טבלה"],["cards","🪪 כרטיסים"]]} value={layout} onChange={setLayout}/>
+              </div>
+            </div>
+          </div>
+
+          <div style={{display:"flex",gap:8,flexWrap:"wrap",marginBottom:12}}>
+            {kpi(T.users,"משתמשים בדוח","#3b82f6")}
+            {kpi(T.depts,"מחלקות","#06b6d4")}
+            {kpi(T.withPw,"עם סיסמה שמורה","#10b981")}
+            {kpi(T.noPw,"ללא סיסמה שמורה",T.noPw?"#ef4444":muted)}
+            {kpi(T.inactive,"מושבתים",T.inactive?"#f59e0b":muted)}
+          </div>
+          {T.noPw>0&&(
+            <div style={{background:"#f59e0b15",border:"1px solid #f59e0b44",borderRadius:9,padding:"8px 12px",fontSize:12,color:"#f59e0b",marginBottom:12,lineHeight:1.6}}>
+              ⚠️ ל־{T.noPw} {T.noPw===1?"משתמש":"משתמשים"} אין סיסמה שמורה לצפייה — היא נקבעה לפני שהמערכת החלה לשמור אותה. הגדרת סיסמה חדשה בכרטיס המשתמש תציג אותה בדוח.
+            </div>
+          )}
+
+          <div style={{border:`1px solid ${border}`,borderRadius:12,overflow:"hidden"}}>
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",gap:10,flexWrap:"wrap",padding:"11px 14px",borderBottom:`1px solid ${border}`,background:panel}}>
+              <div style={{fontWeight:700,fontSize:13.5}}>👁️ תצוגה מקדימה להדפסה</div>
+              <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
+                <Btn small color="#3b82f6" onClick={doPrint} disabled={!T.users}>🖨️ הדפס</Btn>
+                <Btn small color="#0ea5e9" onClick={printWindow} disabled={!T.users}>🗔 פתח בחלון חדש</Btn>
+                <Btn small color="#10b981" onClick={doXlsx} disabled={!T.users}>📊 ייצוא לאקסל</Btn>
+                <Btn small color="#8b5cf6" onClick={doDownload} disabled={!T.users}>⬇️ שמור HTML</Btn>
+              </div>
+            </div>
+            {T.users===0?(
+              <EmptyState icon="📭" title="לא נמצאו משתמשים" subtitle="נסה לבחור מחלקות אחרות, או לכלול עובדים מושבתים"/>
+            ):(
+              <iframe ref={frameRef} srcDoc={html} title="תצוגה מקדימה של דוח הסיסמאות"
+                style={{width:"100%",height:"62vh",minHeight:420,border:"none",background:"#fff",display:"block"}}/>
+            )}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
 }
 
 function TeamReports({users,workLogs,orders,stages,stageBlocks,projects,customTasks,dailyPlans,departments,pnStandards}){
