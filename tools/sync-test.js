@@ -92,8 +92,21 @@ const store={};
 const localStorage={getItem:k=>k in store?store[k]:null,setItem:(k,v)=>{store[k]=String(v)},removeItem:k=>{delete store[k]},clear:()=>{for(const k in store)delete store[k]}};
 const noop=()=>{};
 const el={classList:{add:noop},parentNode:null,remove:noop,addEventListener:noop,removeEventListener:noop,style:{}};
+// Hooks that actually hold state. Sections 1-7 never call a component, so this
+// costs them nothing — but section 8 runs App()'s own body, and for that the
+// useState cells have to survive and the effects have to be catchable. Effects
+// are collected rather than run: the boot effect is the only one that test wants
+// to fire, and firing the other twenty-one would open sockets and timers.
+const hooks={cells:[],slot:0,effects:[],
+  reset(){this.cells=[];this.slot=0;this.effects=[]}};
 const React={createElement:()=>null,createContext:()=>({Provider:()=>null,Consumer:()=>null}),memo:f=>f,forwardRef:f=>f,Fragment:"F",
-  useState:()=>[undefined,noop],useEffect:noop,useCallback:f=>f,useRef:()=>({current:null}),useMemo:f=>f(),useContext:()=>({})};
+  useState(init){const i=hooks.slot++;
+    if(!(i in hooks.cells))hooks.cells[i]={v:typeof init==="function"?init():init,init:typeof init==="function"?undefined:init};
+    const c=hooks.cells[i];
+    return[c.v,x=>{c.v=typeof x==="function"?x(c.v):x}]},
+  useRef(init){const i=hooks.slot++;if(!(i in hooks.cells))hooks.cells[i]={v:{current:init}};return hooks.cells[i].v},
+  useEffect(fn){hooks.effects.push(fn)},
+  useCallback:f=>f,useMemo:f=>f(),useContext:()=>({})};
 const ctx={
   console,Promise,Date,Math,JSON,Map,Set,Array,Object,String,Number,Boolean,Error,RegExp,Symbol,
   URL,URLSearchParams,TextEncoder,TextDecoder,isFinite,isNaN,parseInt,parseFloat,encodeURIComponent,decodeURIComponent,
@@ -106,9 +119,16 @@ const ctx={
   document:{getElementById:()=>el,createElement:()=>el,addEventListener:noop,removeEventListener:noop,body:el,documentElement:el,visibilityState:"visible"},
   requestAnimationFrame:f=>setTimeout(f,0),
   matchMedia:()=>({matches:false,addEventListener:noop,addListener:noop}),
-  fetch:async(url,opts)=>handle(url,opts),
+  // Indirected so section 8 can hold the network open and watch what the app
+  // does while it is still waiting.
+  fetch:async(url,opts)=>ctx.fetch_(url,opts),
   WebSocket:function(){this.close=noop;this.send=noop},
+  // App's body reads Notification.permission while initialising its state.
+  Notification:{permission:"default"},
+  CustomEvent:function(type){this.type=type},
+  addEventListener:noop,removeEventListener:noop,dispatchEvent:noop,
 };
+ctx.fetch_=(url,opts)=>handle(url,opts);
 ctx.window=ctx;ctx.globalThis=ctx;ctx.self=ctx;
 vm.createContext(ctx);
 vm.runInContext(code,ctx,{filename:"app.js"});
@@ -241,6 +261,91 @@ run("resetWatermarks()");
 run("commitWatermarks")({watermarks:partial.watermarks});
 const repaired=await run("dbLoadAll")({reconcile:false,...partial.rows});
 ok(repaired.workLogs.length===DB.work_logs.length,`work_logs was read whole instead of tail-only (${repaired.workLogs.length})`);
+
+console.log("\n── 8. the boot path (what the app actually runs) ──────────");
+// Everything above calls the sync layer directly. This section runs App()'s own
+// boot effect instead, because the bug it guards against was never in the sync
+// layer: snapshotSave, snapshotLoad and the watermarks all worked exactly as
+// sections 6 and 7 show, and the boot path simply never asked them to do
+// anything. A device whose user only ever looked at the floor stored no
+// snapshot, and re-read all 75,807 work logs on every open.
+
+// The app debounces its snapshot write by eight seconds and its save by four.
+// Rather than wait them out, long timers are parked here and fired on demand;
+// the short ones the fake IndexedDB runs on stay real.
+const parked=new Map();let parkId=1;
+const realTimeout=setTimeout;
+ctx.setTimeout=(fn,ms,...a)=>{if(ms>=1000){const id=parkId++;parked.set(id,fn);return id}return realTimeout(fn,ms,...a)};
+ctx.clearTimeout=id=>{if(typeof id==="number"&&parked.has(id))parked.delete(id);else clearTimeout(id)};
+const fireParked=()=>{const fns=[...parked.values()];parked.clear();fns.forEach(f=>{try{f()}catch{}})};
+// Long enough for the boot chain plus the fake IndexedDB, which answers on a
+// zero-delay timer of its own.
+const settle=async(n=12)=>{for(let i=0;i<n;i++)await new Promise(r=>realTimeout(r,5))};
+
+const PFX=run("LS_PREFIX");
+const clearSnapshot=()=>run("idbRun")("readwrite",st=>st.delete(run("snapKey")(CID)));
+// Mounts App once and returns the boot effect, found by a string only it
+// contains rather than by its position in a list of twenty-two.
+const mountApp=()=>{
+  hooks.reset();
+  run("App")();
+  const boot=hooks.effects.find(f=>/sb_migrated/.test(String(f)));
+  // The only piece of App state that starts out true is `loading`, which is what
+  // holds the splash up; asserting that keeps this from silently watching the
+  // wrong cell if another flag is ever added.
+  const lit=hooks.cells.filter(c=>c.init===true);
+  return{boot,loading:lit[0],unique:lit.length===1};
+};
+
+// ── a cold boot must leave a snapshot behind ──────────────────────────────
+await clearSnapshot();
+store[PFX+"sb_migrated"]=JSON.stringify(true);
+delete store[PFX+"session_company"];
+run("resetWatermarks()");run("SYNC.reset()");
+let m=mountApp();
+ok(!!m.boot,"the boot effect was found");
+ok(m.unique,"`loading` is the one App flag that starts true");
+m.boot();
+await settle();
+ok(m.loading.v===false,"the splash comes down when the cold read lands");
+ok(!(await run("snapshotLoad")(CID)),"nothing is written before the debounce");
+fireParked();
+await settle();
+const booted=await run("snapshotLoad")(CID);
+ok(!!booted,"the cold boot wrote a snapshot — this is the regression");
+ok(booted&&booted.rows.workLogs.length===DB.work_logs.length,
+   `all ${DB.work_logs.length} work logs reached IndexedDB`);
+ok(booted&&!!booted.watermarks.work_logs,"with the watermark that makes the next open a delta");
+
+// ── a warm boot must not wait for the network to draw the screen ──────────
+// The snapshot is already in state by then; holding the splash up for a delta
+// that normally returns nothing was the whole of the wait on a phone.
+let release;const gate=new Promise(r=>{release=r});
+ctx.fetch_=async(url,opts)=>{await gate;return handle(url,opts)};
+store[PFX+"session_company"]=JSON.stringify(CID);
+run("resetWatermarks()");run("SYNC.reset()");
+m=mountApp();
+m.boot();
+await settle();
+ok(m.loading.v===false,"warm boot: the app is on screen while the read is still in flight");
+release();
+await settle();
+ok(m.loading.v===false,"and stays there once the read lands");
+
+// The same gate, with no snapshot to seed from: the splash must still wait,
+// or the early release is unconditional rather than earned.
+await clearSnapshot();
+let release2;const gate2=new Promise(r=>{release2=r});
+ctx.fetch_=async(url,opts)=>{await gate2;return handle(url,opts)};
+run("resetWatermarks()");run("SYNC.reset()");
+m=mountApp();
+m.boot();
+await settle();
+ok(m.loading.v===true,"cold boot with no snapshot still waits — the release is earned, not automatic");
+release2();
+await settle();
+ok(m.loading.v===false,"and comes down when the read finally lands");
+ctx.fetch_=(url,opts)=>handle(url,opts);
 
 console.log(`\n${fails?"✗ "+fails+" failed":"✓ all assertions passed"}`);
 process.exit(fails?1:0);

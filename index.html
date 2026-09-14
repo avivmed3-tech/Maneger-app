@@ -11561,28 +11561,85 @@ function App(){
           // why both live in the same snapshot record.
           commitWatermarks({watermarks:snap.watermarks});
           if(snap.at)setSnapAge(new Date(snap.at).toLocaleString("he-IL",{day:"2-digit",month:"2-digit",hour:"2-digit",minute:"2-digit"}));
+          // The splash comes down here, not when the server answers. Everything the
+          // app needs to draw the floor is already in state — that is the whole
+          // point of the snapshot — and the read below is a delta that normally
+          // brings back nothing at all. Waiting for it anyway meant a device
+          // holding yesterday's copy still sat on ⏳ for a full round trip to the
+          // database, which on a phone is the entire complaint.
+          //
+          // The session user is restored from localStorage at mount (see the
+          // useState above), so a returning user renders straight away; someone
+          // with no cached session still gets the login screen, unchanged.
+          //
+          // The read is not hidden while it runs: "saving" is what the header's
+          // sync pill already shows as ⏳, and it turns back to "בזמן אמת" when the
+          // data lands below.
+          setSync("saving");
+          setLoading(false);
         }
       }
       return Promise.all([dbLoadAll(prev),dbLoadUsers()]);
     };
     bootLoad().then(async([data,users])=>{
       if(data){
-        // Always prefer Supabase data — update state and cache
-        setOrders(data.orders||[]);LS.set("orders",data.orders||[]);
-        setProjects(data.projects?.length?data.projects:DEF_PROJ);LS.set("projects",data.projects?.length?data.projects:DEF_PROJ);
-        setStages(data.stages?.length?data.stages:DEF_STAGES);LS.set("stages",data.stages?.length?data.stages:DEF_STAGES);
-        setWorkLogs(data.workLogs||[]);LS.set("workLogs",data.workLogs||[]);
-        setCustomTasks(data.customTasks||[]);LS.set("customTasks",data.customTasks||[]);
-        setStageBlocks(data.stageBlocks||[]);LS.set("stageBlocks",data.stageBlocks||[]);
-        setDepartments(data.departments||[]);LS.set("departments",data.departments||[]);
-        setDailyPlans(data.dailyPlans||[]);LS.set("dailyPlans",data.dailyPlans||[]);
-        // null = the pn_standards table isn't there yet — keep the local copy
-        if(data.pnStandards){setPnStandards(data.pnStandards);LS.set("pnStandards",data.pnStandards)}
+        // Always prefer Supabase data — update state and cache. An empty project
+        // or stage list means a database nobody has configured yet, so the
+        // defaults stand in; pnStandards is null (not []) when that table is not
+        // there at all, and the falsy check below keeps the local copy.
+        const loaded={
+          orders:data.orders||[],
+          projects:data.projects?.length?data.projects:DEF_PROJ,
+          stages:data.stages?.length?data.stages:DEF_STAGES,
+          workLogs:data.workLogs||[],
+          customTasks:data.customTasks||[],
+          stageBlocks:data.stageBlocks||[],
+          departments:data.departments||[],
+          dailyPlans:data.dailyPlans||[],
+          pnStandards:data.pnStandards,
+        };
+        for(const [key,ref,setter,lsKey] of remoteSlots){
+          const rows=loaded[key];
+          if(!rows)continue;
+          // The ref is set here beside the state, exactly as persist() does it and
+          // for the same reason: a ref otherwise lags a render behind, and the
+          // snapshot written below reads the refs, not the state. Without this a
+          // pagehide in the moment after boot would store nine empty collections
+          // over a perfectly good snapshot — and store them next to watermarks
+          // saying everything had been seen, which is the one shape snapshotLoad
+          // cannot tell from real data.
+          ref.current=rows;setter(rows);LS.set(lsKey,rows);
+        }
         LS.set("session_company",_companyId);
         // This read covered every row, so nothing can have been deleted behind it:
         // the reconcile clock starts here, and the sweeps that follow go incremental.
         lastReconcileRef.current=Date.now();
         commitWatermarks(data);
+        // Write what was just read to IndexedDB, so the *next* open is a delta
+        // instead of another full download.
+        //
+        // This line is the one that was missing, and without it the snapshot below
+        // was very nearly dead code. Everything else that keeps it current goes
+        // through cacheLS — a sweep that found a changed row, or a local edit — and
+        // the boot path sets state with LS.set directly, so it never marked the
+        // snapshot dirty. writeSnapshot() begins with `if(!snapDirty.current)return`,
+        // which means the pagehide and visibilitychange handlers were writing
+        // nothing at all.
+        //
+        // A device whose user only ever *looks* at the floor — a manager checking
+        // status on a phone, anyone opening outside work hours when no sweep finds
+        // anything — therefore never stored a snapshot, and re-downloaded all 75,807
+        // progress records on every single open. That is ~35 MB, over a mobile
+        // connection, before the first screen.
+        //
+        // scheduleSnapshot debounces by eight seconds, and pagehide flushes it, so
+        // an open-and-close still leaves a snapshot behind. It is written on every
+        // boot rather than only when one is missing: the watermarks travel with the
+        // rows, so refreshing it is what keeps the next delta short.
+        scheduleSnapshot();
+        // Clears the ⏳ the snapshot path put up: what is on screen is now what the
+        // server holds, not yesterday's copy of it.
+        setSync("ok");
       }
       if(users?.length){publishUsers(users)}
 
@@ -11622,6 +11679,12 @@ function App(){
             // If the user has since been moved, that data belongs to someone else:
             // switch companies and read again rather than showing it.
             if(realCid!==_companyId){
+              // The splash may already be down — a snapshot seeded the screen before
+              // the server answered. What it seeded is the company the session was
+              // saved under, and this user is no longer in it, so put the splash back
+              // up for the re-read rather than leave another company's floor on
+              // screen. It comes down again at the end of this handler.
+              setLoading(true);
               setCompanyId(realCid);
               try{localStorage.setItem(LS_PREFIX+"session",JSON.stringify({id:found.id,username:found.username,companyId:realCid}))}catch{}
               SYNC.reset();
