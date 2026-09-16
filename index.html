@@ -4477,12 +4477,19 @@ function MyWork({orders,stages,workLogs,onStartWork,onEndWork,onPauseWork,onResu
     setBulkSelected([]);setBulkMode(false);
   };
 
+  // How short a job has to be before ✅ asks. ⏸️ הפסקה and ✅ סיימתי sit one above
+  // the other on a tablet, and ✅ is the one that cannot be taken back from this
+  // screen — so the two are one fat finger apart. The signature of that mistake is
+  // exactly this: a sign-off a minute or so after ▶️, with no הפסקה ever recorded.
+  // A genuinely quick job costs one extra tap; a mis-tap costs the stage.
+  const CONFIRM_UNDER_MIN=2;
   const endWork=()=>{
     if(!myActiveLog)return;
     const start=new Date(myActiveLog.startTime);
     let dur=Math.round((Date.now()-start.getTime())/60000);
     dur-=(myActiveLog.totalPauseMin||0);
     if(myActiveLog.paused&&myActiveLog.pauseStart)dur-=Math.round((Date.now()-new Date(myActiveLog.pauseStart).getTime())/60000);
+    if(dur<CONFIRM_UNDER_MIN&&!confirm(`לחתום על סיום העבודה אחרי ${dur<1?"פחות מדקה":`${dur} דק'`}?\n\nאם התכוונת לצאת להפסקה — בטל, ולחץ על ⏸️ הפסקה.`))return;
     // A quantity run books whatever was actually finished — the count it was opened
     // for unless the worker corrected it down, never more than that.
     let patch=null;
@@ -4771,7 +4778,9 @@ function MyWork({orders,stages,workLogs,onStartWork,onEndWork,onPauseWork,onResu
                 </div>
               )}
             </div>
-            <div style={{display:"flex",flexDirection:"column",gap:8}}>
+            {/* The gap is the point: ⏸️ and ✅ used to be 8px apart and the same size,
+                and ✅ is the one this screen cannot undo. */}
+            <div style={{display:"flex",flexDirection:"column",gap:26}}>
               <Btn color={myActiveLog.paused?"#3b82f6":"#f97316"} onClick={togglePause} style={{fontSize:14,padding:"10px 20px"}}>{myActiveLog.paused?"▶️ חזור לעבודה":"⏸️ הפסקה"}</Btn>
               <Btn color="#10b981" onClick={endWork} style={{fontSize:16,padding:"12px 24px"}}>✅ סיימתי</Btn>
               {isQtyRun(myActiveLog)&&onDeleteLog&&<button onClick={cancelRun} style={{background:"none",border:"none",color:"#ef4444",fontSize:11.5,cursor:"pointer",fontFamily:"inherit"}}>🗑️ בטל התחלה</button>}
@@ -4792,7 +4801,7 @@ function MyWork({orders,stages,workLogs,onStartWork,onEndWork,onPauseWork,onResu
               {!activeTask.paused&&<ActiveTimer startTime={activeTask.startTime} pauseMin={activeTask.totalPauseMin||0}/>}
               {activeTask.paused&&<div style={{fontSize:22,fontWeight:800,color:"#8b95a8",marginTop:6}}>⏸️ מושהה</div>}
             </div>
-            <div style={{display:"flex",flexDirection:"column",gap:8}}>
+            <div style={{display:"flex",flexDirection:"column",gap:26}}>
               <Btn color={activeTask.paused?"#3b82f6":"#f97316"} onClick={()=>activeTask.paused?onResumeTask(activeTask.id):onPauseTask(activeTask.id)} style={{fontSize:14,padding:"10px 20px"}}>{activeTask.paused?"▶️ חזור":"⏸️ הפסקה"}</Btn>
               <Btn color="#10b981" onClick={()=>onEndTask(activeTask.id)} style={{fontSize:16,padding:"12px 24px"}}>✅ סיימתי</Btn>
             </div>
@@ -12294,9 +12303,6 @@ function App(){
     setCurrentUser(u);
     LS.set("session_company",cid);
     try{localStorage.setItem(LS_PREFIX+"session",JSON.stringify({id:u.id,username:u.username,companyId:cid}))}catch{}
-    SB.get("subscriptions",`company_id=eq.${cid}&status=eq.active`).then(rows=>{
-      if(rows&&rows.length>0)setCompanyPlan(rows[0].plan||"free");
-    }).catch(()=>{});
   };
   const handleLogout=()=>{
     if(currentUser)addAuditEntry({userId:currentUser.id,username:currentUser.username,name:currentUser.name,action:"התנתקות",target:"",details:""});
