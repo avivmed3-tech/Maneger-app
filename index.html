@@ -242,11 +242,12 @@ const PASSWORD_POLICY={minLength:8,requireUppercase:true,requireNumber:true,requ
 // over a noisy production floor, so nothing is demanded of those beyond existing.
 // A weak one is reported as a hint next to the field, never as a block.
 const MANAGED_PASSWORD_POLICY={minLength:1,requireUppercase:false,requireNumber:false,requireSpecial:false};
-const PLAN_FEATURES={
-  free:{max_users:3,max_orders:10,pdf_reports:false,push_notifications:false,live_board:false,excel_export:true,excel_import:false,api_access:false,custom_branding:false,audit_log:false},
-  pro:{max_users:20,max_orders:999999,pdf_reports:true,push_notifications:true,live_board:true,excel_export:true,excel_import:true,api_access:false,custom_branding:false,audit_log:true},
-  enterprise:{max_users:999999,max_orders:999999,pdf_reports:true,push_notifications:true,live_board:true,excel_export:true,excel_import:true,api_access:true,custom_branding:true,audit_log:true}
-};
+// ── No plan tiers ─────────────────────────────────────────────────────────
+// There was a free/pro/enterprise feature table here, and the company plan was
+// never set to anything but "free" — nothing in the app ever called its setter. So
+// every feature it gated (לוח חי, דוחות PDF) was locked for everyone except an
+// admin, permanently: a מנהלת מחלקה opening the live board got "🔒 לוח חי —
+// לתוכנית Pro". This is one company's own installation, and it gates nothing.
 function validatePassword(pw,policy){
   const p=policy||PASSWORD_POLICY;const errors=[];
   if(pw.length<p.minLength)errors.push(`מינימום ${p.minLength} תווים`);
@@ -1318,6 +1319,10 @@ const qtyRunning=(runIdx,workLogs,orderId,stageId)=>{
 // tag is a constant because the audit screen reads it back: work-log entries there
 // are matched to their record by S/N, which a quantity report has not got.
 const QTY_UNIT_TAG="(לפי כמות)";
+// The work-record actions the ↩️ in יומן ואחזור can take back. Named once so the
+// button's enabled state and the undo itself cannot drift apart — they did, and a
+// quantity signature ended up showing an ↩️ that did nothing.
+const WORK_UNDO_ACTIONS=["סיום עבודה","חתימת מנהל","חתימה לפי כמות","התחלת עבודה"];
 // What a log calls the units it covers. A serial log has its S/N; a quantity log
 // has a count instead — and every list that used to print the one prints the other.
 const logUnitLabel=w=>(w&&w.serialSn)||((w&&!w.serialId&&Number(w.bulkCount)>0)?`${w.bulkCount} יח' ${QTY_UNIT_TAG}`:"—");
@@ -1326,6 +1331,16 @@ const isQtyOrder=order=>!((order&&order.serials||[]).length)&&Number(order&&orde
 // The units an order's progress is measured against — its serials, or its quantity
 // when it has none.
 const orderUnits=order=>{const n=((order&&order.serials)||[]).length;return n||(Number(order&&order.qty)||0)};
+// ── מחיר ליחידה ───────────────────────────────────────────────────────────
+// Money is read through here rather than off the order, so one unreadable row
+// cannot decide a headline figure. A price above this ceiling is not a price —
+// nothing on a production floor is worth a billion shekels a unit — it is a cell
+// that failed to parse on the way in (see xlNum), and it is treated as "not
+// priced" exactly like a blank. badPrice() is what lets the dashboard say so out
+// loud instead of quietly dropping the פק"ע.
+const MAX_UNIT_PRICE=1e9;
+const orderPrice=order=>{const n=Number(order&&order.unitPrice);return(isFinite(n)&&n>0&&n<=MAX_UNIT_PRICE)?n:0};
+const badPrice=order=>{const n=Number(order&&order.unitPrice);return isFinite(n)&&n>MAX_UNIT_PRICE};
 // Quantity progress of one פק"ע: stage passes signed out of the passes it needs,
 // and how many units cleared the *whole* route (the stage that got the fewest —
 // a unit is only finished once every stage of the route has been signed for it).
@@ -1683,8 +1698,17 @@ function addAuditEntry(entry){
     const e={...entry,id:uid(),timestamp:nowISO(),reverted:false,companyId:getCompanyId()};
     log.unshift(e);LS.set("audit",log.slice(0,1000));
     // Save audit to DB asynchronously (non-blocking)
+    //
+    // ref_id is the row the action was about — the work log a signature closed, say.
+    // The journal that holds the full before-state lives in this browser's
+    // localStorage, so it is no help to the manager undoing, from her own device, a
+    // signature a worker made on a tablet. That is the case that matters: the id
+    // travels with the audit row, and the other device can act on the right record
+    // instead of guessing it from an S/N and a stage name — a guess that missed
+    // every quantity signature, because those carry no S/N at all.
     SB.upsert("audit_log",{id:e.id,user_id:e.userId||null,username:e.username||null,
       name:e.name||null,action:e.action,target:e.target||null,details:e.details||null,
+      ref_id:e.refId||null,
       reverted:false,can_undo:e.canUndo||false,company_id:e.companyId}).catch(()=>{});
     return e.id;
   }catch{return null}
@@ -1714,8 +1738,13 @@ const UNDO_COLL={
   users:       {label:"משתמשים",       table:"app_users"},
 };
 // Entries kept. Deep enough to walk back a bad afternoon, shallow enough that the
-// snapshots stay in localStorage.
-const UNDO_MAX=60;
+// snapshots stay in localStorage. Every signature on the floor is journaled too —
+// that is what makes one reversible — so sixty was about twenty minutes of a busy
+// shift, after which a manager action had already been pushed out of reach. The
+// rows are small (a work log is a few hundred bytes) and an import snapshot is
+// marked `heavy` and kept out of localStorage entirely, so the cost of depth here
+// is tens of kilobytes.
+const UNDO_MAX=200;
 // A single entry bigger than this is kept in memory only: an import snapshot runs
 // to megabytes, and writing it would blow the whole cache away rather than just
 // itself. Such an entry is still undoable — until the page is reloaded.
@@ -1747,8 +1776,10 @@ const UNDO=(()=>{
         before:(c.before||[]).map(r=>({...r})),
         after:[...new Set((c.after||[]).map(r=>typeof r==="string"?r:r&&r.id).filter(Boolean))]
       }));
+      // The row this action was about, for the devices that do not hold the journal.
+      const ref=clean.length?(clean[0].before[0]?.id||clean[0].after[0]||null):null;
       const id=addAuditEntry({userId:user?.id,username:user?.username,name:user?.name,
-        action,target:target||"",details:details||"",canUndo:clean.length>0});
+        action,target:target||"",details:details||"",refId:ref,canUndo:clean.length>0});
       if(!clean.length)return id;
       const e={id:id||uid(),timestamp:nowISO(),companyId:getCompanyId(),
         userId:user?.id,username:user?.username,name:user?.name,
@@ -2003,17 +2034,6 @@ const EmptyState=({icon="📭",title="אין נתונים",subtitle,action,actio
     <div style={{fontSize:15,fontWeight:600,color:"var(--c-muted)",marginBottom:4}}>{title}</div>
     {subtitle&&<div style={{fontSize:12,color:"var(--c-dim)",marginBottom:action?14:0}}>{subtitle}</div>}
     {action&&<button onClick={action} style={{background:"var(--c-accent)",color:"#fff",border:"none",borderRadius:8,padding:"8px 18px",fontSize:13,fontWeight:600,fontFamily:"inherit"}}>{actionLabel||"התחל"}</button>}
-  </div>
-);
-// ── Feature Gating & Upgrade Prompt ─────────────────────────────────────
-const SubscriptionCtx=React.createContext({plan:"free",canUse:()=>true});
-const useSubscription=()=>React.useContext(SubscriptionCtx);
-const UpgradePrompt=({feature,plan="pro"})=>(
-  <div style={{textAlign:"center",padding:"30px 20px",background:"var(--c-deep)",borderRadius:12,border:"1px solid var(--c-accent)33"}}>
-    <div style={{fontSize:32,marginBottom:8}}>🔒</div>
-    <div style={{fontSize:15,fontWeight:600,color:"var(--c-text)",marginBottom:4}}>{feature} — לתוכנית {plan==="pro"?"Pro":"Enterprise"}</div>
-    <div style={{fontSize:12,color:"var(--c-muted)",marginBottom:12}}>שדרג את התוכנית שלך כדי להשתמש בתכונה זו</div>
-    <button style={{background:"var(--c-accent)",color:"#fff",border:"none",borderRadius:8,padding:"8px 20px",fontSize:13,fontWeight:600,fontFamily:"inherit"}}>שדרג עכשיו</button>
   </div>
 );
 const SegBtn=({options,value,onChange})=>(
@@ -2616,15 +2636,23 @@ function Dashboard({orders,projects,stages,users,workLogs,departments,customTask
   // says so, rather than leaving the two numbers to look like a bug.
   const unitStats=useMemo(()=>{
     let total=0,done=0,rev=0,forecast=0;
+    // פק"ע whose price did not survive the import are collected rather than
+    // skipped in silence — the note under the KPIs names them, so "ההכנסה נמוכה
+    // ממה שציפיתי" has an answer on the same screen. Not the same thing as a פק"ע
+    // that was simply never priced, of which this factory has 1,134: those are a
+    // blank cell, these are a cell that was read wrong.
+    const badPriced=[];
     fOrders.forEach(o=>{
       const units=orderUnits(o);
       const d=Math.min(units,orderDoneCount(o,orderRoute(o,stages),workLogs,doneIdx,qtyIdx));
-      const price=Number(o.unitPrice||0);
+      const price=orderPrice(o);
+      if(badPrice(o))badPriced.push(o);
       total+=units;done+=d;rev+=d*price;forecast+=Math.max(0,units-d)*price;
     });
-    return{total,done,rev,forecast};
+    return{total,done,rev,forecast,badPriced};
   },[fOrders,stages,workLogs,doneIdx,qtyIdx]);
   const totalUnits=unitStats.total,completedUnits=unitStats.done,actualRev=unitStats.rev,forecastRev=unitStats.forecast;
+  const badPriceOrders=unitStats.badPriced;
   const totalWorkMins=fLogs.reduce((s,w)=>s+(w.durationMin||0),0);
   const totalWorkCost=fLogs.reduce((s,w)=>{const u=users.find(u2=>u2.id===w.userId);return s+(w.durationMin||0)*(Number(u?.hourlyRate||0)/60)},0);
   const openDefects=fOrders.flatMap(o=>(o.defects||[]).filter(d=>d.status!=="closed")).length;
@@ -2669,7 +2697,7 @@ function Dashboard({orders,projects,stages,users,workLogs,departments,customTask
       else if(isQtyLog(w))(qtyLogs[w.orderId]||(qtyLogs[w.orderId]=[])).push(w);
     });
     fOrders.forEach(o=>{
-      const price=Number(o.unitPrice||0),sers=o.serials||[];
+      const price=orderPrice(o),sers=o.serials||[];
       if(sers.length){
         sers.forEach(sr=>{
           if(!isSerDone(o,sr))return;
@@ -2876,6 +2904,33 @@ function Dashboard({orders,projects,stages,users,workLogs,departments,customTask
         <KpiBox i="🔧" v={openDefects} label="תקלות פתוחות" c="#ef4444"/>
         <KpiBox i="⚠️" v={openShortages} label="חוסרים פתוחים" c="#dc2626"/>
       </div>
+
+      {/* ── מחיר ליחידה שלא נקרא נכון בייבוא ─────────────────────────────
+          A price column with a date format on it used to reach the app as a
+          fifteen-digit number, and הכנסה ממומשת read ₪1,604,276,474,982,000. The
+          reading is fixed; these are the rows that came in before it was, and they
+          are named here rather than left to make the KPI look wrong again. */}
+      {badPriceOrders.length>0&&(
+        <Card style={{marginBottom:12,border:"1px solid #f59e0b44"}}>
+          <div style={{fontWeight:700,fontSize:13,color:"#f59e0b",marginBottom:5}}>
+            💰 {badPriceOrders.length.toLocaleString()} פק"ע עם מחיר ליחידה לא תקין — אינן נכללות בחישובי ההכנסה
+          </div>
+          <div style={{fontSize:11.5,color:"var(--c-muted)",lineHeight:1.7,marginBottom:8}}>
+            עמודת המחיר בקובץ הייבוא הייתה מעוצבת כתאריך, והמחיר נקרא כמספר בן 15–16 ספרות.
+            קריאת המספרים תוקנה — <b style={{color:"var(--c-text)"}}>ייבוא חוזר של אותו קובץ יחזיר את המחירים הנכונים</b> ויעדכן את הפק"ע האלה במקום.
+            עד אז הן נספרות כפק"ע ללא מחיר, בדיוק כמו פק"ע שמעולם לא תומחרה.
+          </div>
+          <div style={{display:"flex",flexWrap:"wrap",gap:5}}>
+            {badPriceOrders.slice(0,40).map(o=>(
+              <span key={o.id} title={`מחיר שיובא: ${o.unitPrice}`}
+                style={{fontSize:11,background:"var(--c-deep)",border:"1px solid #f59e0b33",color:"var(--c-muted)",borderRadius:7,padding:"3px 8px"}}>
+                {o.woNumber}
+              </span>
+            ))}
+            {badPriceOrders.length>40&&<span style={{fontSize:11,color:"var(--c-dim)",padding:"3px 4px"}}>ועוד {(badPriceOrders.length-40).toLocaleString()}…</span>}
+          </div>
+        </Card>
+      )}
 
       {/* Factory diagram moved to the live factory board (מסך מפעל חי) */}
 
@@ -3733,7 +3788,7 @@ function OrderDetail({order,projects,stages,stageBlocks,departments=[],onClose,o
           </div>
         )}
         <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(110px,1fr))",gap:8,marginTop:10}}>
-          {(()=>{const isW=currentUser?.role==="worker";const items=[[byQty?"כמות (לפי כמות)":"כמות",units],["הושלמו",totalCompleted],["תאריך קבלה",fmt(order.receivedDate)],["יעד אספקה",fmt(order.targetDate)]];if(!isW){items.splice(2,0,["מחיר ליחידה",fmtMoney(order.unitPrice)],["הכנסה ממומשת",fmtMoney(totalCompleted*Number(order.unitPrice||0))]);} return items.map(([l,v])=>(
+          {(()=>{const isW=currentUser?.role==="worker";const items=[[byQty?"כמות (לפי כמות)":"כמות",units],["הושלמו",totalCompleted],["תאריך קבלה",fmt(order.receivedDate)],["יעד אספקה",fmt(order.targetDate)]];if(!isW){items.splice(2,0,["מחיר ליחידה",badPrice(order)?"— (מחיר לא תקין)":fmtMoney(orderPrice(order))],["הכנסה ממומשת",fmtMoney(totalCompleted*orderPrice(order))]);} return items.map(([l,v])=>(
             <div key={l} style={{background:"var(--c-deep)",borderRadius:8,padding:"8px 10px"}}><div style={{fontSize:10,color:"var(--c-dim)",marginBottom:2}}>{l}</div><div style={{fontWeight:700,fontSize:12,wordBreak:"break-word"}}>{v}</div></div>
           ))})()}
         </div>
@@ -4024,7 +4079,7 @@ function Orders({orders,projects,stages,stageBlocks,updO,workLogs,onWorkLog,onDe
               {o.description&&<div style={{fontSize:13,color:"var(--c-muted)",marginBottom:4}}>{o.description}</div>}
               <div style={{display:"flex",gap:10,fontSize:12,color:"var(--c-dim)",marginBottom:5,flexWrap:"wrap"}}>
                 <span>{byQty?<>כמות (ללא סידוריים): <b style={{color:"var(--c-text)"}}>{units}</b></>:<>יחידות: <b style={{color:serials.length?"var(--c-text)":"#f59e0b"}}>{serials.length||"—"}</b>{!serials.length&&<b style={{color:"#f59e0b"}}> (כמות בפק"ע: {Number(o.qty)||0})</b>}</>}</span>
-                {canEdit&&<span>מחיר: <b style={{color:"#a78bfa"}}>{fmtMoney(o.unitPrice)}</b></span>}
+                {canEdit&&<span>מחיר: <b style={{color:badPrice(o)?"#ef4444":"#a78bfa"}} title={badPrice(o)?"המחיר שיובא אינו מספר תקין — הפק\"ע לא נכללת בחישובי ההכנסה":null}>{badPrice(o)?"⚠ לא תקין":fmtMoney(orderPrice(o))}</b></span>}
                 <span>שלבים: <b>{(o.stageIds||[]).length}</b></span>
                 {passes.total>0&&<span title="דיווחי שלב שבוצעו מתוך כלל השלבים × היחידות">דיווחי שלבים: <b style={{color:passes.done?"#3b82f6":"var(--c-dim)"}}>{passes.done}/{passes.total}</b></span>}
                 {remainMin>0&&pct<100&&<span>⏳ צפי לסיום: <b style={{color:"#06b6d4"}}>{fmtWorkEstimate(remainMin,workdayHours)}</b></span>}
@@ -4424,12 +4479,19 @@ function MyWork({orders,stages,workLogs,onStartWork,onEndWork,onPauseWork,onResu
     setBulkSelected([]);setBulkMode(false);
   };
 
+  // How short a job has to be before ✅ asks. ⏸️ הפסקה and ✅ סיימתי sit one above
+  // the other on a tablet, and ✅ is the one that cannot be taken back from this
+  // screen — so the two are one fat finger apart. The signature of that mistake is
+  // exactly this: a sign-off a minute or so after ▶️, with no הפסקה ever recorded.
+  // A genuinely quick job costs one extra tap; a mis-tap costs the stage.
+  const CONFIRM_UNDER_MIN=2;
   const endWork=()=>{
     if(!myActiveLog)return;
     const start=new Date(myActiveLog.startTime);
     let dur=Math.round((Date.now()-start.getTime())/60000);
     dur-=(myActiveLog.totalPauseMin||0);
     if(myActiveLog.paused&&myActiveLog.pauseStart)dur-=Math.round((Date.now()-new Date(myActiveLog.pauseStart).getTime())/60000);
+    if(dur<CONFIRM_UNDER_MIN&&!confirm(`לחתום על סיום העבודה אחרי ${dur<1?"פחות מדקה":`${dur} דק'`}?\n\nאם התכוונת לצאת להפסקה — בטל, ולחץ על ⏸️ הפסקה.`))return;
     // A quantity run books whatever was actually finished — the count it was opened
     // for unless the worker corrected it down, never more than that.
     let patch=null;
@@ -4718,7 +4780,9 @@ function MyWork({orders,stages,workLogs,onStartWork,onEndWork,onPauseWork,onResu
                 </div>
               )}
             </div>
-            <div style={{display:"flex",flexDirection:"column",gap:8}}>
+            {/* The gap is the point: ⏸️ and ✅ used to be 8px apart and the same size,
+                and ✅ is the one this screen cannot undo. */}
+            <div style={{display:"flex",flexDirection:"column",gap:26}}>
               <Btn color={myActiveLog.paused?"#3b82f6":"#f97316"} onClick={togglePause} style={{fontSize:14,padding:"10px 20px"}}>{myActiveLog.paused?"▶️ חזור לעבודה":"⏸️ הפסקה"}</Btn>
               <Btn color="#10b981" onClick={endWork} style={{fontSize:16,padding:"12px 24px"}}>✅ סיימתי</Btn>
               {isQtyRun(myActiveLog)&&onDeleteLog&&<button onClick={cancelRun} style={{background:"none",border:"none",color:"#ef4444",fontSize:11.5,cursor:"pointer",fontFamily:"inherit"}}>🗑️ בטל התחלה</button>}
@@ -4739,7 +4803,7 @@ function MyWork({orders,stages,workLogs,onStartWork,onEndWork,onPauseWork,onResu
               {!activeTask.paused&&<ActiveTimer startTime={activeTask.startTime} pauseMin={activeTask.totalPauseMin||0}/>}
               {activeTask.paused&&<div style={{fontSize:22,fontWeight:800,color:"#8b95a8",marginTop:6}}>⏸️ מושהה</div>}
             </div>
-            <div style={{display:"flex",flexDirection:"column",gap:8}}>
+            <div style={{display:"flex",flexDirection:"column",gap:26}}>
               <Btn color={activeTask.paused?"#3b82f6":"#f97316"} onClick={()=>activeTask.paused?onResumeTask(activeTask.id):onPauseTask(activeTask.id)} style={{fontSize:14,padding:"10px 20px"}}>{activeTask.paused?"▶️ חזור":"⏸️ הפסקה"}</Btn>
               <Btn color="#10b981" onClick={()=>onEndTask(activeTask.id)} style={{fontSize:16,padding:"12px 24px"}}>✅ סיימתי</Btn>
             </div>
@@ -5751,7 +5815,7 @@ function Projects({projects,orders,updP,stages,workLogs}){
             return oStages.every(sid=>doneIdx.has(logKey(sr.id,sid)));
           }).length+s,0);
           const pct=totalSer?Math.round(completed/totalSer*100):0;
-          const rev=completed*po.reduce((s,o)=>s+Number(o.unitPrice||0),0)/Math.max(po.length,1);
+          const rev=completed*po.reduce((s,o)=>s+orderPrice(o),0)/Math.max(po.length,1);
           const c=COLORS[idx%COLORS.length];
           return(
             <Card key={p.id}>
@@ -8484,7 +8548,7 @@ function doExport(ctx){
       o.erpStatus||"",(ST_PHASE[orderPhase(o)]||ST_PHASE.line).label,o.erpNote||"",
       Number(o.qty||0),sers.length,(o.deliveredSerials||[]).length,
       totalPairs>0?Math.round(pairs.size/totalPairs*100):0,
-      Number(o.unitPrice||0),Number(o.unitPrice||0)*Number(o.qty||0),
+      orderPrice(o),orderPrice(o)*Number(o.qty||0),
       o.receivedDate||"",o.targetDate||"",o.targetDate?daysBetween(todays(),o.targetDate):"",
       stNames,bMap.get(o.blockId)||"",stdPerUnit>0?xlRound(stdPerUnit):"",xlRound(orderPerUnitMin(o,stages,stageBlocks)),
       stdAcc>0?xlRound(stdAcc/60):"",xlRound(sale/60),xlRound(act/60),
@@ -8809,13 +8873,70 @@ function doTemplate(ctx){
 const xlNorm=s=>String(s==null?"":s).replace(/['"׳״‘’“”]/g,"").replace(/\s+/g," ").trim().toLowerCase();
 const xlRow=r=>{const o={};Object.keys(r).forEach(k=>{o[xlNorm(k)]=r[k]});return o};
 const xlGet=(r,...keys)=>{for(const k of keys){const v=r[xlNorm(k)];if(v!==undefined&&v!==null&&String(v).trim()!=="")return v}return""};
-const xlNum=v=>{const n=Number(String(v==null?"":v).replace(/[^\d.\-]/g,""));return isFinite(n)?n:0};
+// ── Reading a number out of a spreadsheet cell ────────────────────────────
+// This was `Number(String(v).replace(/[^\d.\-]/g,""))` — keep the digits, drop
+// everything else. That is fine for "1,234 ₪" and catastrophic for a cell that is
+// not a number at all, because scraping digits always yields *a* number.
+//
+// The workbook is read with cellDates:true, so a column Excel has a date format on
+// arrives as a JS Date — and a date format left on a price column is an ordinary
+// spreadsheet accident. String(date) is
+// "Tue Jan 09 1900 09:36:00 GMT+0220 (Israel Standard Time)", whose digits scrape
+// to 919000936000220: day, year, time, UTC offset, run together. Ninety פק"ע came
+// in priced like that, and the dashboard multiplied each by the units that had
+// finished — הכנסה ממומשת read ₪1,604,276,474,982,000 next to a ₪706,388 forecast.
+//
+// So a Date is converted back to the serial the cell actually holds, a number is
+// taken as it is, and a string has to still *look* like a number once the currency
+// symbols, spaces, direction marks and thousands separators come off. Anything
+// else is 0 — which is what the app already means by "no value".
+const XL_EPOCH=Date.UTC(1899,11,30);
+const xlSerialOf=d=>{
+  const days=(d.getTime()-d.getTimezoneOffset()*6e4-XL_EPOCH)/864e5;
+  // Historic offsets are not whole minutes (Jerusalem ran at +02:20:40 until 1918)
+  // and getTimezoneOffset rounds to one, so a whole-day serial can come back as
+  // 27.0005. Anything within a minute of a whole day is that whole day.
+  return Math.abs(days-Math.round(days))<1/1440?Math.round(days):Math.round(days*1e4)/1e4;
+};
+// `instanceof Date` is per-realm and a workbook parsed inside a worker or an
+// iframe hands back a Date built in that realm — where it answers false, and the
+// value falls through to be read as a string, which is the whole bug again.
+const isDate=v=>Object.prototype.toString.call(v)==="[object Date]";
+function xlNum(v){
+  if(v==null||v==="")return 0;
+  if(isDate(v))return isNaN(v.getTime())?0:xlSerialOf(v);
+  if(typeof v==="number")return isFinite(v)?v:0;
+  if(typeof v==="boolean")return v?1:0;
+  let s=String(v).trim()
+    .replace(/[\u200e\u200f\u202a-\u202e\u00a0]/g,"")   // direction marks, nbsp — as escapes: invisible in source
+    .replace(/[₪$€£]/g,"")
+    .replace(/\s/g,"");
+  if(!s)return 0;
+  // Accounting negatives: (1,234) and a trailing minus both mean -1234.
+  let neg=false;
+  const paren=s.match(/^\((.*)\)$/);
+  if(paren){neg=true;s=paren[1]}
+  if(s.startsWith("-")){neg=!neg;s=s.slice(1)}
+  else if(s.endsWith("-")){neg=!neg;s=s.slice(0,-1)}
+  // Thousands separators, either convention: 1,234.56 and 1.234,56 are the same
+  // number, and the *last* separator present says which one is the decimal point.
+  const lastC=s.lastIndexOf(","),lastD=s.lastIndexOf(".");
+  if(lastC>-1&&lastD>-1)s=lastC>lastD?s.replace(/\./g,"").replace(",","."):s.replace(/,/g,"");
+  else if(lastC>-1)s=/^\d{1,3}(,\d{3})+$/.test(s)?s.replace(/,/g,""):s.replace(",",".");
+  else if(/^\d{1,3}(\.\d{3})+$/.test(s))s=s.replace(/\./g,"");
+  // What is left has to be the whole value — no letters, no second separator, and
+  // nothing scraped out of the middle of a word.
+  if(!/^(\d+(\.\d*)?|\.\d+)$/.test(s))return 0;
+  const n=Number(s);
+  if(!isFinite(n))return 0;
+  return neg?-n:n;
+}
 const xlBool=v=>/^(כן|נמסר|התקבל|בוצע|yes|y|true|1|v|✓)$/i.test(String(v==null?"":v).trim());
 function xlDate(v){
   if(v==null||v==="")return"";
   // An empty date cell in an ERP export often arrives as a time-only value,
   // which is Excel serial 0 — the last day of 1899, not a real date.
-  if(v instanceof Date)return(!isNaN(v)&&v.getFullYear()>1900)?isoOf(v):"";
+  if(isDate(v))return(!isNaN(v.getTime())&&v.getFullYear()>1900)?isoOf(v):"";
   // Priority writes "no date" as a plain 0, and a bare "0" would otherwise be
   // parsed by Date() as the year 2000 — anything non-positive is simply empty.
   if(typeof v==="number")return(isFinite(v)&&v>0)?new Date(Date.UTC(1899,11,30)+Math.round(v)*864e5).toISOString().slice(0,10):"";
@@ -9004,7 +9125,10 @@ function orderErpInfo(order){
   const i=priStatus(raw);
   return{raw,desc:i.desc,note,guessed:i.guessed};
 }
-const priNum=v=>{const n=Number(String(v==null?"":v).replace(/[^\d.\-]/g,""));return isFinite(n)?n:0};
+// The Priority sheet is read by exactly the same rules as every other workbook —
+// see xlNum. It used to have its own digit-scraping copy, which is how a
+// date-formatted מחיר column became a fifteen-digit price.
+const priNum=xlNum;
 // Priority writes a literal 0 into its code columns (סניף / פרויקט) for "none".
 const priTxt=v=>{const s=String(v==null?"":v).trim();return(s==="0"||s==="-")?"":s};
 // The second sheet of the export: the serial numbers Priority already issued,
@@ -10772,7 +10896,7 @@ function LiveFactoryBoard({orders,workLogs,stages,customTasks,users,departments,
   const {forecastSales,realizedSales,pendingTotal}=useMemo(()=>{
     let f=0,r=0,pend=0;
     (orders||[]).forEach(o=>{
-      const c=unitCounts.get(o.id)||{done:0,remaining:0},price=Number(o.unitPrice||0);
+      const c=unitCounts.get(o.id)||{done:0,remaining:0},price=orderPrice(o);
       f+=c.remaining*price;r+=c.done*price;pend+=c.remaining;
     });
     return{forecastSales:f,realizedSales:r,pendingTotal:pend};
@@ -11189,7 +11313,7 @@ function MonthlyReportModal({orders,workLogs,stages,projects,users,onClose}){
 
       // Build HTML report
       const totalMin=fLogs.reduce((s,w)=>s+w.durationMin,0);
-      const totalRev=fOrders.reduce((s,o)=>s+Number(o.unitPrice||0)*Number(o.qty||0),0);
+      const totalRev=fOrders.reduce((s,o)=>s+orderPrice(o)*Number(o.qty||0),0);
       const workerStats={};
       fLogs.forEach(w=>{
         if(!workerStats[w.userId])workerStats[w.userId]={name:w.userName,min:0,units:0};
@@ -11279,7 +11403,7 @@ function HistoryPanel({onClose,orders,updO,workLogs,onDeleteLog,onUndoWorkLog,cu
     SB.get("audit_log",`company_id=eq.${getCompanyId()}&order=created_at.desc&limit=200`).then(rows=>{
       setAuditLog(rows.map(r=>({
         id:r.id,userId:r.user_id,username:r.username,name:r.name,
-        action:r.action,target:r.target,details:r.details,
+        action:r.action,target:r.target,details:r.details,refId:r.ref_id,
         reverted:r.reverted,canUndo:r.can_undo,timestamp:r.created_at
       })));
       setLoading(false);
@@ -11305,12 +11429,11 @@ function HistoryPanel({onClose,orders,updO,workLogs,onDeleteLog,onUndoWorkLog,cu
     if(entry.reverted)return false;
     const je=journalById.get(entry.id);
     if(je)return!je.reverted;
-    // Both branches below find the work log by its S/N. A quantity report has none —
-    // it is taken back from the פק"ע's own history (🕘 in דיווח לפי כמות), or, while
-    // it is still running, from "בטל התחלה" on the worker's card.
-    if(String(entry.target||"").includes(QTY_UNIT_TAG))return false;
-    if(entry.action.includes("סיום עבודה")||entry.action.includes("חתימת מנהל"))return true;
-    if(entry.action.includes("התחלת עבודה"))return true;
+    // No journal on this device — the manager undoing a signature a worker made on a
+    // tablet. The audit row carries the id of the record the action was about, so it
+    // can still be found exactly. Quantity signatures are included: they used to be
+    // excluded outright, because the fallback matched on an S/N they do not have.
+    if(WORK_UNDO_ACTIONS.some(a=>entry.action.includes(a)))return!!entry.refId||!String(entry.target||"").includes(QTY_UNIT_TAG);
     if(entry.canUndo&&entry.action.includes("ייבוא"))return true;
     return false;
   };
@@ -11333,9 +11456,10 @@ function HistoryPanel({onClose,orders,updO,workLogs,onDeleteLog,onUndoWorkLog,cu
     return"#8b95a8";
   };
 
-  // Undo. An entry the journal knows is restored from its own snapshot — that
-  // covers every manager action. The work-log cases below predate the journal and
-  // stay for entries recorded before it existed.
+  // Undo. An entry this device's journal knows is restored from its own snapshot,
+  // exactly — that is every action taken here. The branch below is for the rest:
+  // a manager taking back, from her own machine, a signature a worker made on a
+  // tablet. The journal is localStorage and does not travel; the audit row does.
   const undoEntry=async(entry)=>{
     const je=journalById.get(entry.id);
     if(je&&!je.reverted){
@@ -11354,27 +11478,32 @@ function HistoryPanel({onClose,orders,updO,workLogs,onDeleteLog,onUndoWorkLog,cu
 
     if(!confirm(`לבטל פעולה: ${entry.action} — ${entry.target||""}?`))return;
 
-    if(entry.action.includes("סיום עבודה")||entry.action.includes("חתימת מנהל")){
-      // Find the work log for this serial + stage combo
-      const sn=entry.target;
-      const stageName=(entry.details||"").split("—").pop()?.trim();
-      const log=(workLogs||[]).find(w=>w.completed&&w.serialSn===sn&&(!stageName||stages.find(s=>s.id===w.stageId)?.name?.trim()===stageName));
-      if(log){
-        onUndoWorkLog&&onUndoWorkLog(log.id);
-        addAuditEntry({userId:entry.userId,username:entry.username,name:entry.name,action:"ביטול פעולה",target:entry.target,details:`בוטל: ${entry.action}`});
-        setAuditLog(prev=>prev.map(e=>e.id===entry.id?{...e,reverted:true}:e));
-      }else{
-        toast("לא נמצא רשומת עבודה מתאימה לביטול","warning");
+    if(WORK_UNDO_ACTIONS.some(a=>entry.action.includes(a))){
+      // ── Undoing a work record from a device that did not make it ──────────
+      // The audit row names the record (ref_id). Only when it does not — an entry
+      // written before ref_id existed — does this fall back to matching on the S/N
+      // and the stage name, which is the match that used to fail silently: it needs
+      // window.__pml_stages to be populated, it cannot see a quantity signature at
+      // all, and when it missed, the ↩️ reported nothing and changed nothing.
+      const byRef=entry.refId?(workLogs||[]).find(w=>w.id===entry.refId):null;
+      let log=byRef;
+      if(!log){
+        const sn=entry.target;
+        const stageName=(entry.details||"").split("—").pop()?.trim();
+        const wantDone=!entry.action.includes("התחלת עבודה");
+        log=(workLogs||[]).find(w=>!!w.completed===wantDone&&w.serialSn===sn&&
+          (!stageName||stages.find(s=>s.id===w.stageId)?.name?.trim()===stageName));
       }
-    }else if(entry.action.includes("התחלת עבודה")){
-      // Delete the active (uncompleted) work log
-      const sn=entry.target;
-      const log=(workLogs||[]).find(w=>!w.completed&&w.serialSn===sn);
-      if(log){
-        onDeleteLog&&onDeleteLog([log.id]);
-        addAuditEntry({userId:entry.userId,username:entry.username,name:entry.name,action:"ביטול פעולה",target:entry.target,details:`בוטל: ${entry.action}`});
-        setAuditLog(prev=>prev.map(e=>e.id===entry.id?{...e,reverted:true}:e));
-      }else{toast("לא נמצאה רשומה פעילה לביטול","warning")}
+      if(!log){
+        toast("לא נמצאה הרשומה לביטול — ייתכן שכבר בוטלה, או שהיא מחוץ להרשאות הצפייה שלך","warning",6000);
+        return;
+      }
+      // Removing the record is what takes the signature off the stage — which is the
+      // whole point of the button. It is itself journaled, so it can be taken back.
+      onUndoWorkLog?onUndoWorkLog(log.id):onDeleteLog&&onDeleteLog([log.id]);
+      addAuditEntry({userId:entry.userId,username:entry.username,name:entry.name,action:"ביטול פעולה",target:entry.target,details:`בוטל: ${entry.action}`,refId:log.id});
+      setAuditLog(prev=>prev.map(e=>e.id===entry.id?{...e,reverted:true}:e));
+      toast(`בוטל: ${entry.action}${entry.target?` — ${entry.target}`:""}`,"success",5000);
     }else if(entry.canUndo&&entry.action.includes("ייבוא")){
       const snapshot=LS.get("importSnapshot");
       if(!snapshot)return toast("אין גיבוי לשחזור","warning");
@@ -11472,11 +11601,20 @@ function App(){
   // How old the copy on screen is, once it is the only copy there is.
   const [snapAge,setSnapAge]=useState("");
   const dbFailsRef=useRef(0);
-  const [companyPlan,setCompanyPlan]=useState("free");
   const lastActivityRef=useRef(Date.now());
-  const canUseFeature=useCallback((key)=>{if(currentUser?.role==="admin")return true;const f=PLAN_FEATURES[companyPlan]||PLAN_FEATURES.free;return f[key]===true||(typeof f[key]==="number"&&f[key]>0)},[companyPlan,currentUser]);
   const swRegRef=useRef(null);
   const oRef=useRef(orders),pRef=useRef(projects),sRef=useRef(stages),wRef=useRef(workLogs);
+  // ── "Is somebody's shift open on this device right now?" ─────────────────
+  // A job that has been started and not signed off — running or on הפסקה — is the
+  // one state the app must never interrupt on its own. A worker started a unit,
+  // went on break, came back, and the app reloaded underneath her; what she found
+  // was her stage signed off. Nothing below will log out, reload or otherwise pull
+  // the floor out from under an open job while this is true.
+  const workOpenRef=useRef(false);
+  useEffect(()=>{
+    workOpenRef.current=!!currentUser&&(workLogs||[]).some(w=>w.userId===currentUser.id&&!w.completed)
+      ||!!currentUser&&(customTasks||[]).some(t=>t.userId===currentUser.id&&t.active&&!t.completed);
+  },[workLogs,customTasks,currentUser]);
   const setWorkdayHoursPersist=(h)=>{const v=Number(h)>0?Number(h):8;setWorkdayHours(v);LS.set(WORKDAY_LS_KEY,v)};
 
   useEffect(()=>{
@@ -11493,10 +11631,13 @@ function App(){
     const events=["mousedown","keydown","touchstart","scroll"];
     events.forEach(e=>window.addEventListener(e,resetActivity,{passive:true}));
     const checker=setInterval(()=>{
-      if(Date.now()-lastActivityRef.current>SESSION_TIMEOUT_MIN*60*1000){
-        toast("נותקת אוטומטית בגלל חוסר פעילות","warning");
-        setCurrentUser(null);try{localStorage.removeItem(LS_PREFIX+"session")}catch{}
-      }
+      if(Date.now()-lastActivityRef.current<=SESSION_TIMEOUT_MIN*60*1000)return;
+      // An hour of "inactivity" is what a lunch break looks like to a tablet left
+      // on a bench, and logging the worker out mid-job loses the open timer and the
+      // context around it. A shift in progress is activity; the clock restarts.
+      if(workOpenRef.current){lastActivityRef.current=Date.now();return}
+      toast("נותקת אוטומטית בגלל חוסר פעילות","warning");
+      setCurrentUser(null);try{localStorage.removeItem(LS_PREFIX+"session")}catch{}
     },60000);
     return()=>{events.forEach(e=>window.removeEventListener(e,resetActivity));clearInterval(checker)};
   },[currentUser]);
@@ -12164,9 +12305,6 @@ function App(){
     setCurrentUser(u);
     LS.set("session_company",cid);
     try{localStorage.setItem(LS_PREFIX+"session",JSON.stringify({id:u.id,username:u.username,companyId:cid}))}catch{}
-    SB.get("subscriptions",`company_id=eq.${cid}&status=eq.active`).then(rows=>{
-      if(rows&&rows.length>0)setCompanyPlan(rows[0].plan||"free");
-    }).catch(()=>{});
   };
   const handleLogout=()=>{
     if(currentUser)addAuditEntry({userId:currentUser.id,username:currentUser.username,name:currentUser.name,action:"התנתקות",target:"",details:""});
@@ -12379,19 +12517,47 @@ function App(){
   };
 
   const handleStartWork=(log)=>{
-    setWorkLogs(prev=>{const next=[...prev,log];persist(null,null,null,next);
+    // The same unit, the same stage, the same person, already open: a second tap on
+    // ▶️ while the first one is still landing, or a queue tapped again after a
+    // reload. Two open logs for one unit is not a state anything downstream expects
+    // — the timer card shows one of them and ✅ closes only that one, leaving the
+    // other running for ever.
+    const dup=(wRef.current||[]).find(w=>!w.completed&&w.userId===log.userId&&w.stageId===log.stageId&&
+      (log.serialId?w.serialId===log.serialId:(!w.serialId&&w.orderId===log.orderId)));
+    if(dup&&!log.completed){toast("העבודה הזו כבר פתוחה אצלך","warning");return}
+    setWorkLogs(prev=>{
+      if(prev.some(w=>w.id===log.id))return prev;
+      const next=[...prev,log];persist(null,null,null,next);
       // If admin sign-off (completed=true), check auto delivery
       if(log.completed&&log.orderId)setTimeout(()=>checkAutoDelivery(log.orderId,next),100);
       return next});
-    addAuditEntry({userId:currentUser.id,username:currentUser.username,name:currentUser.name,
+    // Recorded in the journal, not only in the audit list: a signature has to be
+    // reversible from 🛡️ ניהול מערכת ← יומן ואחזור, and reversing it means putting
+    // back the exact rows that were there — which only the journal can do. An entry
+    // that creates a row carries no `before`; the undo drops the row it created.
+    UNDO.record({user:currentUser,
       action:isQtyLog(log)?"חתימה לפי כמות":isQtyRun(log)?"התחלת עבודה לפי כמות":log.completed?"חתימת מנהל":"התחלת עבודה",
       target:logUnitLabel(log),
-      details:stages.find(s=>s.id===log.stageId)?.name||""});
+      details:stages.find(s=>s.id===log.stageId)?.name||"",
+      changes:[{coll:"workLogs",before:[],after:[log.id]}]});
   };
   // `patch` is how a quantity run closes on fewer units than it started with —
   // the count is part of the record, so it is written with the completion.
   const handleEndWork=(logId,duration,patch)=>{
+    // Whatever the log looked like before it was signed — this is what ↩️ puts back,
+    // and it is also the check that the log is still open. A completed log is never
+    // re-completed: a double tap on ✅, a click replayed after a reconnect, or a
+    // second call from a bulk group that already closed would otherwise overwrite a
+    // real duration with a fresh one measured from the same start time.
+    // Read from the ref first and from this render's list as a fallback: the ref is
+    // the newer of the two, but it is only as new as the last persist, and a
+    // signature must never be dropped just because the lookup came up empty. The
+    // authority on "already completed" is the updater below, which sees `prev`.
+    const before=(wRef.current||[]).find(w=>w.id===logId)||(workLogs||[]).find(w=>w.id===logId);
+    if(before&&before.completed)return;
     setWorkLogs(prev=>{
+      const cur=prev.find(w=>w.id===logId);
+      if(!cur||cur.completed)return prev;
       const next=prev.map(w=>w.id===logId?{...w,...(patch||{}),completed:true,endTime:nowISO(),durationMin:duration}:w);
       persist(null,null,null,next);
       const log=next.find(w=>w.id===logId);
@@ -12400,8 +12566,13 @@ function App(){
       // worker) — the direct manager's device picks it up via the sync effect below.
       return next;
     });
-    const log=workLogs.find(w=>w.id===logId);
-    if(log)addAuditEntry({userId:currentUser.id,username:currentUser.username,name:currentUser.name,action:"סיום עבודה",target:logUnitLabel({...log,...(patch||{})}),details:`${fmtTime(duration)} — ${stages.find(s=>s.id===log.stageId)?.name||""}`});
+    if(!before)return;
+    UNDO.record({user:currentUser,action:"סיום עבודה",target:logUnitLabel({...before,...(patch||{})}),
+      details:`${fmtTime(duration)} — ${stages.find(s=>s.id===before.stageId)?.name||""}`,
+      // `before` is the open log. Undoing the signature restores it as it was —
+      // still running, still the worker's — rather than deleting the record of the
+      // work, which is what the old fallback did when it could match the S/N at all.
+      changes:[{coll:"workLogs",before:[before],after:[logId]}]});
   };
   const handlePauseWork=(logId)=>{
     setWorkLogs(prev=>{const next=prev.map(w=>w.id===logId?{...w,paused:true,pauseStart:nowISO(),pauseLog:[...(w.pauseLog||[]),{start:nowISO()}]}:w);persist(null,null,null,next);return next});
@@ -12812,11 +12983,24 @@ function App(){
     // controller yet, and the new worker's clients.claim() fires controllerchange
     // as well. Reloading on that one meant every such visit loaded, parsed and
     // booted the whole app twice, back to back, for no reason.
+    //
+    // And never in the middle of somebody's shift. A reload here is the app moving
+    // the floor out from under whoever is standing on it: an open timer, the units
+    // picked for it and the ⏸️/✅ that close it all go through a remount, and a
+    // worker who stepped away for a break comes back to a page that reloaded on its
+    // own. The new worker has already taken over by the time this fires, so the
+    // reload is only deferred, never dropped — it happens the moment the job is
+    // signed off, or on the next open.
     const hadController=!!navigator.serviceWorker.controller;
     let reloading=false;
-    navigator.serviceWorker.addEventListener("controllerchange",()=>{
-      if(!hadController||reloading)return;
+    const reloadWhenFree=()=>{
+      if(reloading)return;
+      if(workOpenRef.current){setTimeout(reloadWhenFree,15000);return}
       reloading=true;window.location.reload();
+    };
+    navigator.serviceWorker.addEventListener("controllerchange",()=>{
+      if(!hadController)return;
+      reloadWhenFree();
     });
   },[]);
   // Network status
@@ -12828,7 +13012,12 @@ function App(){
     if(isIOS)toast("ב-Safari: לחץ על סמל השיתוף ← 'הוסף למסך הבית'","info",6000);
     else toast("לחץ על תפריט הדפדפן (⋮ / ☰) ← 'הוסף למסך הבית' או 'התקן אפליקציה'","info",6000);
   };
-  const handleUpdate=()=>{const r=swRegRef.current;if(r?.waiting)r.waiting.postMessage({type:"SKIP_WAITING"});else window.location.reload();setShowUpdate(false)};
+  const handleUpdate=()=>{
+    // Updating reloads the page, and a reload mid-job throws away the open timer's
+    // screen state — so it is offered, not taken.
+    if(workOpenRef.current&&!confirm("יש עבודה פתוחה במכשיר הזה. לעדכן עכשיו? עדיף לסיים או להפסיק את העבודה קודם."))return;
+    const r=swRegRef.current;if(r?.waiting)r.waiting.postMessage({type:"SKIP_WAITING"});else window.location.reload();setShowUpdate(false);
+  };
 
   if(!currentUser)return(<AuthCtx.Provider value={{currentUser,canEdit:false,canViewProject:()=>false}}><LoginScreen onLogin={handleLogin} lightMode={lightMode} toggleLight={()=>setLightMode(p=>!p)}/></AuthCtx.Provider>);
   if(loading)return(<AppLoading/>);
@@ -12869,8 +13058,8 @@ function App(){
       {showPilotReset&&isAdmin&&<PilotResetModal users={allUsers} workLogs={workLogs} customTasks={customTasks} dailyPlans={dailyPlans} departments={departments} lightMode={lightMode} onClose={()=>setShowPilotReset(false)} onRun={runPilotReset}/>}
       {showAdmin&&canManageUsers(currentUser)&&<AdminPanel projects={projects} stages={stages} orders={orders} onClose={()=>setShowAdmin(false)} lightMode={lightMode} departments={departments} updD={updD} onPilotReset={isAdmin?()=>setShowPilotReset(true):null}/>}
       {showAlerts&&<AlertsPanel orders={filteredOrders} stages={stages} workLogs={filteredWorkLogs} users={visibleUsers} onClose={()=>setShowAlerts(false)} dismissedAlerts={dismissedAlerts} onDismissAll={ids=>setDismissedAlerts(prev=>[...new Set([...prev,...ids])])}/>}
-      {showLiveBoard&&(isAdmin||isDeptMgr)&&(canUseFeature("live_board")?<LiveFactoryBoard orders={filteredOrders} workLogs={filteredWorkLogs} stages={stages} customTasks={customTasks} users={visibleUsers} departments={visibleDepartments} onClose={()=>setShowLiveBoard(false)} lightMode={lightMode}/>:<Modal onClose={()=>setShowLiveBoard(false)}><UpgradePrompt feature="לוח חי"/></Modal>)}
-      {showReport&&(isAdmin||isDeptMgr)&&(canUseFeature("pdf_reports")?<MonthlyReportModal orders={filteredOrders} workLogs={filteredWorkLogs} stages={stages} projects={filteredProjects} users={visibleUsers} onClose={()=>setShowReport(false)}/>:<Modal onClose={()=>setShowReport(false)}><UpgradePrompt feature="דוחות PDF"/></Modal>)}
+      {showLiveBoard&&(isAdmin||isDeptMgr)&&<LiveFactoryBoard orders={filteredOrders} workLogs={filteredWorkLogs} stages={stages} customTasks={customTasks} users={visibleUsers} departments={visibleDepartments} onClose={()=>setShowLiveBoard(false)} lightMode={lightMode}/>}
+      {showReport&&(isAdmin||isDeptMgr)&&<MonthlyReportModal orders={filteredOrders} workLogs={filteredWorkLogs} stages={stages} projects={filteredProjects} users={visibleUsers} onClose={()=>setShowReport(false)}/>}
       {showHistory&&(isAdmin||isDeptMgr)&&<HistoryPanel orders={filteredOrders} updO={updO} onClose={()=>setShowHistory(false)} workLogs={filteredWorkLogs} onDeleteLog={handleDeleteLog} onUndoWorkLog={handleUndoWorkLog} customTasks={customTasks} onDeleteTask={handleDeleteTask}/>}
     </AuthCtx.Provider>
   );
