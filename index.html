@@ -2638,19 +2638,21 @@ function Dashboard({orders,projects,stages,users,workLogs,departments,customTask
     let total=0,done=0,rev=0,forecast=0;
     // פק"ע whose price did not survive the import are collected rather than
     // skipped in silence — the note under the KPIs names them, so "ההכנסה נמוכה
-    // ממה שציפיתי" has an answer on the same screen.
-    const unpriced=[];
+    // ממה שציפיתי" has an answer on the same screen. Not the same thing as a פק"ע
+    // that was simply never priced, of which this factory has 1,134: those are a
+    // blank cell, these are a cell that was read wrong.
+    const badPriced=[];
     fOrders.forEach(o=>{
       const units=orderUnits(o);
       const d=Math.min(units,orderDoneCount(o,orderRoute(o,stages),workLogs,doneIdx,qtyIdx));
       const price=orderPrice(o);
-      if(badPrice(o))unpriced.push(o);
+      if(badPrice(o))badPriced.push(o);
       total+=units;done+=d;rev+=d*price;forecast+=Math.max(0,units-d)*price;
     });
-    return{total,done,rev,forecast,unpriced};
+    return{total,done,rev,forecast,badPriced};
   },[fOrders,stages,workLogs,doneIdx,qtyIdx]);
   const totalUnits=unitStats.total,completedUnits=unitStats.done,actualRev=unitStats.rev,forecastRev=unitStats.forecast;
-  const unpricedOrders=unitStats.unpriced;
+  const badPriceOrders=unitStats.badPriced;
   const totalWorkMins=fLogs.reduce((s,w)=>s+(w.durationMin||0),0);
   const totalWorkCost=fLogs.reduce((s,w)=>{const u=users.find(u2=>u2.id===w.userId);return s+(w.durationMin||0)*(Number(u?.hourlyRate||0)/60)},0);
   const openDefects=fOrders.flatMap(o=>(o.defects||[]).filter(d=>d.status!=="closed")).length;
@@ -2908,10 +2910,10 @@ function Dashboard({orders,projects,stages,users,workLogs,departments,customTask
           fifteen-digit number, and הכנסה ממומשת read ₪1,604,276,474,982,000. The
           reading is fixed; these are the rows that came in before it was, and they
           are named here rather than left to make the KPI look wrong again. */}
-      {unpricedOrders.length>0&&(
+      {badPriceOrders.length>0&&(
         <Card style={{marginBottom:12,border:"1px solid #f59e0b44"}}>
           <div style={{fontWeight:700,fontSize:13,color:"#f59e0b",marginBottom:5}}>
-            💰 {unpricedOrders.length.toLocaleString()} פק"ע עם מחיר ליחידה לא תקין — אינן נכללות בחישובי ההכנסה
+            💰 {badPriceOrders.length.toLocaleString()} פק"ע עם מחיר ליחידה לא תקין — אינן נכללות בחישובי ההכנסה
           </div>
           <div style={{fontSize:11.5,color:"var(--c-muted)",lineHeight:1.7,marginBottom:8}}>
             עמודת המחיר בקובץ הייבוא הייתה מעוצבת כתאריך, והמחיר נקרא כמספר בן 15–16 ספרות.
@@ -2919,13 +2921,13 @@ function Dashboard({orders,projects,stages,users,workLogs,departments,customTask
             עד אז הן נספרות כפק"ע ללא מחיר, בדיוק כמו פק"ע שמעולם לא תומחרה.
           </div>
           <div style={{display:"flex",flexWrap:"wrap",gap:5}}>
-            {unpricedOrders.slice(0,40).map(o=>(
+            {badPriceOrders.slice(0,40).map(o=>(
               <span key={o.id} title={`מחיר שיובא: ${o.unitPrice}`}
                 style={{fontSize:11,background:"var(--c-deep)",border:"1px solid #f59e0b33",color:"var(--c-muted)",borderRadius:7,padding:"3px 8px"}}>
                 {o.woNumber}
               </span>
             ))}
-            {unpricedOrders.length>40&&<span style={{fontSize:11,color:"var(--c-dim)",padding:"3px 4px"}}>ועוד {(unpricedOrders.length-40).toLocaleString()}…</span>}
+            {badPriceOrders.length>40&&<span style={{fontSize:11,color:"var(--c-dim)",padding:"3px 4px"}}>ועוד {(badPriceOrders.length-40).toLocaleString()}…</span>}
           </div>
         </Card>
       )}
