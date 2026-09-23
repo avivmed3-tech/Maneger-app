@@ -1827,7 +1827,10 @@ function publishUsers(list){
   try{window.dispatchEvent(new CustomEvent("pml:users"))}catch{}
   return ok;
 }
-async function saveUsers(users){
+// `onlyIds` narrows the write to the rows that actually changed. Writing the whole
+// list meant one bad row — a user whose username the server refuses — failed
+// every later save of every other user, with the same error each time.
+async function saveUsers(users,onlyIds){
   publishUsers(users);
   // Only this company's users — state can still be holding a list from a previous
   // session, and re-writing those rows would hand them to the wrong company.
@@ -1835,7 +1838,10 @@ async function saveUsers(users){
   // The result is handed back rather than swallowed: login reads the *server*
   // row, so a password the admin changed that never left the device would look
   // saved on screen while the account still answers to the old one.
-  try{await SB.upsert("app_users",users.map(userToDb).filter(r=>r.company_id===here));return{ok:true}}
+  const only=Array.isArray(onlyIds)?new Set(onlyIds):null;
+  const rows=users.filter(u=>!only||only.has(u.id)).map(userToDb).filter(r=>r.company_id===here);
+  if(!rows.length)return{ok:true};
+  try{await SB.upsert("app_users",rows);return{ok:true}}
   catch(e){console.warn("saveUsers error",e);return{ok:false,error:e}}
 }
 function getAuditLog(){return LS.get("audit")||[]}
@@ -6634,20 +6640,37 @@ function AdminPanel({projects,stages,orders=[],onClose,lightMode,departments,upd
 
   const addUser=async()=>{
     if(!newUser.username||!newUser.password||!newUser.name)return toast("כל השדות הם חובה","warning");
-    if(users.find(u=>u.username===newUser.username))return toast("שם משתמש קיים","warning");
+    const uname=newUser.username.trim();
+    if(users.find(u=>u.username===uname))return toast("שם משתמש קיים","warning");
+    // Usernames are unique across the whole system, not per company — a name held
+    // by a user in another company is just as taken, and this list cannot see it.
+    try{
+      const taken=await SB.get("app_users",`username=eq.${encodeURIComponent(uname)}&select=id`);
+      if(Array.isArray(taken)&&taken.length)return toast(`שם המשתמש ״${uname}״ כבר תפוס במערכת (ייתכן שבחברה אחרת) — בחר שם משתמש אחר`,"warning",6000);
+    }catch{}
     // Whatever the manager typed is the password — the sign-up complexity rules
     // do not apply to a password set on someone else's behalf.
     const pwErrors=validatePassword(newUser.password,MANAGED_PASSWORD_POLICY);
     if(pwErrors.length>0)return toast("הסיסמה חייבת לכלול: "+pwErrors.join(", "),"warning",5000);
     if(!isAdmin&&(newUser.role==="admin"||!myDept))return toast("אפשר להוסיף עובדים למחלקה שלך בלבד","warning");
     const hash=await sha256(newUser.password);
-    const u={...newUser,id:uid(),password_hash:hash,passwordPlain:newUser.password,password:undefined};
+    const u={...newUser,username:uname,id:uid(),password_hash:hash,passwordPlain:newUser.password,password:undefined};
     if(!isAdmin)u.departmentId=myDept.id;
     delete u.password;
     const updated=[...users,u];
     setUsersLocal(updated);
-    const res=await saveUsers(updated);
-    if(!res.ok)toast("המשתמש נשמר במכשיר אך לא הגיע לשרת: "+sbErrMsg(res.error),"error",7000);
+    const res=await saveUsers(updated,[u.id]);
+    if(!res.ok){
+      const msg=sbErrMsg(res.error);
+      // The server refused the row itself (a taken username) — keeping it on the
+      // device would only leave a user who can never log in. Offline is different:
+      // that one is kept and goes up with the next save.
+      if(/23505/.test(String(res.error&&res.error.message||res.error))){
+        setUsersLocal(users);publishUsers(users);
+        return toast(`המשתמש לא נוצר: ${msg} — בחר שם משתמש אחר`,"error",7000);
+      }
+      toast("המשתמש נשמר במכשיר אך לא הגיע לשרת: "+msg,"error",7000);
+    }
     UNDO.record({user:currentUser,action:"הוספת משתמש",target:newUser.username,details:newUser.name,
       changes:[{coll:"users",before:[],after:[u.id]}]});
     setNewUser({username:"",password:"",name:"",role:"worker",projectAccess:"all",stageAccess:"all",branchAccess:[],branchNone:false,canEdit:false,canView:true,active:true,hourlyRate:0,saleRate:0,departmentId:"",managerId:""});
@@ -6671,7 +6694,7 @@ function AdminPanel({projects,stages,orders=[],onClose,lightMode,departments,upd
     const before=users.find(usr=>usr.id===u.id);
     const updated=users.map(usr=>usr.id===u.id?u:usr);
     setUsersLocal(updated);
-    const res=await saveUsers(updated);
+    const res=await saveUsers(updated,[u.id]);
     if(!res.ok)toast((typedPw?"הסיסמה החדשה נשמרה במכשיר אך לא הגיעה לשרת — ההתחברות עדיין תעבוד עם הישנה: ":"העדכון לא הגיע לשרת: ")+sbErrMsg(res.error),"error",8000);
     else if(typedPw)toast("הסיסמה עודכנה","success");
     UNDO.record({user:currentUser,action:"עדכון משתמש",target:editUser.username,details:editUser.name,
@@ -6682,7 +6705,7 @@ function AdminPanel({projects,stages,orders=[],onClose,lightMode,departments,upd
     const before=users.find(u=>u.id===id);
     if(!canEditUser(before))return toast("אין הרשאה לשנות את המשתמש הזה","warning");
     const updated=users.map(u=>u.id===id?{...u,active:!u.active}:u);
-    saveUsers(updated);setUsersLocal(updated);
+    saveUsers(updated,[id]);setUsersLocal(updated);
     if(before)UNDO.record({user:currentUser,action:before.active===false?"הפעלת משתמש":"השבתת משתמש",
       target:before.name||before.username,
       changes:[{coll:"users",before:[before],after:[id]}]});
@@ -6694,7 +6717,7 @@ function AdminPanel({projects,stages,orders=[],onClose,lightMode,departments,upd
     if(!canEditUser(victim))return toast("אין הרשאה למחוק את המשתמש הזה","warning");
     if(!confirm(`למחוק את "${victim.name||victim.username}" לצמיתות?\nאפשר יהיה לאחזר את המחיקה מיומן הפעילות.`))return;
     const updated=users.filter(u=>u.id!==id);
-    saveUsers(updated);setUsersLocal(updated);
+    saveUsers(updated,[]);setUsersLocal(updated);
     // saveUsers only writes the users that are left — without this the row stays
     // on the server and walks back in on the next load.
     try{await SB.delIds("app_users",[id])}catch(e){toast("המחיקה לא הגיעה לשרת: "+sbErrMsg(e),"error",6000)}
@@ -13085,7 +13108,7 @@ function App(){
     SYNC.forget(spec.table,(restore||[]).map(r=>r.id));
     if(coll==="users"){
       const next=merge(getUsers());
-      await saveUsers(next);
+      await saveUsers(next,(restore||[]).map(r=>r.id));
     }else{
       const setter=undoSetter[coll];
       const args=[null,null,null,null,null,null,null,null,null];
@@ -13798,7 +13821,7 @@ function App(){
       if(dSet.size){const next=dpRef.current.filter(d=>!dSet.has(d.id));setDepartments(next);persist(null,null,null,null,null,null,next)}
       if(uSet.size){
         const next=getUsers().filter(u=>!uSet.has(u.id));
-        await saveUsers(next);
+        await saveUsers(next,[]);
       }
       // The rows have to leave the server too, or the next sweep pulls every one
       // of them straight back in.
