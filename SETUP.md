@@ -1224,6 +1224,9 @@ alter table public.audit_log add column if not exists ref_id text;
 
 ### עדכון סכימה — להריץ ב-Supabase ← SQL Editor
 
+> ✅ **כבר הורץ** בפרויקט `production-line-manager` (`lwiurzkiojctwzllpnmr`) —
+> אין צורך לעשות דבר. ה-SQL כאן הוא לתיעוד ולהקמת פרויקט חדש.
+
 ```sql
 -- מצב HOLD של רישום עבודה, והחלוקה בין עובדים כשעבודה ב-HOLD מועברת לעובד אחר.
 ALTER TABLE public.work_logs ADD COLUMN IF NOT EXISTS hold_info jsonb;
