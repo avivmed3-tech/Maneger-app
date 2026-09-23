@@ -14,6 +14,7 @@
 | `app-icon.svg` | הלוגו על אריח ריבועי; ממנו נוצרים קובצי ה-PNG |
 | `build.js` | הידור מוקדם של ה-JSX ל-`app.js` |
 | `vercel-build.js` | שלב ה-build של Vercel — מריץ את `build.js` ומכין את `dist/` |
+| `tools/hold-test.js` | בדיקות HOLD — חלוקת הזמן בין עובדים בהעברה, ושומר שמוודא ש-`index.html` עדיין מכיל את קוד המקור |
 | `tools/sync-test.js` | בדיקות שכבת הסנכרון — מודדות כמה בייטים כל סבב עולה (`npm test`) |
 | `SETUP.md` | הקמת Supabase, עדכוני סכימה ותיעוד הגרסאות |
 
