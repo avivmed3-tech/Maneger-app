@@ -199,5 +199,61 @@ console.log("\n── 3. a month of scheduling out of a spreadsheet ────
   eq([mixed.stats.workers,mixed.stats.days],[1,2],"the summary counts people and days, not rows");
 }
 
-console.log(fail?`\n✗ ${fail} assertion(s) failed`:"\n✓ all assertions passed");
-process.exit(fail?1:0);
+// ── 4. אחזור מחיקה אינו מחזיר שיבוץ שכבר בוטל ─────────────────────────────
+// The sequence a manager actually ran: assign two days, delete one, undo the
+// assignment, then undo the deletion. The last step used to put the deleted day
+// back from its snapshot — a plan taken away twice, back on the worker's screen.
+console.log("\n── 4. undoing a delete does not resurrect an undone plan ──");
+{
+  // The journal module as shipped, around a stub of what it talks to.
+  const u=vm.createContext({console,module:{exports:{}}});
+  vm.runInContext([
+    "let store={};const LS={get:k=>store[k],set:(k,v)=>{store[k]=v}};",
+    "let n=0;const uid=()=>'e'+(++n);const nowISO=()=>new Date().toISOString();",
+    "const getCompanyId=()=>'c1';const addAuditEntry=()=>uid();const SB={patch:async()=>{}};",
+    slice("const UNDO_COLL={","// ── Auth Context","the undo journal"),
+    // The app side of a revert: one collection, merged by id exactly as undoApply does.
+    "let plans=[];UNDO.setApplier(async(coll,restore,remove)=>{",
+    "  const m=new Map(plans.map(r=>[r.id,r]));remove.forEach(id=>m.delete(id));restore.forEach(r=>m.set(r.id,r));plans=[...m.values()]});",
+    "module.exports={UNDO,undoScopeText,set:p=>{plans=p},get:()=>plans.map(p=>p.id).sort()};",
+  ].join("\n"),u);
+  const {UNDO,undoScopeText,set,get}=u.module.exports;
+  const user={id:"m1",name:"מנהל"};
+  const day1={id:"p23",date:D(-1)},day2={id:"p24",date:TODAY};
+
+  (async()=>{
+    set([day1,day2]);
+    const assign=UNDO.record({user,action:"שיבוץ תוכנית עבודה",changes:[{coll:"dailyPlans",before:[],after:["p23","p24"]}]});
+    set([day1]);
+    const del=UNDO.record({user,action:"מחיקת תוכנית עבודה",changes:[{coll:"dailyPlans",before:[day2],after:[]}]});
+
+    ok(!UNDO.isMoot(UNDO.get(del)),"while the assignment stands, undoing the delete is a real undo");
+    eq(UNDO.effect(UNDO.get(del))[0].restore.map(r=>r.id),["p24"],"and it would put the deleted day back");
+
+    await UNDO.revert(assign);
+    eq(get(),[],"undoing the assignment takes every day of it away");
+    ok(UNDO.isMoot(UNDO.get(del)),"after which the delete has nothing left to undo");
+    ok(/לא יוחזרו/.test(undoScopeText(UNDO.get(del))),"and the screen says why, instead of offering it");
+    let refused="";
+    try{await UNDO.revert(del)}catch(e){refused=e.message}
+    ok(/אין מה לאחזר/.test(refused),"reverting it anyway is refused with a reason");
+    eq(get(),[],"and the deleted day stays deleted — this is the regression");
+
+    // The other order is untouched: undo the delete first, then the assignment.
+    // (Fresh ids, as the app's uid() always gives — a row id is never reused.)
+    const dayA={id:"q23",date:D(-1)},dayB={id:"q24",date:TODAY};
+    set([dayA,dayB]);
+    const a2=UNDO.record({user,action:"שיבוץ תוכנית עבודה",changes:[{coll:"dailyPlans",before:[],after:["q23","q24"]}]});
+    set([dayA]);
+    const d2=UNDO.record({user,action:"מחיקת תוכנית עבודה",changes:[{coll:"dailyPlans",before:[dayB],after:[]}]});
+    await UNDO.revert(d2);
+    eq(get(),["q23","q24"],"undoing the delete first brings the day back");
+    await UNDO.revert(a2);
+    eq(get(),[],"and undoing the assignment after it removes both");
+
+    console.log(fail?`\n✗ ${fail} assertion(s) failed`:"\n✓ all assertions passed");
+    process.exit(fail?1:0);
+  })().catch(e=>{console.error("✗ undo test crashed:",e);process.exit(1)});
+}
+// The verdict is printed by section 4 once its reverts have run — a revert is
+// async, and exiting here would end the test before they got the chance.
