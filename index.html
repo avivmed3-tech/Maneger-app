@@ -955,15 +955,23 @@ function commitWatermarks(data){
 //   soft     — the app works without it, so a failed read keeps what is held.
 //   optional — the table may not exist at all, and null (not []) tells the caller
 //              to keep the local copy rather than wipe it.
+//   watchGone — checked for deletions on *every* sweep, not only on the reconcile
+//              pass. These are what a manager hands a worker — a שיבוץ, a משימה —
+//              and deleting one is an instruction the worker has to see now, not
+//              in five or fifteen minutes. A phone in a pocket has no socket, so
+//              the realtime DELETE never reaches it, and until this the plan sat
+//              on its screen long after the manager had taken it away. The tables
+//              are tiny (a count is a HEAD with no body, the id list a few KB at
+//              most), so the check costs nothing next to what it fixes.
 const MIRROR=[
   {t:"orders",       key:"orders",      map:dbToOrder,   toDb:orderToDb,   order:ORDER_BY.orders},
   {t:"projects",     key:"projects",    map:dbToProject, toDb:projectToDb, order:ORDER_BY.projects},
   {t:"stages",       key:"stages",      map:dbToStage,   toDb:stageToDb,   order:ORDER_BY.stages},
   {t:"stage_blocks", key:"stageBlocks", map:dbToBlock,   toDb:blockToDb,   order:ORDER_BY.stage_blocks},
   {t:"work_logs",    key:"workLogs",    map:dbToLog,     toDb:logToDb,     order:ORDER_BY.work_logs},
-  {t:"custom_tasks", key:"customTasks", map:dbToTask,    toDb:taskToDb,    order:ORDER_BY.custom_tasks},
+  {t:"custom_tasks", key:"customTasks", map:dbToTask,    toDb:taskToDb,    order:ORDER_BY.custom_tasks, watchGone:true},
   {t:"departments",  key:"departments", map:dbToDept,    toDb:deptToDb,    order:ORDER_BY.departments, soft:true},
-  {t:"daily_plans",  key:"dailyPlans",  map:dbToPlan,    toDb:planToDb,    order:ORDER_BY.daily_plans, soft:true},
+  {t:"daily_plans",  key:"dailyPlans",  map:dbToPlan,    toDb:planToDb,    order:ORDER_BY.daily_plans, soft:true, watchGone:true},
   {t:"pn_standards", key:"pnStandards", map:dbToPnStd,   toDb:pnStdToDb,   order:ORDER_BY.pn_standards, optional:true},
 ];
 const MIRROR_BY_TABLE={};
@@ -1022,7 +1030,9 @@ async function dbGoneIds(spec,cfNoAmp,rows){
   // this pass can only remove.
   if(n>=rows.length)return null;
   const now=Date.now();
-  if(now-(LAST_ID_SWEEP[spec.t]||0)<ID_SWEEP_MIN_MS)return null;
+  // The throttle is for the big tables. On a watchGone table the id list is a few
+  // KB, and waiting ten minutes to read it is the very delay the flag removes.
+  if(!spec.watchGone&&now-(LAST_ID_SWEEP[spec.t]||0)<ID_SWEEP_MIN_MS)return null;
   LAST_ID_SWEEP[spec.t]=now;
   const live=new Set((await SB.getAll(spec.t,`select=id&${cfNoAmp}&${spec.order}`)).map(r=>r.id));
   const gone=new Set();
@@ -1051,7 +1061,7 @@ async function dbLoadAll(prev){
     const wm=maxUpdatedAt(read.rows);
     if(wm)watermarks[spec.t]=wm;
     let rows=read.delta?mergeRows(prev&&prev[spec.key],fresh,null):fresh;
-    if(read.delta&&prev&&prev.reconcile){
+    if(read.delta&&prev&&(prev.reconcile||spec.watchGone)){
       let gone=null;
       try{gone=await dbGoneIds(spec,cfNoAmp,rows)}
       catch(e){console.warn("[SB] reconcile "+spec.t,e)}
@@ -1915,6 +1925,26 @@ const UNDO=(()=>{
     // Heavy entries are dropped from the persisted copy, not from `mem`.
     const slim=mem.filter(e=>!e.heavy).slice(0,UNDO_MAX);
     LS.set("undoJournal",slim);
+    madeCache=null;
+  };
+  // company|coll → ids created by an entry that has since been undone. Every
+  // journal write goes through save(), which drops the cache, so both undo
+  // screens can ask per entry without re-walking an import's snapshot each time.
+  let madeCache=null;
+  const undone=()=>{
+    if(madeCache)return madeCache;
+    const m=new Map();
+    for(const o of load()){
+      if(!o.reverted)continue;
+      for(const c of o.changes||[]){
+        const had=new Set((c.before||[]).map(r=>r.id));
+        const k=o.companyId+"|"+c.coll;
+        for(const id of c.after||[])if(!had.has(id)){
+          let s=m.get(k);if(!s)m.set(k,s=new Set());s.add(id);
+        }
+      }
+    }
+    return madeCache=m;
   };
   return{
     setApplier(fn){apply=fn},
@@ -1947,6 +1977,32 @@ const UNDO=(()=>{
     },
     list(){return load().filter(e=>e.companyId===getCompanyId())},
     get(id){return load().find(e=>e.id===id)||null},
+    // What reverting an entry would actually do, collection by collection: the rows
+    // it puts back, the rows it takes away, and the rows it must *not* put back.
+    //
+    // That last group is a row whose creation has itself been undone since. Assign
+    // two days of work, delete one of them, undo the assignment — both are gone,
+    // which is what was asked. Then undo the deletion, and the day that was deleted
+    // came back from its snapshot: a שיבוץ the manager had now taken away twice,
+    // sitting on the worker's screen as if nothing had happened. Once the action
+    // that made a row is undone, no older snapshot of that row may resurrect it.
+    effect(e){
+      const created=undone();
+      return (e.changes||[]).map(c=>{
+        const gone=created.get(e.companyId+"|"+c.coll);
+        const beforeIds=new Set(c.before.map(r=>r.id));
+        return{coll:c.coll,
+          restore:gone?c.before.filter(r=>!gone.has(r.id)):c.before,
+          remove:c.after.filter(x=>!beforeIds.has(x)),
+          moot:gone?c.before.filter(r=>gone.has(r.id)).length:0};
+      });
+    },
+    // True when reverting would change nothing at all — everything it would put
+    // back was made by an action that has already been undone.
+    isMoot(e){
+      const fx=this.effect(e);
+      return fx.some(c=>c.moot)&&fx.every(c=>!c.restore.length&&!c.remove.length);
+    },
     // Reverts an entry. Returns a short description of what was put back, or
     // throws with a reason a person can act on.
     async revert(id){
@@ -1955,14 +2011,14 @@ const UNDO=(()=>{
       if(e.reverted)throw new Error("הפעולה כבר בוטלה");
       if(e.companyId!==getCompanyId())throw new Error("הפעולה שייכת לחברה אחרת");
       if(!apply)throw new Error("האחזור אינו זמין כרגע");
+      if(this.isMoot(e))throw new Error("אין מה לאחזר — מה שהפעולה הזו מחקה נוצר בפעולה שכבר בוטלה, ולכן לא יוחזר");
       const parts=[];
-      for(const c of e.changes){
-        const beforeIds=new Set(c.before.map(r=>r.id));
-        const remove=c.after.filter(x=>!beforeIds.has(x));
-        await apply(c.coll,c.before,remove);
+      for(const c of this.effect(e)){
+        await apply(c.coll,c.restore,c.remove);
         const bits=[];
-        if(c.before.length)bits.push(`${c.before.length} שוחזרו`);
-        if(remove.length)bits.push(`${remove.length} הוסרו`);
+        if(c.restore.length)bits.push(`${c.restore.length} שוחזרו`);
+        if(c.remove.length)bits.push(`${c.remove.length} הוסרו`);
+        if(c.moot)bits.push(`${c.moot} לא הוחזרו (הפעולה שיצרה אותם בוטלה)`);
         if(bits.length)parts.push(`${UNDO_COLL[c.coll].label}: ${bits.join(" · ")}`);
       }
       e.reverted=true;save();
@@ -1975,6 +2031,15 @@ const UNDO=(()=>{
     dropCompany(cid){mem=load().filter(e=>e.companyId!==cid);save()}
   };
 })();
+// What reverting an entry would do, in the words both undo screens show under it
+// and in its confirm — read from UNDO.effect, so the promise and the act agree.
+const undoScopeText=e=>UNDO.effect(e).map(c=>{
+  const bits=[];
+  if(c.restore.length)bits.push(`${c.restore.length} לשחזור`);
+  if(c.remove.length)bits.push(`${c.remove.length} להסרה`);
+  if(c.moot)bits.push(`${c.moot} לא יוחזרו — הפעולה שיצרה אותם בוטלה`);
+  return `${UNDO_COLL[c.coll]?.label||c.coll} (${bits.join(" · ")||"—"})`;
+}).join(" · ");
 
 // ── Auth Context ───────────────────────────────────────────────────────────
 const AuthCtx=React.createContext(null);
@@ -4785,13 +4850,30 @@ function MyWork({orders,stages,workLogs,onStartWork,onEndWork,onPauseWork,onResu
       onEndWork(w.id,Math.max(0,d2));
     });
   };
-  // Started by mistake: a run that reported nothing can be dropped outright, the
-  // way an unwanted unit timer is undone from the journal.
-  const cancelRun=()=>{
-    if(!myActiveLog||!isQtyRun(myActiveLog)||!onDeleteLog)return;
-    if(!confirm(`לבטל את ההתחלה על ${myActiveLog.bulkCount} יחידות? לא יירשם דיווח ולא ייספר זמן.`))return;
+  // Started by mistake — the wrong unit, the wrong פק"ע, the wrong stage: the
+  // start is dropped outright, with no report and no time. This used to exist only
+  // for a quantity run; a unit started by mistake could be taken back only by a
+  // manager, from the journal, so a worker who hit ▶️ on the wrong line had
+  // nothing to press but HOLD — which parks the mistake instead of removing it.
+  // A group started together is cancelled together, as ✅ and HOLD treat it. Work
+  // handed over from someone else's HOLD is not offered: it carries their minutes,
+  // and was never this worker's start to take back.
+  const cancelGroup=myActiveLog?(myActiveLog.bulkGroupId?myActiveLogs.filter(w=>w.bulkGroupId===myActiveLog.bulkGroupId):[myActiveLog]):[];
+  const canCancelStart=!!(onDeleteLog&&myActiveLog&&cancelGroup.every(w=>!holdCarryMin(w)&&!((w.holdInfo&&w.holdInfo.prev)||[]).length));
+  const cancelStart=()=>{
+    if(!canCancelStart)return;
+    const what=isQtyRun(myActiveLog)?`${myActiveLog.bulkCount} יחידות`
+      :cancelGroup.length>1?`${cancelGroup.length} יחידות (${cancelGroup.map(w=>w.serialSn).filter(Boolean).slice(0,4).join(", ")}${cancelGroup.length>4?"…":""})`
+      :(myActiveLog.serialSn||"היחידה");
+    const min=logWorkedMin(myActiveLog);
+    if(!confirm(`לבטל את ההתחלה על ${what}?\n\nהעבודה תחזור לרשימה כאילו לא התחילה — לא יירשם דיווח${min>=1?`, ו-${fmtTime(min)} שכבר נמדדו לא ייספרו`:" ולא ייספר זמן"}.`))return;
     setRunDone("");
-    onDeleteLog([myActiveLog.id]);
+    // The label must not contain any of WORK_UNDO_ACTIONS: the journal screen
+    // matches them by substring, and on a device without this journal it would
+    // offer to "undo" the cancel by deleting whatever open log matches the S/N —
+    // the worker's corrected start on the same unit.
+    onDeleteLog(cancelGroup.map(w=>w.id),"ביטול עבודה שהתחילה בטעות");
+    toast("ההתחלה בוטלה","success");
   };
 
   // ⏸️ HOLD — stop in the middle of the stage (end of the day, or something more
@@ -5082,7 +5164,8 @@ function MyWork({orders,stages,workLogs,onStartWork,onEndWork,onPauseWork,onResu
               <Btn color="#10b981" onClick={endWork} style={{fontSize:16,padding:"12px 24px"}}>✅ סיימתי</Btn>
               {onHoldWork&&<Btn color="#f97316" small onClick={holdWork} title="עצירת העבודה באמצע השלב (סוף יום, עבודה דחופה אחרת). הזמן נשמר, ואפשר להמשיך אחר כך — או שהמנהל יעביר לעובד אחר"
                 style={{background:"transparent",border:"1px solid #f9731688",color:"#f97316"}}>🟧 HOLD — עצור והמשך אחר כך</Btn>}
-              {isQtyRun(myActiveLog)&&onDeleteLog&&<button onClick={cancelRun} style={{background:"none",border:"none",color:"#ef4444",fontSize:11.5,cursor:"pointer",fontFamily:"inherit"}}>🗑️ בטל התחלה</button>}
+              {canCancelStart&&<button onClick={cancelStart} title="התחלת בטעות? ביטול מחזיר את העבודה לרשימה — בלי דיווח ובלי זמן"
+                style={{background:"none",border:"none",color:"#ef4444",fontSize:12,cursor:"pointer",fontFamily:"inherit"}}>🗑️ בטל התחלה (התחלתי בטעות)</button>}
             </div>
           </div>
         </Card>
@@ -5717,6 +5800,25 @@ function DailyPlanBoard({dailyPlans,workers,orders,stages,workLogs,onAddPlan,onA
     return plansOfDay(mine,date,{carry:carryOn,stillOpen:p=>planHasWorkLeft(p,orders,workLogs)});
   },[dailyPlans,workers,date,carryOn,orders,workLogs]);
   const carried=dayPlans.filter(p=>planIsCarried(p,date));
+  // A שיבוץ over a range of days is one row per day, and the days that were not
+  // finished all roll onto today. Delete today's row and yesterday's — same
+  // worker, same פק"ע, same stage — is still there, on the manager's board and on
+  // the worker's, looking exactly like the one that was just deleted. So when
+  // the assignment has other open days, the delete asks whether they go too.
+  const deletePlan=(p,w)=>{
+    if(!confirm("למחוק שיבוץ?"))return;
+    const sibs=(dailyPlans||[]).filter(x=>x.id!==p.id&&!x.done&&x.userId===p.userId&&
+      x.orderId===p.orderId&&x.stageId===p.stageId).sort((a,b)=>String(a.date||"").localeCompare(String(b.date||"")));
+    let ids=[p.id];
+    if(sibs.length){
+      const o=(orders||[]).find(x=>x.id===p.orderId),st=stages.find(s=>s.id===p.stageId);
+      const days=sibs.map(x=>fmt(x.date));
+      const list=days.length>6?`${days.slice(0,6).join(", ")} ועוד ${days.length-6}`:days.join(", ");
+      if(confirm(`ל${w?.name||p.userName||"עובד"} יש עוד ${sibs.length===1?"שיבוץ פתוח אחד":`${sibs.length} שיבוצים פתוחים`} ל${o?.woNumber?`פק"ע ${o.woNumber}`:'אותה פק"ע'}${st?` · ${st.name}`:""}: ${list}.\n\nלמחוק גם ${sibs.length===1?"אותו":"אותם"}?\nאישור — למחוק הכל · ביטול — רק את השיבוץ הזה`))
+        ids=ids.concat(sibs.map(x=>x.id));
+    }
+    onDeletePlan(ids);
+  };
   const byWorker={};
   dayPlans.forEach(p=>{(byWorker[p.userId]=byWorker[p.userId]||[]).push(p)});
   // Carried work first, oldest first — it is the most late, so it is read first.
@@ -5844,7 +5946,7 @@ function DailyPlanBoard({dailyPlans,workers,orders,stages,workLogs,onAddPlan,onA
                       {p.note&&<span style={{fontSize:11,color:"var(--c-muted)"}}>📝 {p.note}</span>}
                       <div style={{marginInlineStart:"auto",display:"flex",gap:4,alignItems:"center"}}>
                         <button onClick={()=>onTogglePlanDone&&onTogglePlanDone(p.id)} title="סמן כבוצע" style={{background:p.done?"#10b98133":"transparent",border:"1px solid #10b98144",borderRadius:6,padding:"2px 7px",fontSize:11,color:"#10b981",fontFamily:"inherit",cursor:"pointer"}}>✅</button>
-                        {onDeletePlan&&<IBtn onClick={()=>{if(confirm("למחוק שיבוץ?"))onDeletePlan(p.id)}}>🗑️</IBtn>}
+                        {onDeletePlan&&<IBtn onClick={()=>deletePlan(p,w)}>🗑️</IBtn>}
                       </div>
                     </div>
                   );
@@ -6539,13 +6641,7 @@ function AdminPanel({projects,stages,orders=[],onClose,lightMode,departments,upd
     window.addEventListener("pml:users",h);
     return()=>window.removeEventListener("pml:users",h);
   },[]);
-  const undoScope=e=>(e.changes||[]).map(c=>{
-    const bits=[];
-    if(c.before.length)bits.push(`${c.before.length} לשחזור`);
-    const created=c.after.filter(id=>!c.before.some(r=>r.id===id)).length;
-    if(created)bits.push(`${created} להסרה`);
-    return `${UNDO_COLL[c.coll]?.label||c.coll} (${bits.join(" · ")||"—"})`;
-  }).join(" · ");
+  const undoScope=undoScopeText;
   const revertEntry=async(e)=>{
     if(!confirm(`לאחזר את המצב שלפני "${e.action}"${e.target?` — ${e.target}`:""}?\n${undoScope(e)}`))return;
     setReverting(e.id);
@@ -6946,7 +7042,8 @@ function AdminPanel({projects,stages,orders=[],onClose,lightMode,departments,upd
                       <div style={{display:"flex",justifyContent:"space-between",flexWrap:"wrap",gap:6}}>
                         <span><b style={{color:"#60a5fa"}}>{e.name||e.username}</b> — {e.action}{e.target?` — ${e.target}`:""}{e.reverted&&<span style={{color:"#ef4444",marginRight:6}}> (אוחזר)</span>}</span>
                         <div style={{display:"flex",gap:6,alignItems:"center"}}>
-                          {!e.reverted&&<button onClick={()=>revertEntry(e)} disabled={reverting===e.id} style={{background:"#f59e0b",color:"#fff",border:"none",borderRadius:6,padding:"3px 10px",fontSize:11,fontWeight:700,fontFamily:"inherit",cursor:"pointer",opacity:reverting===e.id?.6:1}}>{reverting===e.id?"…":"↩️ אחזר"}</button>}
+                          {!e.reverted&&UNDO.isMoot(e)&&<span title="מה שהפעולה הזו מחקה נוצר בפעולה שכבר בוטלה — אין מה להחזיר" style={{color:muted,fontSize:11}}>אין מה לאחזר</span>}
+                          {!e.reverted&&!UNDO.isMoot(e)&&<button onClick={()=>revertEntry(e)} disabled={reverting===e.id} style={{background:"#f59e0b",color:"#fff",border:"none",borderRadius:6,padding:"3px 10px",fontSize:11,fontWeight:700,fontFamily:"inherit",cursor:"pointer",opacity:reverting===e.id?.6:1}}>{reverting===e.id?"…":"↩️ אחזר"}</button>}
                           <span style={{color:muted,fontSize:11}}>{e.timestamp?new Date(e.timestamp).toLocaleString("he-IL",{day:"2-digit",month:"2-digit",hour:"2-digit",minute:"2-digit"}):""}</span>
                         </div>
                       </div>
@@ -12252,7 +12349,9 @@ function HistoryPanel({onClose,orders,updO,workLogs,onDeleteLog,onUndoWorkLog,cu
   const canUndo=(entry)=>{
     if(entry.reverted)return false;
     const je=journalById.get(entry.id);
-    if(je)return!je.reverted;
+    // An entry whose rows were all made by an action already undone has nothing
+    // left to put back — see UNDO.effect — so it offers no ↩️.
+    if(je)return!je.reverted&&!UNDO.isMoot(je);
     // No journal on this device — the manager undoing a signature a worker made on a
     // tablet. The audit row carries the id of the record the action was about, so it
     // can still be found exactly. Quantity signatures are included: they used to be
@@ -12287,8 +12386,7 @@ function HistoryPanel({onClose,orders,updO,workLogs,onDeleteLog,onUndoWorkLog,cu
   const undoEntry=async(entry)=>{
     const je=journalById.get(entry.id);
     if(je&&!je.reverted){
-      const scope=(je.changes||[]).map(c=>`${UNDO_COLL[c.coll]?.label||c.coll}: ${c.before.length} לשחזור${c.after.filter(id=>!c.before.some(r=>r.id===id)).length?` · ${c.after.filter(id=>!c.before.some(r=>r.id===id)).length} להסרה`:""}`).join(" | ");
-      if(!confirm(`לאחזר את המצב שלפני "${entry.action}"${entry.target?` — ${entry.target}`:""}?\n${scope}`))return;
+      if(!confirm(`לאחזר את המצב שלפני "${entry.action}"${entry.target?` — ${entry.target}`:""}?\n${undoScopeText(je)}`))return;
       setReverting(entry.id);
       try{
         const what=await UNDO.revert(entry.id);
@@ -12806,8 +12904,12 @@ function App(){
     // Start polling after a short delay
     pollTimer=setTimeout(poll,2000);
     // Coming back to the app should show the floor as it is now, not as it was
-    // when the screen went off.
-    const onVisible=()=>{if(document.visibilityState==="visible")arm(200)};
+    // when the screen went off. That includes what was *deleted* meanwhile: a
+    // phone in a pocket has had no socket, so every DELETE of the last while went
+    // past it, and a delta cannot see a row that is gone. So the sweep that greets
+    // the screen is a reconcile — a HEAD per table, nothing more unless a count
+    // disagrees.
+    const onVisible=()=>{if(document.visibilityState==="visible"){lastReconcileRef.current=0;arm(200)}};
     document.addEventListener("visibilitychange",onVisible);
 
     // Try Supabase Realtime WebSocket
@@ -12860,11 +12962,6 @@ function App(){
             const tbl=msg.payload?.data?.table||msg.payload?.table||msg.topic?.split(":")?.[2];
             if(!tbl)return;
             console.log("Realtime change:",tbl);
-            // Never apply while a local change is unsaved — the event may be ours
-            // (mid-save) or someone else's, and either way stale rows would undo the
-            // click. It must not be thrown away either: re-sweep in a moment, or the
-            // change waits for the next interval before anyone sees it.
-            if(remoteApplyBlocked()){pollSoon();return}
             const spec=MIRROR_BY_TABLE[tbl];
             if(!spec)return;
             // The changed row is *in the message*. Re-reading the whole table on every
@@ -12879,14 +12976,23 @@ function App(){
             const was=d.old_record||d.old||null;
             // Another company's row is not ours to hold, and not worth a sweep either.
             if(rec&&rec.company_id&&rec.company_id!==_companyId)return;
-            let applied=false;
             // A message carrying only an old row is a delete, whatever it calls
             // itself — the field naming the event type has moved twice between
             // realtime versions and is not worth depending on.
             const goneId=(kind==="DELETE"||(!rec&&was))?((was&&was.id)||(rec&&rec.id)):null;
-            if(goneId){
-              applyRowRef.current?.(spec.t,null,goneId);applied=true;
-            }else if(rec&&rec.id!=null&&rec.updated_at){
+            // A deletion is applied even while a local change is in flight. The
+            // re-sweep below is no substitute for it: a sweep asks what *moved*, and
+            // a deleted row does not move — it is simply not there — so a delete
+            // turned away here used to wait for the reconcile pass, minutes later.
+            // applyRow keeps a row this device is about to save; see there.
+            if(goneId){applyRowRef.current?.(spec.t,null,goneId);return}
+            // Anything else waits while a local change is unsaved — the event may be
+            // ours (mid-save) or someone else's, and either way stale rows would undo
+            // the click. It must not be thrown away either: re-sweep in a moment, or
+            // the change waits for the next interval before anyone sees it.
+            if(remoteApplyBlocked()){pollSoon();return}
+            let applied=false;
+            if(rec&&rec.id!=null&&rec.updated_at){
               // updated_at missing means a truncated payload (realtime caps a message)
               // or a server that does not send the column — either way, sweep instead
               // of applying half a row.
@@ -12900,6 +13006,11 @@ function App(){
         ws.onclose=()=>{
           console.log("Realtime WS closed");
           clearInterval(heartbeat);
+          // Whatever is deleted while the socket is down will never be announced
+          // again — the next sweep checks for it. Only a socket that was actually
+          // streaming has anything to catch up on; one that never subscribed (a
+          // network that blocks it) must not turn every sweep into a reconcile.
+          if(joined.size)lastReconcileRef.current=0;
           realtimeWorking=false;joined.clear();
           if(!dead)reconnectTimer=setTimeout(connect,5000);
         };
@@ -13042,6 +13153,14 @@ function App(){
     const slot=remoteSlots.find(s=>s[0]===spec.key);
     if(!slot)return false;
     const [,ref,setter,lsKey]=slot;
+    // A delete that lands while this device holds an unsaved change to that very
+    // row — an undo that has just put it back, say — loses to the change: the save
+    // about to go out re-creates it, exactly as it would have a moment later.
+    // Every other copy of the row is only what the server used to hold, and goes.
+    if(gone&&!row&&remoteApplyBlocked()){
+      const mineNow=(ref.current||[]).find(r=>r&&r.id===gone);
+      if(mineNow&&SYNC.pending(spec.t,[spec.toDb(mineNow)]).length)return false;
+    }
     const fresh=row?[spec.map(row)]:[];
     const next=mergeRows(ref.current,fresh,gone?new Set([gone]):null);
     if(next===ref.current)return false;
@@ -13084,6 +13203,16 @@ function App(){
     saveTimer=setTimeout(doSave,800);
   };
 
+  // A delete that does not land is otherwise silent, and it is the one failure no
+  // sweep can repair: this device has already dropped the rows, so it sees nothing
+  // missing, while every other device — the worker's included — keeps showing them.
+  // So it is retried a few times, and only for the ids this device still wants gone:
+  // an undo may have put one back in the meantime. `held` reads the live list.
+  const delSoon=(table,ids,held,left=3)=>SB.delIds(table,ids).catch(e=>{
+    const still=ids.filter(id=>!(held()||[]).some(r=>r&&r.id===id));
+    if(still.length&&left>0)setTimeout(()=>delSoon(table,still,held,left-1),4000*(4-left));
+    else console.warn(`[SB] ${table} delete`,e);
+  });
   // ── Undo applier ─────────────────────────────────────────────────────────
   // The journal knows *what* to put back; this is the only place that knows how.
   // Each collection is merged by id — restored rows overwrite, created rows are
@@ -13114,7 +13243,11 @@ function App(){
       const args=[null,null,null,null,null,null,null,null,null];
       setter(prev=>{const next=merge(prev);args[undoSlot[coll]]=next;persist(...args);return next});
     }
-    if((removeIds||[]).length)await SB.delIds(spec.table,removeIds).catch(e=>console.warn("undo delete",e));
+    const slot=remoteSlots.find(s=>s[0]===coll);
+    if((removeIds||[]).length){
+      if(slot)await delSoon(spec.table,removeIds,()=>slot[1].current);
+      else await SB.delIds(spec.table,removeIds).catch(e=>console.warn("undo delete",e));
+    }
   },[]);
   useEffect(()=>{UNDO.setApplier(undoApply)},[undoApply]);
 
@@ -13488,19 +13621,33 @@ function App(){
       e.days.size>1?`${e.name}, שובצו לך ${e.n} עבודות ב-${e.days.size} ימים`:`${e.name}, שובצו לך ${e.n} עבודות`,
       `plans_${uid2}`));
   };
-  const handleDeletePlan=(planId)=>{setDailyPlans(prev=>{
-    const victim=prev.find(p=>p.id===planId);
-    const next=prev.filter(p=>p.id!==planId);persist(null,null,null,null,null,null,null,next);
-    if(victim)UNDO.record({user:currentUser,action:"מחיקת תוכנית עבודה",target:victim.userName||"",
-      details:fmt(victim.date),changes:[{coll:"dailyPlans",before:[victim],after:[]}]});
-    return next});SB.del("daily_plans",{id:planId}).catch(()=>{})};
+  // One plan, or every open day of one assignment — see DailyPlanBoard's delete.
+  // One journal entry either way, so one ↩️ puts back exactly what one 🗑️ took.
+  const handleDeletePlan=(planIds)=>{
+    const ids=new Set((Array.isArray(planIds)?planIds:[planIds]).filter(Boolean));
+    if(!ids.size)return;
+    setDailyPlans(prev=>{
+      const victims=prev.filter(p=>ids.has(p.id));
+      const next=prev.filter(p=>!ids.has(p.id));persist(null,null,null,null,null,null,null,next);
+      if(victims.length){
+        const ds=[...new Set(victims.map(p=>p.date))].sort();
+        UNDO.record({user:currentUser,action:"מחיקת תוכנית עבודה",
+          target:[...new Set(victims.map(p=>p.userName).filter(Boolean))].join(", "),
+          details:ds.length>1?`${victims.length} שיבוצים · ${fmt(ds[0])} — ${fmt(ds[ds.length-1])}`:fmt(ds[0]),
+          changes:[{coll:"dailyPlans",before:victims,after:[]}]});
+      }
+      return next});
+    delSoon("daily_plans",[...ids],()=>plRef.current)};
   const handleTogglePlanDone=(planId)=>{setDailyPlans(prev=>{const next=prev.map(p=>p.id===planId?{...p,done:!p.done}:p);persist(null,null,null,null,null,null,null,next);return next})};
   // Auto sign-off: mark a plan done once all its units in the stage are completed.
   const handleMarkPlanDone=(planId)=>{setDailyPlans(prev=>{if(!prev.some(p=>p.id===planId&&!p.done))return prev;const next=prev.map(p=>p.id===planId?{...p,done:true,autoDone:true}:p);persist(null,null,null,null,null,null,null,next);return next})};
-  const handleDeleteLog=(ids)=>{setWorkLogs(prev=>{
+  // `action` names it in the audit trail — a worker taking back a start made by
+  // mistake is not the same entry as a manager deleting records.
+  // (It must not contain any of WORK_UNDO_ACTIONS — see MyWork's cancelStart.)
+  const handleDeleteLog=(ids,action)=>{setWorkLogs(prev=>{
     const victims=prev.filter(w=>ids.includes(w.id));
     const next=prev.filter(w=>!ids.includes(w.id));persist(null,null,null,next);
-    if(victims.length)UNDO.record({user:currentUser,action:"מחיקת רישומי עבודה",
+    if(victims.length)UNDO.record({user:currentUser,action:action||"מחיקת רישומי עבודה",
       target:victims.length===1?(victims[0].serialSn||victims[0].userName||""):`${victims.length} רישומים`,
       details:victims.length===1?(victims[0].userName||""):"",
       changes:[{coll:"workLogs",before:victims,after:[]}]});

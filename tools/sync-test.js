@@ -207,9 +207,22 @@ DB.work_logs.splice(10,1);
 DB.orders.splice(3,1);
 run("commitWatermarks")(after);
 const prev2={...prev,orders:after.orders,workLogs:after.workLogs,reconcile:false};
+// A plan the manager deleted, on the same pass. Plans are what a worker is
+// told to do, so they are watched on every sweep rather than every five minutes.
+DB.daily_plans.splice(0,1);
 resetStats();
 const missed=await run("dbLoadAll")(prev2);
 ok(missed.workLogs.length===75808,"a plain delta cannot see a deletion (expected)");
+ok(missed.dailyPlans.length===4&&!missed.dailyPlans.some(p=>p.id==="pl0"),
+   "…but a deleted שיבוץ is caught on a plain sweep, without waiting for the reconcile");
+// A second one straight after: the ten-minute throttle on the id read is for
+// work_logs' 2 MB, and must not hold a plan back.
+DB.daily_plans.splice(0,1);
+resetStats();
+const again=await run("dbLoadAll")({...prev2,dailyPlans:missed.dailyPlans});
+ok(again.dailyPlans.length===3,"and the next deletion a moment later is caught too (no throttle on a small table)");
+ok(stats.bytesOut<3000,`at the cost of a few ids (${kb(stats.bytesOut)})`);
+ok(again.workLogs===prev2.workLogs,"the big tables are still left alone between reconciles");
 resetStats();
 const rec=await run("dbLoadAll")({...prev2,reconcile:true});
 console.log(`  reconcile: ${stats.requests} requests, ${kb(stats.bytesOut)}`);
