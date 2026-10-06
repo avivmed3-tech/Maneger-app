@@ -12895,15 +12895,18 @@ function App(){
         }
       }catch{}
       setLoading(false);
-    }).catch(()=>{
+    }).catch(e=>{
       // Supabase unreachable — use local cache
       try{const saved=localStorage.getItem(LS_PREFIX+"session");if(saved){const s3=JSON.parse(saved);const found=getUsers().find(u=>u.id===s3.id&&u.username===s3.username&&u.active!==false);if(found)setCurrentUser(found)}}catch{}
-      setLoading(false);
-    }).catch(e=>{
       // Falling back to the local copy is right; doing it silently is not. Without
       // this the app looks like it is working and shows whatever it last managed to
       // download — which is how the same database ended up displaying two different
       // sets of numbers on two devices with nothing on screen to explain it.
+      //
+      // This used to sit in a second .catch after this one, which nothing ever
+      // reached: this handler swallowed every failure first. A device that had
+      // opened from its snapshot was left on the ⏳ that path puts up, with no word
+      // of why, until some later sweep happened to succeed.
       console.warn("Initial load failed",e);
       setDbDown(dbDownReason(e));
       setSync("error");
@@ -12925,10 +12928,10 @@ function App(){
   const RECONCILE_MS=5*60*1000;
   const lastReconcileRef=useRef(0);
   // Assigned below, once the collection refs exist: the collections as they stand,
-  // in the shape an incremental read merges into, and one row straight from a
-  // realtime message.
+  // in the shape an incremental read merges into, and a burst of rows straight
+  // from realtime messages.
   const mirrorPrevRef=useRef(null);
-  const applyRowRef=useRef(null);
+  const applyRowsRef=useRef(null);
   const pendingSaveRef=useRef(false); // local changes not yet confirmed saved to Supabase
   const saveRunningRef=useRef(false); // an upsert batch is currently in flight
   const doSaveRef=useRef(null);
@@ -12991,6 +12994,31 @@ function App(){
     let sweepSoon=false;
     const arm=ms=>{if(dead)return;clearTimeout(pollTimer);pollTimer=setTimeout(poll,ms)};
     const pollSoon=()=>{sweepSoon=true;arm(POLL_BLOCKED)};
+
+    // Rows off the socket wait here for a moment and go in together — see
+    // applyRows for what one message at a time cost. A later message about the same
+    // row replaces an earlier one, so a row saved and then deleted in one burst
+    // ends up deleted. The same rules hold as when each was applied on arrival:
+    // deletes always go, and anything else waits while a local change is unsaved,
+    // with a sweep in a moment to bring it.
+    const queued=new Map();let flushTimer=0;
+    const flushRows=()=>{
+      flushTimer=0;
+      if(dead)return;
+      const blocked=remoteApplyBlocked();
+      for(const [t,q] of queued){
+        applyRowsRef.current?.(t,blocked?[]:[...q.rows.values()],q.gone);
+        if(blocked&&q.rows.size)pollSoon();
+      }
+      queued.clear();
+    };
+    const queueRow=(t,row,goneId)=>{
+      let q=queued.get(t);
+      if(!q){q={rows:new Map(),gone:new Set()};queued.set(t,q)}
+      if(goneId!=null){q.rows.delete(goneId);q.gone.add(goneId)}
+      else{q.gone.delete(row.id);q.rows.set(row.id,row)}
+      if(!flushTimer)flushTimer=setTimeout(flushRows,150);
+    };
 
     // What the sweep asks for: everything that moved since the last watermark,
     // which on an idle floor is nothing at all. Every few minutes it also asks
@@ -13093,7 +13121,6 @@ function App(){
             // Determine which table changed
             const tbl=msg.payload?.data?.table||msg.payload?.table||msg.topic?.split(":")?.[2];
             if(!tbl)return;
-            console.log("Realtime change:",tbl);
             const spec=MIRROR_BY_TABLE[tbl];
             if(!spec)return;
             // The changed row is *in the message*. Re-reading the whole table on every
@@ -13116,8 +13143,8 @@ function App(){
             // re-sweep below is no substitute for it: a sweep asks what *moved*, and
             // a deleted row does not move — it is simply not there — so a delete
             // turned away here used to wait for the reconcile pass, minutes later.
-            // applyRow keeps a row this device is about to save; see there.
-            if(goneId){applyRowRef.current?.(spec.t,null,goneId);return}
+            // applyRows keeps a row this device is about to save; see there.
+            if(goneId){queueRow(spec.t,null,goneId);return}
             // Anything else waits while a local change is unsaved — the event may be
             // ours (mid-save) or someone else's, and either way stale rows would undo
             // the click. It must not be thrown away either: re-sweep in a moment, or
@@ -13128,7 +13155,7 @@ function App(){
               // updated_at missing means a truncated payload (realtime caps a message)
               // or a server that does not send the column — either way, sweep instead
               // of applying half a row.
-              applyRowRef.current?.(spec.t,rec,null);applied=true;
+              queueRow(spec.t,rec,null);applied=true;
             }
             // Anything this could not read is covered by the delta sweep, which asks
             // only for what moved and normally comes back empty.
@@ -13160,7 +13187,7 @@ function App(){
     };
     connect();
 
-    return()=>{dead=true;document.removeEventListener("visibilitychange",onVisible);clearInterval(heartbeat);clearTimeout(reconnectTimer);clearTimeout(pollTimer);try{ws?.close()}catch{}};
+    return()=>{dead=true;document.removeEventListener("visibilitychange",onVisible);clearInterval(heartbeat);clearTimeout(reconnectTimer);clearTimeout(pollTimer);clearTimeout(flushTimer);try{ws?.close()}catch{}};
   },[currentUser?.id]);
 
   const ctRef=useRef(customTasks);
@@ -13301,40 +13328,50 @@ function App(){
     return prev;
   };
   mirrorPrevRef.current=mirrorPrev;
-  // One row, straight off a realtime message — the same folding a sweep does, for
-  // a single row and without asking the server for anything. `gone` is an id that
-  // was deleted. Returns whether anything actually moved.
-  const applyRow=(table,row,gone)=>{
+  // Rows straight off the realtime socket — the same folding a sweep does, without
+  // asking the server for anything. `gone` is a set of ids that were deleted.
+  // Returns whether anything actually moved.
+  //
+  // It takes a burst, not a row. Applied one message at a time, each row cost a
+  // full merge of its collection, a render of the whole app and a re-serialised
+  // offline copy — nothing for a worker closing a stage, but a computer saving an
+  // import sends one message per פק"ע, and two thousand of them froze a phone for
+  // minutes: 67 seconds even on a fast machine, the screen stuck on ⏳ and showing
+  // none of them until the last one was through. The socket handler queues; this
+  // runs once per burst.
+  const applyRows=(table,rows,gone)=>{
     const spec=MIRROR_BY_TABLE[table];
     if(!spec)return false;
     const slot=remoteSlots.find(s=>s[0]===spec.key);
     if(!slot)return false;
     const [,ref,setter,lsKey]=slot;
+    let drop=gone&&gone.size?new Set(gone):null;
     // A delete that lands while this device holds an unsaved change to that very
     // row — an undo that has just put it back, say — loses to the change: the save
     // about to go out re-creates it, exactly as it would have a moment later.
     // Every other copy of the row is only what the server used to hold, and goes.
-    if(gone&&!row&&remoteApplyBlocked()){
-      const mineNow=(ref.current||[]).find(r=>r&&r.id===gone);
-      if(mineNow&&SYNC.pending(spec.t,[spec.toDb(mineNow)]).length)return false;
+    if(drop&&remoteApplyBlocked()){
+      const held=new Map((ref.current||[]).filter(r=>r&&drop.has(r.id)).map(r=>[r.id,r]));
+      for(const [id,mineNow] of held)if(SYNC.pending(spec.t,[spec.toDb(mineNow)]).length)drop.delete(id);
+      if(!drop.size)drop=null;
     }
-    const fresh=row?[spec.map(row)]:[];
-    const next=mergeRows(ref.current,fresh,gone?new Set([gone]):null);
+    const fresh=(rows||[]).map(r=>spec.map(r));
+    const next=mergeRows(ref.current,fresh,drop);
     if(next===ref.current)return false;
     ref.current=next;setter(next);cacheLS(lsKey,next);
-    // The row came from the server, so it is what the server holds — no need to
-    // send it back on the next save.
+    // The rows came from the server, so they are what the server holds — no need
+    // to send them back on the next save.
     //
     // The watermark is deliberately *not* moved here. A socket that dropped and
     // reconnected has missed everything in between, and a later row's timestamp
     // taken as the watermark would put those missed rows permanently behind it.
     // Only the sweep, which reads in updated_at order and cannot skip, moves it —
-    // and re-reading this one row next sweep costs a few hundred bytes.
+    // and re-reading these rows next sweep costs a few hundred bytes each.
     if(fresh.length)SYNC.prime(spec.t,fresh,spec.toDb);
-    if(gone)SYNC.forget(spec.t,[gone]);
+    if(drop)SYNC.forget(spec.t,[...drop]);
     return true;
   };
-  applyRowRef.current=applyRow;
+  applyRowsRef.current=applyRows;
   // pagehide is the one event a phone reliably fires when the app is backgrounded
   // or closed; visibilitychange covers the tab being switched away from.
   useEffect(()=>{

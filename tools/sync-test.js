@@ -521,6 +521,49 @@ const plansCell=hooks.cells.find(c=>Array.isArray(c.v)&&c.v.some(p=>p&&p.date&&p
 ok(!!plansCell&&!plansCell.v.some(p=>p.id==="pl_sent"),"the שיבוץ deleted elsewhere is gone from the phone");
 ok(!DB.daily_plans.some(p=>p.id==="pl_sent"),"…and was not sent back to the server");
 ok(DB.daily_plans.some(p=>p.id==="pl_unsent"),"while the one that never reached the server is sent now");
+
+console.log("\n── 10. a burst of realtime messages ───────────────────────");
+// When the computer finally saved the import, every phone that was open got one
+// realtime message per פק"ע. Each was applied on its own — a merge of the whole
+// collection, a render of the whole app and the offline copy written again — and
+// two thousand of them froze a phone for minutes, stuck on ⏳ and showing none
+// of them. The socket handler now queues and applies a burst in one pass.
+ctx.fetch_=writable;
+store[PFX+"session"]=JSON.stringify({id:"admin",username:"admin",companyId:CID});
+store[PFX+"users"]=JSON.stringify([{id:"admin",username:"admin",role:"admin",name:"מנהל",active:true,companyId:CID}]);
+const sockets=[];
+ctx.WebSocket=function(){this.send=()=>{};this.close=()=>{};sockets.push(this)};
+m=mountApp();
+const live=hooks.effects.find(f=>/realtime\/v1\/websocket/.test(String(f)));
+ok(!!live,"the realtime effect was found");
+const stop=live();
+const sock=sockets[sockets.length-1];
+ok(!!sock,"and it opened a socket");
+sock.onopen();
+for(const t of ["orders","work_logs"])
+  sock.onmessage({data:JSON.stringify({event:"phx_reply",topic:"realtime:public:"+t,payload:{status:"ok",response:{postgres_changes:[{table:t}]}}})});
+let ordersWrites=0;
+const realSet=localStorage.setItem;
+localStorage.setItem=(k,v)=>{if(k===PFX+"orders")ordersWrites++;return realSet(k,v)};
+const burst=imported.map(o=>({...orderToDb(o),updated_at:iso(5000000)}));
+const t0=Date.now();
+for(const rec of burst)
+  sock.onmessage({data:JSON.stringify({event:"postgres_changes",topic:"realtime:public:orders",
+    payload:{data:{type:"INSERT",table:"orders",schema:"public",record:rec}}})});
+await settle(60);
+localStorage.setItem=realSet;
+const shown=hooks.cells.find(c=>Array.isArray(c.v)&&c.v.some(o=>o&&o.id==="imp0"));
+ok(!!shown&&shown.v.length===1000,`all ${burst.length} rows from the burst are on screen (${shown?shown.v.length:0})`);
+ok(ordersWrites<=3,`applied in one pass, not one per message (${ordersWrites} writes of the offline copy for ${burst.length} messages, ${Date.now()-t0} ms)`);
+// A row saved and then deleted inside the same burst ends up deleted.
+sock.onmessage({data:JSON.stringify({event:"postgres_changes",topic:"realtime:public:orders",payload:{data:{type:"INSERT",table:"orders",record:{...burst[0],id:"flash",updated_at:iso(5000001)}}}})});
+sock.onmessage({data:JSON.stringify({event:"postgres_changes",topic:"realtime:public:orders",payload:{data:{type:"DELETE",table:"orders",old_record:{id:"flash"}}}})});
+sock.onmessage({data:JSON.stringify({event:"postgres_changes",topic:"realtime:public:orders",payload:{data:{type:"DELETE",table:"orders",old_record:{id:"imp5"}}}})});
+await settle(60);
+const settled=hooks.cells.find(c=>Array.isArray(c.v)&&c.v.some(o=>o&&o.id==="imp0"));
+ok(!settled.v.some(o=>o.id==="flash"),"a row added and deleted in one burst is not left behind");
+ok(!settled.v.some(o=>o.id==="imp5")&&settled.v.length===999,"and a plain delete in a burst still lands");
+if(typeof stop==="function")stop();
 ctx.fetch_=(url,opts)=>handle(url,opts);
 
 console.log(`\n${fails?"✗ "+fails+" failed":"✓ all assertions passed"}`);
