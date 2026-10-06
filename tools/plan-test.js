@@ -48,6 +48,7 @@ vm.runInContext([
   line("const woKey=","woKey"),
   slice("const uid=()=>","// ── Work-time estimation","the plan/date utilities"),
   slice("function orderRoute(order,stages){","// ── \"Has this unit finished this stage?\"","orderRoute"),
+  slice("function isoDay(","// ── DB row converters","isoDay"),
   slice("const xlNorm=s=>","function xlPickSheet(","the spreadsheet cell readers"),
   slice("const TPL_PLAN=","const PLAN_LVL=","the work-plan importer"),
   "module.exports={plansOfDay,planIsCarried,planLateDays,planPendingUnits,planHasWorkLeft,PLAN_CARRY_DAYS,PLAN_MAX_SPAN,buildPlanRows,daysHeb,isWeekend,xlRow};"
