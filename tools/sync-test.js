@@ -360,6 +360,169 @@ await settle();
 ok(m.loading.v===false,"and comes down when the read finally lands");
 ctx.fetch_=(url,opts)=>handle(url,opts);
 
+console.log("\n── 9. an import the database refused one row of ───────────");
+// What happened in production: a Priority file whose empty date cells came in as
+// the text "1900-01-00". Postgres refuses a date that does not exist, PostgREST
+// refuses the whole request over it, and the save re-sent the same batch every
+// four seconds for as long as the computer stayed open. The server ended up
+// holding no פק"ע at all — every phone showed zero — while the computer that
+// imported them showed all of them, and would have lost every one on its next
+// reload.
+const xlDate=run("xlDate"),orderToDb=run("orderToDb");
+ok(xlDate("1900-01-00")==="","the text Excel writes for an empty date is no date");
+ok(xlDate("00/01/1900")==="","…nor is the same day written the other way round");
+ok(xlDate("2026-02-31")===""&&xlDate("31/02/2026")==="","a day the month does not have is no date");
+ok(xlDate(0)===""&&xlDate(new Date(1899,11,30))==="","serial 0, as a number or as a Date, is no date");
+ok(xlDate("2026-03-15")==="2026-03-15"&&xlDate("15/03/2026")==="2026-03-15"&&xlDate(46096)==="2026-03-15",
+   "real dates still read, in every shape they arrive in");
+const stuck=orderToDb({id:"x",woNumber:"W",receivedDate:"1900-01-00",targetDate:"2026-02-30"});
+ok(stuck.received_date===null&&stuck.target_date===null,
+   "a row already holding an impossible day is sent with no date rather than refused");
+ok(orderToDb({id:"x",woNumber:"W",receivedDate:"2026-03-15",targetDate:"2026-04-01T00:00:00Z"}).target_date==="2026-04-01",
+   "a real one goes out as the day it is");
+
+// A fake PostgREST that writes, and refuses what Postgres would refuse.
+const posts={n:0};
+const refuseIf={orders:r=>r.wo_number==="WO-DUP"?{code:"23505",message:"duplicate key value violates unique constraint"}:
+  [r.received_date,r.target_date].some(d=>d!=null&&!/^\d{4}-\d{2}-\d{2}$/.test(d)||/-00$/.test(d||""))?
+    {code:"22008",message:`date/time field value out of range: "${r.received_date}"`}:null};
+let down=false;
+const writable=(url,opts)=>{
+  if(!opts||opts.method!=="POST")return handle(url,opts);
+  posts.n++;(posts.tables||(posts.tables=[])).push(new URL(url).pathname.split("/rest/v1/")[1]);
+  const table=new URL(url).pathname.split("/rest/v1/")[1];
+  if(down)return{ok:false,status:503,text:async()=>"upstream connect error"};
+  const rows=JSON.parse(opts.body);
+  const bad=rows.map(r=>refuseIf[table]&&refuseIf[table](r)).find(Boolean);
+  if(bad)return{ok:false,status:bad.code==="23505"?409:400,text:async()=>JSON.stringify({...bad,details:null,hint:null})};
+  const t=DB[table]||(DB[table]=[]);
+  const at=new Date().toISOString();
+  for(const r of rows){
+    const i=t.findIndex(x=>x.id===r.id);
+    const row={...(i>=0?t[i]:{created_at:at}),...r,updated_at:at};
+    if(i>=0)t[i]=row;else t.push(row);
+  }
+  return{ok:true,status:201,text:async()=>""};
+};
+ctx.fetch_=writable;
+
+// One refused row in a batch of two hundred, in an import of a thousand.
+run("SYNC.reset()");
+DB.orders=[];
+const imported=Array.from({length:1000},(_,i)=>({id:"imp"+i,woNumber:i===437?"WO-DUP":"WO-I"+i,pn:"PN",qty:1,
+  receivedDate:"2026-03-01",targetDate:"2026-04-01",stageIds:[],serials:[]}));
+const told=[];
+run("(f=>{SB_REFUSED=f})")((table,list)=>told.push(...list.map(x=>x.row.wo_number)));
+posts.n=0;
+let threw=null;
+try{await run("SB.upsertChanged")("orders",imported.map(orderToDb))}catch(e){threw=e}
+ok(!threw,"the save completes — one refused row no longer fails it");
+ok(DB.orders.length===999,`every other פק"ע reached the server (${DB.orders.length} of 999)`);
+ok(told.length===1&&told[0]==="WO-DUP","and the one that did not is named, so a person can fix it");
+// Five batches, plus two requests per halving of the one that held it.
+ok(posts.n<=25,`finding it took ${posts.n} requests, not a re-send every four seconds`);
+posts.n=0;
+await run("SB.upsertChanged")("orders",imported.map(orderToDb));
+ok(posts.n===0,"the next save does not offer the refused row again while it is unchanged");
+await run("SB.upsertChanged")("orders",[{...imported[437],woNumber:"WO-I437"}].map(orderToDb));
+ok(DB.orders.length===1000,"once it is fixed, it goes out and lands");
+// A refusal about the request rather than a row is still a failed save, retried whole.
+down=true;threw=null;
+try{await run("SB.upsertChanged")("orders",[{...imported[1],qty:2}].map(orderToDb))}catch(e){threw=e}
+ok(!!threw,"a server that is down still fails the save, so it is retried");
+down=false;
+run("(f=>{SB_REFUSED=f})")(null);
+
+// ── the reload that used to lose the import ───────────────────────────────
+// The computer is holding the import in its snapshot: the פק"ע carry no
+// companyId, because they were made here and never read back, and one of them
+// still has the date that was refused. The server holds none of them.
+//
+// Two roads lead back from a reload. In production the server *had* held the
+// previous פק"ע until the import replaced them, so the snapshot carries a
+// watermark for orders, the read is a delta, and it is the deletion check that
+// finds a thousand rows missing from the server. Without a watermark the read is
+// a full one, which used to replace the table outright. Both used to lose the
+// import; both are run.
+const oldOrders=Array.from({length:50},(_,i)=>({id:"old"+i,wo_number:"OLD"+i,company_id:CID,created_at:iso(i),updated_at:iso(i)}));
+const ordersCell=()=>hooks.cells.find(c=>Array.isArray(c.v)&&c.v.some(o=>o&&o.id==="imp0"));
+for(const road of ["delta","full"]){
+  DB.orders=road==="delta"?oldOrders.slice():[];
+  parked.clear();
+  run("resetWatermarks()");run("SYNC.reset()");
+  const seen=await run("dbLoadAll()");
+  run("commitWatermarks")(seen);
+  // The "replace" import: the old פק"ע are deleted on the server, the new ones
+  // never arrive.
+  DB.orders=[];
+  const held={};for(const k of ["orders","projects","stages","stageBlocks","workLogs","customTasks","departments","dailyPlans","pnStandards"])held[k]=seen[k];
+  held.orders=imported.map((o,i)=>i===3?{...o,receivedDate:"1900-01-00"}:i===437?{...o,woNumber:"WO-I437"}:o);
+  await run("snapshotSave")(CID,held);
+  ok(road==="delta"?!!run("WATERMARKS.orders"):!run("WATERMARKS.orders"),`${road}: the snapshot ${road==="delta"?"has":"has no"} orders watermark`);
+  run("resetWatermarks()");run("SYNC.reset()");
+  // Section 4 paid for an id sweep of orders moments ago, and its ten-minute
+  // throttle would skip the very check this road is about.
+  run("for(const k in LAST_ID_SWEEP)delete LAST_ID_SWEEP[k]");
+  store[PFX+"session_company"]=JSON.stringify(CID);
+  posts.n=0;
+  m=mountApp();
+  m.boot();
+  await settle(30);
+  ok(!!ordersCell()&&ordersCell().v.length===1000,
+     `${road}: after the reload the computer still holds all 1000 imported פק"ע (${ordersCell()?ordersCell().v.length:0})`);
+  fireParked();
+  await settle(60);
+  ok(DB.orders.length===1000,`${road}: and sends them — the server now holds ${DB.orders.length} of 1000`);
+  ok((DB.orders.find(r=>r.id==="imp3")||{}).received_date===null,`${road}: the one with the impossible day went with no date`);
+  ok(DB.orders.every(r=>r.company_id===CID),`${road}: under the company it was imported into`);
+  // app_users is not in this fake database, so the boot seeds the demo team —
+  // that is the boot's own business and not part of the question here.
+  const sent=posts.tables.slice(-posts.n).filter(t=>t!=="app_users"&&t!=="departments");
+  ok(sent.length===5&&sent.every(t=>t==="orders"),
+     `${road}: only the missing פק"ע were sent, nothing the server already held (${sent.join(",")||"nothing"})`);
+}
+
+// ── …without bringing back what was deleted elsewhere ──────────────────────
+// The rule above — no companyId means "never saved" — has one way to go wrong: a
+// row that *was* saved, on a phone put away before it read the row back, and then
+// deleted from another device. Sent again on the next open, it would come back to
+// life. So the snapshot stamps every row the server has accepted.
+run("SYNC.reset()");
+const planToDb=run("planToDb");
+const mk=(id,extra)=>({id,userId:"u1",userName:"א",date:"2026-01-01",orderId:"o1",stageId:"s1",targetQty:1,...extra});
+const sentPlan=mk("pl_sent"),unsentPlan=mk("pl_unsent"),readPlan=mk("pl_read",{companyId:CID});
+run("SYNC.mark")("daily_plans",[planToDb(sentPlan)]);
+const stamped=run("stampSent")("daily_plans",[sentPlan,unsentPlan,readPlan],CID);
+ok(stamped[0].companyId===CID,"a row the server accepted is stored as the server's");
+ok(!stamped[1].companyId,"one it never accepted is stored as unsaved");
+ok(stamped[2]===readPlan,"one read from the server is stored untouched");
+ok(!sentPlan.companyId,"and the row in the app's state is not changed");
+const plain=[unsentPlan,readPlan];
+ok(run("stampSent")("daily_plans",plain,CID)===plain,"nothing to stamp → the same array, nothing copied");
+
+// The phone opens again. The office deleted the שיבוץ meanwhile.
+DB.orders=imported.map(o=>({...orderToDb(o),created_at:iso(1),updated_at:iso(1)}));
+DB.daily_plans=DB.daily_plans.filter(p=>p.id!=="pl_sent");
+parked.clear();
+run("resetWatermarks()");run("SYNC.reset()");
+const seen2=await run("dbLoadAll()");
+run("commitWatermarks")(seen2);
+const held2={};for(const k of ["orders","projects","stages","stageBlocks","workLogs","customTasks","departments","dailyPlans","pnStandards"])held2[k]=seen2[k];
+held2.dailyPlans=[...seen2.dailyPlans,...stamped.slice(0,2)];
+await run("snapshotSave")(CID,held2);
+run("resetWatermarks()");run("SYNC.reset()");
+posts.n=0;posts.tables=[];
+m=mountApp();
+m.boot();
+await settle(30);
+fireParked();
+await settle(60);
+const plansCell=hooks.cells.find(c=>Array.isArray(c.v)&&c.v.some(p=>p&&p.date&&p.userId&&"targetQty" in p));
+ok(!!plansCell&&!plansCell.v.some(p=>p.id==="pl_sent"),"the שיבוץ deleted elsewhere is gone from the phone");
+ok(!DB.daily_plans.some(p=>p.id==="pl_sent"),"…and was not sent back to the server");
+ok(DB.daily_plans.some(p=>p.id==="pl_unsent"),"while the one that never reached the server is sent now");
+ctx.fetch_=(url,opts)=>handle(url,opts);
+
 console.log(`\n${fails?"✗ "+fails+" failed":"✓ all assertions passed"}`);
 process.exit(fails?1:0);
 })().catch(e=>{console.error("harness error:",e);process.exit(1)});

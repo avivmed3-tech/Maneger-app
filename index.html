@@ -393,16 +393,27 @@ const rowCid=x=>(x&&x.companyId)||_companyId;
 // every conversion, and including it would mark every row as changed forever.
 const SYNC=(()=>{
   const seen=new Map();
-  const of=t=>{let m=seen.get(t);if(!m){m=new Map();seen.set(t,m)}return m};
+  // Rows the database refused on their own merits — see SB.upsert. Kept apart from
+  // `seen`, because the server does not hold them: they are simply not offered again
+  // until they change, which is the only thing that could make them acceptable.
+  const refused=new Map();
+  const of=(t,store=seen)=>{let m=store.get(t);if(!m){m=new Map();store.set(t,m)}return m};
   const fp=r=>{const{updated_at,...rest}=r||{};return JSON.stringify(rest)};
   return{
-    pending(table,rows){const m=of(table);return (rows||[]).filter(r=>r&&m.get(r.id)!==fp(r))},
-    mark(table,rows){const m=of(table);(rows||[]).forEach(r=>{if(r&&r.id!=null)m.set(r.id,fp(r))})},
+    pending(table,rows){
+      const m=of(table),bad=of(table,refused);
+      return (rows||[]).filter(r=>{if(!r)return false;const f=fp(r);return m.get(r.id)!==f&&bad.get(r.id)!==f});
+    },
+    mark(table,rows){const m=of(table),bad=of(table,refused);(rows||[]).forEach(r=>{if(r&&r.id!=null){m.set(r.id,fp(r));bad.delete(r.id)}})},
+    refuse(table,rows){const bad=of(table,refused);(rows||[]).forEach(r=>{if(r&&r.id!=null)bad.set(r.id,fp(r))})},
+    // Whether this device has ever seen the row on the server or had it accepted
+    // there. A row it has not cannot have been deleted from the server either.
+    known(table,id){return of(table).has(id)},
     // A deleted row must be re-sent if it ever comes back, so drop what we knew.
-    forget(table,ids){const m=of(table);(ids||[]).forEach(id=>m.delete(id))},
+    forget(table,ids){const m=of(table),bad=of(table,refused);(ids||[]).forEach(id=>{m.delete(id);bad.delete(id)})},
     // Rows just read from the server *are* the server's state.
     prime(table,appRows,toDb){this.mark(table,(appRows||[]).map(toDb))},
-    reset(){seen.clear()}
+    reset(){seen.clear();refused.clear()}
   };
 })();
 // ── "Did this sweep actually bring anything new?" ─────────────────────────
@@ -512,6 +523,43 @@ async function sbGetAllSeq(table,params,cap,firstRows,size){
   }
   return out;
 }
+// One upsert request. Returns null once the server has taken the rows, and the
+// error text when it has not. Each retry only ever *narrows* what is sent — one
+// more column the database turns out not to have — so a real failure still
+// surfaces on the first try.
+async function sbPost(table,batch){
+  for(let attempt=0;;attempt++){
+    const send=sbStrip(table,batch);
+    const r=await fetch(`${SB_URL}/rest/v1/${table}`,{method:"POST",headers:{...sbHeaders(),"Prefer":"resolution=merge-duplicates,return=minimal"},body:JSON.stringify(send)});
+    // The caller remembers the *full* row as sent, not the narrowed one: marking
+    // the narrowed row would make it differ from the app's row on every later
+    // save, and the same rejected column would go out forever.
+    if(r.ok)return null;
+    const text=await r.text();
+    const col=sbMissingCol(text);
+    if(col&&attempt<6&&send.some(x=>x&&Object.prototype.hasOwnProperty.call(x,col))){
+      (SB_MISSING[table]||(SB_MISSING[table]=new Set())).add(col);
+      console.warn(`[SB] ${table}.${col} — העמודה עדיין לא קיימת במסד; נשמר בלעדיה`);
+      continue;
+    }
+    return text||`HTTP ${r.status}`;
+  }
+}
+// ── A refusal that is about one row, not about the request ────────────────
+// Postgres files these under two classes: 22 is a value the column cannot hold
+// ("1900-01-00" in a date column, text in a number), 23 a row that breaks a rule
+// (a duplicate key, a missing required field). Either way the other rows in the
+// batch are fine, and only the database knows which one it was — so the batch is
+// split until the row is found. Anything else (no network, no permission, a
+// timeout) is about the request and is retried whole, exactly as before.
+const sbRowErr=text=>{
+  let code="";
+  try{code=String(JSON.parse(text).code||"")}catch{}
+  return /^2[23]/.test(code);
+};
+// What the app does with rows the database refused one by one. App() sets it to
+// tell the person who can fix them; until then they are only logged.
+let SB_REFUSED=null;
 const SB={
   async get(table,params=""){
     const r=await fetch(`${SB_URL}/rest/v1/${table}?${params}`,{headers:{...sbHeaders(),"Range":"0-9999"}});
@@ -592,36 +640,37 @@ const SB={
   // once, and one request that size is refused long before the data is at fault.
   // A batch is recorded as sent only once the server has taken it, so a failure
   // leaves it pending and the next save retries it.
-  async upsert(table,data){
+  //
+  // `isolate` is for the background save, where nobody is waiting on an answer.
+  // There, a batch the database refuses because of what is *in* a row — see
+  // sbRowErr — is split until the row is found, everything else lands, and the
+  // row is handed to SB_REFUSED instead of failing the save. Without it one bad
+  // row stopped the whole table: the batch it sat in was re-sent every four
+  // seconds forever, and every row in and after that batch stayed on one device.
+  // Elsewhere the error is still thrown, because there a person is looking at the
+  // result — "שם משתמש כבר תפוס" has to reach the form that caused it.
+  async upsert(table,data,{isolate=false}={}){
     const arr=Array.isArray(data)?data:[data];
     if(arr.length===0)return; // Skip empty upserts
-    for(let i=0;i<arr.length;i+=SB_CHUNK){
-      const batch=arr.slice(i,i+SB_CHUNK);
-      // Each retry only ever *narrows* what is sent — one more column the database
-      // turns out not to have — so a real failure still surfaces on the first try.
-      for(let attempt=0;;attempt++){
-        const send=sbStrip(table,batch);
-        const r=await fetch(`${SB_URL}/rest/v1/${table}`,{method:"POST",headers:{...sbHeaders(),"Prefer":"resolution=merge-duplicates,return=minimal"},body:JSON.stringify(send)});
-        if(r.ok){
-          // The *full* row is what gets remembered as sent, not the narrowed one:
-          // marking the narrowed row would make it differ from the app's row on
-          // every later save, and the same rejected column would go out forever.
-          SYNC.mark(table,batch);break;
-        }
-        const text=await r.text();
-        const col=sbMissingCol(text);
-        if(col&&attempt<6&&send.some(x=>x&&Object.prototype.hasOwnProperty.call(x,col))){
-          (SB_MISSING[table]||(SB_MISSING[table]=new Set())).add(col);
-          console.warn(`[SB] ${table}.${col} — העמודה עדיין לא קיימת במסד; נשמר בלעדיה`);
-          continue;
-        }
-        throw new Error(text);
-      }
+    const refused=[];
+    const send=async batch=>{
+      const text=await sbPost(table,batch);
+      if(text==null){SYNC.mark(table,batch);return}
+      if(!isolate||!sbRowErr(text))throw new Error(text);
+      if(batch.length===1){SYNC.refuse(table,batch);refused.push({row:batch[0],text});return}
+      const mid=Math.ceil(batch.length/2);
+      await send(batch.slice(0,mid));
+      await send(batch.slice(mid));
+    };
+    for(let i=0;i<arr.length;i+=SB_CHUNK)await send(arr.slice(i,i+SB_CHUNK));
+    if(refused.length){
+      console.warn(`[SB] ${table} — ${refused.length} שורות נדחו`,refused.map(x=>({id:x.row.id,error:x.text})));
+      if(SB_REFUSED)SB_REFUSED(table,refused);
     }
   },
   // Sends only the rows that differ from what the server is known to hold. This is
   // what keeps a save proportional to the edit rather than to the database.
-  async upsertChanged(table,rows){return SB.upsert(table,SYNC.pending(table,rows))},
+  async upsertChanged(table,rows){return SB.upsert(table,SYNC.pending(table,rows),{isolate:true})},
   // Deletes by id in batches — used when an import replaces the whole order list.
   async delIds(table,ids){
     const list=[...new Set((ids||[]).filter(Boolean))];
@@ -809,6 +858,26 @@ const branchScopeLabel=(user,departments)=>{
   return [codes.length?codes.map(branchLabel).join(" · "):"",sc.none?"ללא סניף":""].filter(Boolean).join(" · ");
 };
 
+// ── A day the database will take ───────────────────────────────────────────
+// received_date and target_date are `date` columns, and Postgres refuses a
+// request outright over one value that is not a real day. "1900-01-00" is the
+// one that did it: Excel's way of writing an empty date (serial 0, the day
+// before the 1st of January 1900). It looks like a date, so the import kept it,
+// and every פק"ע of a Priority import stayed on the one computer that imported
+// it — the server held none of them, and every phone showed zero.
+//
+// So a date column only ever gets a real YYYY-MM-DD or nothing. Every writer in
+// the app produces that shape; anything else is what an empty or broken cell
+// left behind, and "no date" is what it meant.
+function isoDay(v){
+  const m=/^(\d{4})-(\d{2})-(\d{2})/.exec(String(v==null?"":v).trim());
+  if(!m)return "";
+  const y=Number(m[1]),mo=Number(m[2]),d=Number(m[3]);
+  const leap=(y%4===0&&y%100!==0)||y%400===0;
+  const days=[31,leap?29:28,31,30,31,30,31,31,30,31,30,31][mo-1];
+  return(y>=1&&days&&d>=1&&d<=days)?`${m[1]}-${m[2]}-${m[3]}`:"";
+}
+
 // ── DB row converters (DB → App format) ────────────────────────────────────
 const dbToUser=r=>({id:r.id,username:r.username,password_hash:r.password_hash,passwordPlain:r.password_plain||"",role:r.role,name:r.name,
   projectAccess:r.project_access,stageAccess:r.stage_access,
@@ -836,7 +905,7 @@ const dbToOrder=r=>({id:r.id,woNumber:r.wo_number,pn:r.pn,description:r.descript
 const orderToDb=o=>({id:o.id,wo_number:o.woNumber,pn:o.pn||null,description:o.description||null,
   qty:Number(o.qty)||0,unit_price:Number(o.unitPrice)||0,project_id:o.projectId||null,
   branch:branchCode(o.branch)||null,
-  received_date:o.receivedDate||null,target_date:o.targetDate||null,stage_ids:o.stageIds||[],
+  received_date:isoDay(o.receivedDate)||null,target_date:isoDay(o.targetDate)||null,stage_ids:o.stageIds||[],
   block_id:o.blockId||null,serials:o.serials||[],shortages:o.shortages||[],
   defects:o.defects||[],delivered_serials:o.deliveredSerials||[],status:o.status||"open",
   erp_status:o.erpStatus||null,erp_note:o.erpNote||null,
@@ -1036,7 +1105,11 @@ async function dbGoneIds(spec,cfNoAmp,rows){
   LAST_ID_SWEEP[spec.t]=now;
   const live=new Set((await SB.getAll(spec.t,`select=id&${cfNoAmp}&${spec.order}`)).map(r=>r.id));
   const gone=new Set();
-  for(const r of rows)if(!live.has(r.id))gone.add(r.id);
+  // Missing from the server is not the same as deleted from it. A row this device
+  // has never seen there nor had accepted — one it is still trying to save, or
+  // one the database refused — was never on the server at all, and dropping it
+  // here would lose the only copy there is.
+  for(const r of rows)if(!live.has(r.id)&&SYNC.known(spec.t,r.id))gone.add(r.id);
   return gone.size?gone:null;
 }
 
@@ -1061,6 +1134,15 @@ async function dbLoadAll(prev){
     const wm=maxUpdatedAt(read.rows);
     if(wm)watermarks[spec.t]=wm;
     let rows=read.delta?mergeRows(prev&&prev[spec.key],fresh,null):fresh;
+    // A full read is the server's whole table, but not this device's: a row made
+    // here that the server has not accepted yet is not in it, and taking the read
+    // as the whole truth would drop it — the same loss the deletion check below
+    // guards against, by the other road.
+    if(!read.delta&&prev&&Array.isArray(prev[spec.key])){
+      const there=new Set(fresh.map(r=>r.id));
+      const unsent=prev[spec.key].filter(r=>r&&!there.has(r.id)&&!SYNC.known(spec.t,r.id));
+      if(unsent.length)rows=[...fresh,...unsent];
+    }
     if(read.delta&&prev&&(prev.reconcile||spec.watchGone)){
       let gone=null;
       try{gone=await dbGoneIds(spec,cfNoAmp,rows)}
@@ -1809,6 +1891,16 @@ async function snapshotLoad(cid){
     if(!any)return null;
     return{rows,at:Number(s.at)||0,watermarks};
   }catch(e){console.warn("[IDB] snapshot load",e);return null}
+}
+// A row made on this device carries no companyId until it is read back from the
+// server, and the next boot takes such a row to be unsaved and sends it again —
+// see the priming in App's boot. One the server has already accepted is stamped
+// here, in the copy that is stored and never in state: a שיבוץ saved on a phone
+// that went into a pocket before reading it back, and deleted from the office
+// meanwhile, must not be sent back to life the next time the phone opens.
+function stampSent(t,list,cid){
+  if(!Array.isArray(list)||!list.some(r=>r&&!r.companyId&&SYNC.known(t,r.id)))return list;
+  return list.map(r=>(r&&!r.companyId&&SYNC.known(t,r.id))?{...r,companyId:cid}:r);
 }
 async function snapshotSave(cid,rows){
   try{
@@ -9527,22 +9619,30 @@ function xlNum(v){
   return neg?-n:n;
 }
 const xlBool=v=>/^(כן|נמסר|התקבל|בוצע|yes|y|true|1|v|✓)$/i.test(String(v==null?"":v).trim());
+// Every answer xlDate gives passes through here: a real calendar day after 1900,
+// or nothing. The text branches used to hand back whatever digits they matched,
+// and an empty date cell that Excel had already formatted arrives as the text
+// "1900-01-00" (or "00/01/1900") — serial 0, a day that does not exist. That
+// went straight into received_date / target_date, and the database refused the
+// whole save over it. Nothing before 1901 is a date anyone typed, which is the
+// rule the Date branch below already applied.
+const xlDay=s=>{const d=isoDay(s);return d>"1901"?d:""};
 function xlDate(v){
   if(v==null||v==="")return"";
   // An empty date cell in an ERP export often arrives as a time-only value,
   // which is Excel serial 0 — the last day of 1899, not a real date.
-  if(isDate(v))return(!isNaN(v.getTime())&&v.getFullYear()>1900)?isoOf(v):"";
+  if(isDate(v))return isNaN(v.getTime())?"":xlDay(isoOf(v));
   // Priority writes "no date" as a plain 0, and a bare "0" would otherwise be
   // parsed by Date() as the year 2000 — anything non-positive is simply empty.
-  if(typeof v==="number")return(isFinite(v)&&v>0)?new Date(Date.UTC(1899,11,30)+Math.round(v)*864e5).toISOString().slice(0,10):"";
+  if(typeof v==="number")return(isFinite(v)&&v>0)?xlDay(new Date(Date.UTC(1899,11,30)+Math.round(v)*864e5).toISOString()):"";
   const s=String(v).trim();
   // A date column that arrived as text still holds an Excel serial (roughly 1900-2064)
-  if(/^-?\d+(\.\d+)?$/.test(s)){const n=Number(s);return(n>0&&n<60000)?new Date(Date.UTC(1899,11,30)+Math.round(n)*864e5).toISOString().slice(0,10):""}
+  if(/^-?\d+(\.\d+)?$/.test(s)){const n=Number(s);return(n>0&&n<60000)?xlDay(new Date(Date.UTC(1899,11,30)+Math.round(n)*864e5).toISOString()):""}
   let m=s.match(/^(\d{4})[-/.](\d{1,2})[-/.](\d{1,2})/);
-  if(m)return`${m[1]}-${String(m[2]).padStart(2,"0")}-${String(m[3]).padStart(2,"0")}`;
+  if(m)return xlDay(`${m[1]}-${String(m[2]).padStart(2,"0")}-${String(m[3]).padStart(2,"0")}`);
   m=s.match(/^(\d{1,2})[-/.](\d{1,2})[-/.](\d{2,4})/);
-  if(m){let y=Number(m[3]);if(y<100)y+=2000;return`${y}-${String(m[2]).padStart(2,"0")}-${String(m[1]).padStart(2,"0")}`}
-  const d=new Date(s);return isNaN(d)?"":isoOf(d);
+  if(m){let y=Number(m[3]);if(y<100)y+=2000;return xlDay(`${y}-${String(m[2]).padStart(2,"0")}-${String(m[1]).padStart(2,"0")}`)}
+  const d=new Date(s);return isNaN(d)?"":xlDay(isoOf(d));
 }
 function xlPickSheet(wb,names){
   const map=new Map(wb.SheetNames.map(n=>[xlNorm(n),n]));
@@ -12605,6 +12705,7 @@ function App(){
     // into a delta: on a tablet that was open yesterday that is a few dozen rows
     // instead of 75,807. With no snapshot this is exactly what it always was —
     // one full read of everything.
+    let unsentAtBoot=false;
     const bootLoad=async()=>{
       let prev;
       if(sessionCid===_companyId){
@@ -12620,7 +12721,19 @@ function App(){
             // Primed as "what the server holds": these rows came from it, and the
             // first save after a load must send the one row that changed, not the
             // whole database back again.
-            SYNC.prime(spec.t,rows,spec.toDb);
+            //
+            // But only the rows that did come from it. A row read from the server
+            // always carries companyId — every dbTo* sets it — while one made on
+            // this device (an import, a new פק"ע) has none until it has been saved
+            // and read back. Priming those too declared them saved when the save
+            // may never have landed, and the reconcile below then found them
+            // missing from the server and deleted them: an import whose save had
+            // failed vanished from the one device still holding it on the next
+            // reload, with nothing on screen to say so. Left unprimed, they are
+            // simply sent again — an upsert, so a row that did land is unharmed.
+            const fromServer=rows.filter(r=>r&&r.companyId);
+            if(fromServer.length<rows.length)unsentAtBoot=true;
+            SYNC.prime(spec.t,fromServer,spec.toDb);
           }
           // A watermark is only usable next to the rows it was taken with, which is
           // why both live in the same snapshot record.
@@ -12705,6 +12818,14 @@ function App(){
         // Clears the ⏳ the snapshot path put up: what is on screen is now what the
         // server holds, not yesterday's copy of it.
         setSync("ok");
+        // Rows the snapshot holds that the server was never seen to accept — see
+        // the priming above. Nothing else would send them: no click has happened,
+        // so no save is coming. The rows that did land were just read back by the
+        // load and primed there, so normally this sends only the missing ones.
+        if(unsentAtBoot){
+          pendingSaveRef.current=true;setSync("saving");
+          clearTimeout(saveTimer);saveTimer=setTimeout(()=>doSaveRef.current?.(),1500);
+        }
       }
       if(users?.length){publishUsers(users)}
 
@@ -12750,6 +12871,9 @@ function App(){
               // up for the re-read rather than leave another company's floor on
               // screen. It comes down again at the end of this handler.
               setLoading(true);
+              // The unsent rows the snapshot held are the old company's. Sent now,
+              // rowCid would stamp them with the new one.
+              clearTimeout(saveTimer);pendingSaveRef.current=false;
               setCompanyId(realCid);
               try{localStorage.setItem(LS_PREFIX+"session",JSON.stringify({id:found.id,username:found.username,companyId:realCid}))}catch{}
               SYNC.reset();
@@ -12840,6 +12964,8 @@ function App(){
     let dead=false;
     let pollTimer=null;
     let ws=null;let heartbeat=null;let reconnectTimer=null;
+    // Sockets in a row that closed before a single table was confirmed — see onclose.
+    let wsFails=0;
     let realtimeWorking=false;
     // Which tables the server has actually confirmed a postgres_changes subscription
     // for. An open socket proves nothing — if the table is missing from the
@@ -12932,7 +13058,13 @@ function App(){
           heartbeat=setInterval(()=>{try{ws.send(JSON.stringify({topic:"phoenix",event:"heartbeat",payload:{},ref:"hb"}))}catch{}},25000);
           // realtimeWorking stays false until the joins are confirmed below —
           // until then the poll is the update path and must keep its fast cadence.
-          setSync("ok");
+          //
+          // This used to set the header to "בזמן אמת" as well, and an open socket
+          // says nothing about whether the data is saved. On a network that cuts
+          // the socket a second after it opens it reopened every six seconds, so a
+          // computer whose save was being refused flipped between "בזמן אמת" and
+          // ❌ all day. The header now changes only on what a save or a sweep
+          // actually found.
         };
         ws.onmessage=async(e)=>{
           try{
@@ -13011,8 +13143,17 @@ function App(){
           // streaming has anything to catch up on; one that never subscribed (a
           // network that blocks it) must not turn every sweep into a reconcile.
           if(joined.size)lastReconcileRef.current=0;
+          // A socket that never got as far as one confirmed table is not a blip but
+          // a network that will not carry it — a factory firewall that lets the
+          // upgrade through and drops the connection right after. Retrying every
+          // five seconds made that some five hundred connections an hour, so
+          // each such failure doubles the wait, up to five minutes. The poll keeps
+          // the screen current meanwhile; it is already on its fast cadence,
+          // because realtimeWorking never became true. A socket that did stream
+          // and then dropped is a blip, and comes straight back.
+          wsFails=joined.size?0:wsFails+1;
           realtimeWorking=false;joined.clear();
-          if(!dead)reconnectTimer=setTimeout(connect,5000);
+          if(!dead)reconnectTimer=setTimeout(connect,Math.min(5000*2**Math.max(0,wsFails-1),5*60*1000));
         };
         ws.onerror=()=>{realtimeWorking=false;ws.close()};
       }catch(err){console.warn("WS connect error",err);realtimeWorking=false}
@@ -13033,6 +13174,19 @@ function App(){
   const psRef=useRef(pnStandards);
   useEffect(()=>{psRef.current=pnStandards},[pnStandards]);
 
+  // Rows the database refused on their own — see SB.upsert. The rest of that
+  // table's save has landed by the time this runs; these stay on this device
+  // only, and only a person can fix what is in them, so they are named, once,
+  // with the reason. They are not offered again until they change.
+  useEffect(()=>{
+    const WHAT={orders:'פק"ע',work_logs:"רישומי עבודה",daily_plans:"שיבוצים",custom_tasks:"משימות"};
+    SB_REFUSED=(table,list)=>{
+      const names=list.map(x=>x.row.wo_number||x.row.name||x.row.id);
+      const shown=names.slice(0,8).join(", ")+(names.length>8?` ועוד ${names.length-8}`:"");
+      toast(`${list.length} ${WHAT[table]||"רשומות"} לא נשמרו בשרת ונשארו רק במכשיר הזה: ${shown} — ${sbErrMsg(new Error(list[0].text))}`,"error",15000);
+    };
+    return()=>{SB_REFUSED=null};
+  },[toast]);
   // Saves the latest state (from refs) to Supabase. Marks the data "unsaved" again and
   // retries on failure, so polling/realtime never overwrite a change that didn't land.
   const doSave=async()=>{
@@ -13082,7 +13236,10 @@ function App(){
     if(!snapDirty.current)return;
     snapDirty.current=false;
     const rows={};
-    for(const [key,ref] of remoteSlots)rows[key]=ref.current;
+    for(const spec of MIRROR){
+      const slot=remoteSlots.find(s=>s[0]===spec.key);
+      if(slot)rows[spec.key]=stampSent(spec.t,slot[1].current,_companyId);
+    }
     snapshotSave(_companyId,rows);
   };
   const scheduleSnapshot=()=>{
