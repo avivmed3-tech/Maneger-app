@@ -17,6 +17,11 @@
 | `tools/hold-test.js` | בדיקות HOLD — חלוקת הזמן בין עובדים בהעברה, ושומר שמוודא ש-`index.html` עדיין מכיל את קוד המקור |
 | `tools/sync-test.js` | בדיקות שכבת הסנכרון — מודדות כמה בייטים כל סבב עולה (`npm test`) |
 | `SETUP.md` | הקמת Supabase, עדכוני סכימה ותיעוד הגרסאות |
+| `docs/ENGINI-PRIORITY.md` | חיבור Priority ⇄ האפליקציה דרך Engini, וסדר הפעלת האבטחה |
+| `supabase/migrations/`, `supabase/pending/` | המיגרציות של המסד (הכנה, ונעילה שמורצת רק באישור) |
+| `supabase/functions/auth/` | ההתחברות וההרשמה בשרת |
+| `supabase/functions/erp/` | הנקודה ש-Engini פונה אליה. `core.mjs` נוצר מ-`index.html` ע״י `tools/build-erp-core.js` |
+| `tools/db-test.js`, `tools/erp-test.js`, `tools/auth-test.js` | בדיקות המסד, החיבור וההתחברות מול Postgres מקומי |
 
 ## סנכרון
 

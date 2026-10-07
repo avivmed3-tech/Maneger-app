@@ -296,6 +296,10 @@ const fireParked=()=>{const fns=[...parked.values()];parked.clear();fns.forEach(
 const settle=async(n=12)=>{for(let i=0;i<n;i++)await new Promise(r=>realTimeout(r,5))};
 
 const PFX=run("LS_PREFIX");
+// A device that is signed in: since the lockdown the app reads nothing without
+// a server session, so every boot below runs with one (the fake PostgREST
+// does not look at the token).
+store[PFX+"auth"]=JSON.stringify({access_token:"test-token",refresh_token:"test-refresh",expires_at:4102444800});
 const clearSnapshot=()=>run("idbRun")("readwrite",st=>st.delete(run("snapKey")(CID)));
 // Mounts App once and returns the boot effect, found by a string only it
 // contains rather than by its position in a list of twenty-two.
@@ -563,7 +567,63 @@ await settle(60);
 const settled=hooks.cells.find(c=>Array.isArray(c.v)&&c.v.some(o=>o&&o.id==="imp0"));
 ok(!settled.v.some(o=>o.id==="flash"),"a row added and deleted in one burst is not left behind");
 ok(!settled.v.some(o=>o.id==="imp5")&&settled.v.length===999,"and a plain delete in a burst still lands");
+{
+  // The token in the session reaches the socket: on the join, and again on
+  // every renewal — without it realtime streams nothing under row-level security.
+  const joins=[];sock.send=m=>joins.push(JSON.parse(m));
+  sock.onopen();
+  ok(joins.filter(m=>m.event==="phx_join").every(m=>m.payload.access_token==="test-token"),"every channel is joined with the user's token");
+  joins.length=0;
+  sock.readyState=1;
+  run("setAuthSession")({access_token:"renewed",refresh_token:"r2",expires_at:4102444800});
+  ok(joins.length>0&&joins.every(m=>m.event==="access_token"&&m.payload.access_token==="renewed"),"a renewed token is handed to every channel");
+}
 if(typeof stop==="function")stop();
+ctx.fetch_=(url,opts)=>handle(url,opts);
+
+console.log("\n── 11. the signed-in session ──────────────────────────────");
+// The database answers only a signed-in user's token. An hour later that token
+// has expired; the app renews it with Supabase Auth instead of failing the read.
+{
+  const seen=[];
+  const respond=(status,body)=>({ok:status<400,status,headers:{get:()=>null},json:async()=>body,text:async()=>JSON.stringify(body)});
+  let refreshAnswer=200;
+  ctx.fetch_=async(url,opts)=>{
+    const auth=(opts&&opts.headers&&opts.headers.Authorization)||"";
+    seen.push({url:String(url),auth});
+    if(/\/auth\/v1\/token/.test(url))return refreshAnswer===200
+      ?respond(200,{access_token:"fresh",refresh_token:"r3",expires_in:3600})
+      :respond(refreshAnswer,{error:"invalid_grant"});
+    if(auth==="Bearer stale")return respond(401,{code:"PGRST303",message:"JWT expired"});
+    return respond(200,[]);
+  };
+  const setAuth=s=>run("setAuthSession")(s);
+  const sb=run("SB");
+
+  setAuth({access_token:"old",refresh_token:"r1",expires_at:Math.floor(Date.now()/1000)+30});
+  await sb.get("orders","select=id");
+  ok(/\/auth\/v1\/token/.test(seen[0].url),"a token about to expire is renewed before the request leaves");
+  ok(seen[1]&&seen[1].auth==="Bearer fresh","…and the request carries the new one");
+
+  seen.length=0;
+  setAuth({access_token:"stale",refresh_token:"r1",expires_at:4102444800});
+  await sb.get("orders","select=id");
+  ok(seen.length===3&&seen[2].auth==="Bearer fresh","a request refused as expired is renewed and sent once more");
+
+  seen.length=0;refreshAnswer=400;
+  let expired=0;run("(f=>{AUTH_EXPIRED=f})")(()=>{expired++});
+  setAuth({access_token:"stale",refresh_token:"revoked",expires_at:4102444800});
+  await sb.get("orders","select=id").catch(()=>{});
+  ok(run("authSession()")===null&&expired===1,"a session Supabase Auth will not renew ends, and the app goes back to the login screen");
+
+  seen.length=0;refreshAnswer=200;
+  m=mountApp();
+  m.boot();
+  await settle();
+  ok(seen.filter(x=>/rest\/v1/.test(x.url)).length===0,"without a session the app reads nothing at all");
+  ok(m.loading.v===false,"…and shows the login screen instead of a splash");
+  store[PFX+"auth"]=JSON.stringify({access_token:"test-token",refresh_token:"test-refresh",expires_at:4102444800});
+}
 ctx.fetch_=(url,opts)=>handle(url,opts);
 
 console.log(`\n${fails?"✗ "+fails+" failed":"✓ all assertions passed"}`);

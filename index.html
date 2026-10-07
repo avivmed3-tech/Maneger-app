@@ -224,7 +224,7 @@ button{font-family:inherit;cursor:pointer}
 const {useState,useEffect,useCallback,useRef,useMemo}=React;
 
 // ── Config ─────────────────────────────────────────────────────────────────
-const APP_VERSION="4.7.0";const APP_DATE="2026-08-31";
+const APP_VERSION="4.8.0";const APP_DATE="2026-10-07";
 const SB_URL="https://lwiurzkiojctwzllpnmr.supabase.co";
 const SB_KEY="eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imx3aXVyemtpb2pjdHd6bGxwbm1yIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzQ2MjU4NTAsImV4cCI6MjA5MDIwMTg1MH0.jWOnAtsjbefoY18ofSd46WMdgY47Vv4k7LgcHdOrj6Q";
 const SB_H={"Content-Type":"application/json","apikey":SB_KEY,"Authorization":"Bearer "+SB_KEY};
@@ -348,12 +348,6 @@ function manageableUsers(currentUser,users,departments){
   return (users||[]).filter(u=>u.role!=="admin"&&(u.id===currentUser.id||(dept&&u.departmentId===dept.id)));
 }
 
-// ── SHA-256 password hashing ────────────────────────────────────────────────
-async function sha256(str){
-  const buf=await crypto.subtle.digest("SHA-256",new TextEncoder().encode(str));
-  return Array.from(new Uint8Array(buf)).map(b=>b.toString(16).padStart(2,"0")).join("");
-}
-
 // ── Supabase helpers ───────────────────────────────────────────────────────
 // Which company this browser is working in. Every read filters on it and every
 // write carries it, so it has to be right *before* the first request goes out —
@@ -377,7 +371,100 @@ function setCompanyId(id){
   _companyId=next;
 }
 function getCompanyId(){return _companyId}
-function sbHeaders(){return{...SB_H,"x-company-id":_companyId}}
+// ── The signed-in session ─────────────────────────────────────────────────
+// The anon key in SB_H opens nothing on its own any more: every table is
+// behind row-level security, and a row is reachable only with the access token
+// of a signed-in user, and only in that user's company. The token comes from
+// the `auth` Edge Function (see LoginScreen) and is a regular Supabase Auth
+// session — it expires every hour and is refreshed here, straight with
+// Supabase Auth, before it does.
+//
+// It is read back from localStorage on every use rather than held in a
+// variable, so a refresh done by another tab of the app is picked up instead of
+// racing it with a refresh token that has already been spent.
+const AUTH_KEY=LS_PREFIX+"auth";
+let _authRaw=null,_authObj=null;
+function authSession(){
+  let raw=null;try{raw=localStorage.getItem(AUTH_KEY)}catch{}
+  if(raw!==_authRaw){_authRaw=raw;try{_authObj=raw?JSON.parse(raw):null}catch{_authObj=null}}
+  return _authObj&&_authObj.access_token?_authObj:null;
+}
+// Whoever needs to hear that the token changed: the realtime socket hands the
+// new one to every channel it has joined.
+const AUTH_LISTENERS=new Set();
+function setAuthSession(s){
+  try{s?localStorage.setItem(AUTH_KEY,JSON.stringify(s)):localStorage.removeItem(AUTH_KEY)}catch{}
+  AUTH_LISTENERS.forEach(f=>{try{f(authSession())}catch{}});
+}
+// Set by App: what to do when the session cannot be renewed (signed out
+// elsewhere, user deactivated) — back to the login screen.
+let AUTH_EXPIRED=null;
+const sessionFromAuth=j=>({access_token:j.access_token,refresh_token:j.refresh_token,
+  expires_at:Number(j.expires_at)||Math.floor(Date.now()/1000)+(Number(j.expires_in)||3600)});
+let _refreshing=null;
+function refreshAuth(){
+  const cur=authSession();
+  if(!cur||!cur.refresh_token)return Promise.resolve(false);
+  if(_refreshing)return _refreshing;
+  _refreshing=(async()=>{
+    try{
+      const r=await fetch(`${SB_URL}/auth/v1/token?grant_type=refresh_token`,{method:"POST",
+        headers:{"Content-Type":"application/json",apikey:SB_KEY},body:JSON.stringify({refresh_token:cur.refresh_token})});
+      if(r.ok){setAuthSession({...cur,...sessionFromAuth(await r.json())});return true}
+      // Another tab may have renewed it a moment ago with the same refresh token.
+      const now=authSession();
+      if(now&&now.refresh_token!==cur.refresh_token)return true;
+      // Refused outright: the session is over. Anything else (no network, a
+      // 5xx) keeps it, and the next request tries again.
+      if(r.status===400||r.status===401||r.status===403){setAuthSession(null);if(AUTH_EXPIRED)AUTH_EXPIRED();}
+      return false;
+    }catch{return false}
+    finally{_refreshing=null}
+  })();
+  return _refreshing;
+}
+// Renewed two minutes before it runs out, so a request never leaves with a
+// token that dies on the way.
+async function ensureFreshAuth(){
+  const s=authSession();
+  if(s&&s.expires_at&&s.expires_at-Date.now()/1000<120)await refreshAuth();
+}
+function sbHeaders(){const s=authSession();return{...SB_H,...(s?{Authorization:"Bearer "+s.access_token}:{}),"x-company-id":_companyId}}
+// Every database request goes through here. A token that expired anyway (a
+// tablet asleep past the hour) is renewed and the request sent once more.
+async function sbFetch(url,opts){
+  await ensureFreshAuth();
+  const send=()=>{const s=authSession();
+    return fetch(url,{...(opts||{}),headers:{...((opts&&opts.headers)||{}),...(s?{Authorization:"Bearer "+s.access_token}:{})}})};
+  let r=await send();
+  if(r.status===401&&authSession()&&await refreshAuth())r=await send();
+  return r;
+}
+// A database function, called the way PostgREST exposes it.
+async function sbRpc(name,args){
+  const r=await sbFetch(`${SB_URL}/rest/v1/rpc/${name}`,{method:"POST",headers:sbHeaders(),body:JSON.stringify(args||{})});
+  const text=await r.text();
+  if(!r.ok)throw new Error(text||`HTTP ${r.status}`);
+  return text?JSON.parse(text):null;
+}
+// The auth Edge Function: {ok,user,session} or {ok:false,error,message}.
+async function authCall(action,body){
+  let r;
+  try{
+    r=await fetch(`${SB_URL}/functions/v1/auth/${action}`,{method:"POST",
+      headers:{"Content-Type":"application/json",apikey:SB_KEY,Authorization:"Bearer "+SB_KEY},body:JSON.stringify(body)});
+  }catch{return{ok:false,error:"offline",message:"אין חיבור לשרת — בדוק את החיבור לרשת ונסה שוב"}}
+  let j=null;try{j=await r.json()}catch{}
+  return j||{ok:false,error:"server_error",message:`שגיאת שרת (${r.status})`};
+}
+// Ends the session on this device and with Supabase Auth. Never blocks the
+// logout itself on the network.
+function signOutAuth(){
+  const s=authSession();
+  setAuthSession(null);
+  if(s)fetch(`${SB_URL}/auth/v1/logout?scope=local`,{method:"POST",
+    headers:{apikey:SB_KEY,Authorization:"Bearer "+s.access_token}}).catch(()=>{});
+}
 // The company a row belongs to: the one it came from, or — for a row created in
 // this session — the one we are working in. Never a hard-coded default, which is
 // what used to funnel every company's writes into the first company.
@@ -498,7 +585,7 @@ const SB_PARALLEL=6;
 async function sbPage(table,params,from,size,withCount){
   const headers={...sbHeaders(),"Range-Unit":"items","Range":`${from}-${from+size-1}`};
   if(withCount)headers["Prefer"]="count=exact";
-  const r=await fetch(`${SB_URL}/rest/v1/${table}?${params}`,{headers});
+  const r=await sbFetch(`${SB_URL}/rest/v1/${table}?${params}`,{headers});
   if(!r.ok)throw new Error(await r.text());
   const rows=await r.json();
   const tail=String(r.headers.get("content-range")||"").split("/")[1];
@@ -530,7 +617,7 @@ async function sbGetAllSeq(table,params,cap,firstRows,size){
 async function sbPost(table,batch){
   for(let attempt=0;;attempt++){
     const send=sbStrip(table,batch);
-    const r=await fetch(`${SB_URL}/rest/v1/${table}`,{method:"POST",headers:{...sbHeaders(),"Prefer":"resolution=merge-duplicates,return=minimal"},body:JSON.stringify(send)});
+    const r=await sbFetch(`${SB_URL}/rest/v1/${table}`,{method:"POST",headers:{...sbHeaders(),"Prefer":"resolution=merge-duplicates,return=minimal"},body:JSON.stringify(send)});
     // The caller remembers the *full* row as sent, not the narrowed one: marking
     // the narrowed row would make it differ from the app's row on every later
     // save, and the same rejected column would go out forever.
@@ -562,7 +649,7 @@ const sbRowErr=text=>{
 let SB_REFUSED=null;
 const SB={
   async get(table,params=""){
-    const r=await fetch(`${SB_URL}/rest/v1/${table}?${params}`,{headers:{...sbHeaders(),"Range":"0-9999"}});
+    const r=await sbFetch(`${SB_URL}/rest/v1/${table}?${params}`,{headers:{...sbHeaders(),"Range":"0-9999"}});
     if(!r.ok)throw new Error(await r.text());return r.json();
   },
   // Reads every row. Needs a total ordering in `params` or the pages can overlap —
@@ -676,7 +763,7 @@ const SB={
     const list=[...new Set((ids||[]).filter(Boolean))];
     for(let i=0;i<list.length;i+=SB_CHUNK){
       const q=list.slice(i,i+SB_CHUNK).map(encodeURIComponent).join(",");
-      const r=await fetch(`${SB_URL}/rest/v1/${table}?id=in.(${q})`,{method:"DELETE",headers:sbHeaders()});
+      const r=await sbFetch(`${SB_URL}/rest/v1/${table}?id=in.(${q})`,{method:"DELETE",headers:sbHeaders()});
       if(!r.ok)throw new Error(await r.text());
     }
     SYNC.forget(table,list);
@@ -684,7 +771,7 @@ const SB={
   // How many rows match, without reading them. PostgREST answers on the
   // Content-Range header, which Supabase exposes to the browser.
   async count(table,params=""){
-    const r=await fetch(`${SB_URL}/rest/v1/${table}?select=id&${params}`,
+    const r=await sbFetch(`${SB_URL}/rest/v1/${table}?select=id&${params}`,
       {method:"HEAD",headers:{...sbHeaders(),"Prefer":"count=exact","Range-Unit":"items","Range":"0-0"}});
     if(!r.ok)throw new Error(await r.text());
     const n=Number(String(r.headers.get("content-range")||"").split("/")[1]);
@@ -692,13 +779,13 @@ const SB={
   },
   async del(table,match){
     const q=Object.entries(match).map(([k,v])=>`${k}=eq.${v}`).join("&");
-    const r=await fetch(`${SB_URL}/rest/v1/${table}?${q}`,{method:"DELETE",headers:sbHeaders()});
+    const r=await sbFetch(`${SB_URL}/rest/v1/${table}?${q}`,{method:"DELETE",headers:sbHeaders()});
     if(!r.ok)throw new Error(await r.text());
     if(match.id)SYNC.forget(table,[match.id]);
   },
   async patch(table,match,data){
     const q=Object.entries(match).map(([k,v])=>`${k}=eq.${v}`).join("&");
-    const r=await fetch(`${SB_URL}/rest/v1/${table}?${q}`,{method:"PATCH",headers:{...sbHeaders(),"Prefer":"return=minimal"},body:JSON.stringify(data)});
+    const r=await sbFetch(`${SB_URL}/rest/v1/${table}?${q}`,{method:"PATCH",headers:{...sbHeaders(),"Prefer":"return=minimal"},body:JSON.stringify(data)});
     if(!r.ok)throw new Error(await r.text());
   }
 };
@@ -725,7 +812,7 @@ const COLS={
   departments:"id,name,color,manager_id,branch_codes,updated_at",
   daily_plans:"id,user_id,user_name,plan_date,order_id,stage_id,target_qty,serial_ids,note,done,created_by,created_by_name,created_at,updated_at",
   pn_standards:"id,pn,stage_minutes,total_min,note,updated_by,updated_at",
-  app_users:"id,username,password_hash,password_plain,role,name,project_access,stage_access,branch_access,branch_none,can_edit,can_view,active,hourly_rate,sale_rate,department_id,manager_id,login_attempts,locked_until,last_login,updated_at"
+  app_users:"id,username,role,name,project_access,stage_access,branch_access,branch_none,can_edit,can_view,active,hourly_rate,sale_rate,department_id,manager_id,login_attempts,locked_until,last_login,updated_at"
 };
 const SEL_OFF={};
 // 42703 is "column does not exist"; PGRST100/PGRST202 are the parse errors
@@ -879,14 +966,16 @@ function isoDay(v){
 }
 
 // ── DB row converters (DB → App format) ────────────────────────────────────
-const dbToUser=r=>({id:r.id,username:r.username,password_hash:r.password_hash,passwordPlain:r.password_plain||"",role:r.role,name:r.name,
+// No password travels with a user record any more: it lives encrypted on the
+// server, and an admin's screen asks for it on demand (revealUserPasswords).
+const dbToUser=r=>({id:r.id,username:r.username,role:r.role,name:r.name,
   projectAccess:r.project_access,stageAccess:r.stage_access,
   branchAccess:r.branch_access==="all"?"all":(Array.isArray(r.branch_access)?r.branch_access.map(branchCode).filter(Boolean):[]),
   branchNone:r.branch_none===true,
   canEdit:r.can_edit,canView:r.can_view,active:r.active,hourlyRate:r.hourly_rate,saleRate:r.sale_rate||0,
   departmentId:r.department_id||"",managerId:r.manager_id||"",
   companyId:r.company_id||_companyId||DEFAULT_COMPANY_ID,loginAttempts:r.login_attempts||0,lockedUntil:r.locked_until,lastLogin:r.last_login});
-const userToDb=u=>({id:u.id,username:u.username,password_hash:u.password_hash||u.passwordHash||"",password_plain:u.passwordPlain||null,
+const userToDb=u=>({id:u.id,username:u.username,
   role:u.role,name:u.name,project_access:u.projectAccess,stage_access:u.stageAccess,
   branch_access:u.branchAccess==="all"?"all":sortBranches(Array.isArray(u.branchAccess)?u.branchAccess:[]),
   branch_none:u.branchNone===true,
@@ -1246,16 +1335,23 @@ async function resolveDemoUsers(users,cid){
   return {idMap,skipped};
 }
 // Build the DB rows for the demo team under the resolved ids (manager links included).
+// The rows carry no password — setDemoPasswords gives each one its demo password
+// through the server once the rows exist.
 async function buildDemoUserRows(users,idMap,cid){
   const out=[];
   for(const fu of users){
     if(!idMap[fu.id])continue;
-    const h=await sha256(fu.password);
     // A manager that was skipped leaves no link rather than a dangling id.
-    out.push(userToDb({...fu,id:idMap[fu.id],managerId:idMap[fu.managerId]||"",
-      companyId:cid,password_hash:h,passwordPlain:fu.password,password:undefined}));
+    out.push(userToDb({...fu,id:idMap[fu.id],managerId:idMap[fu.managerId]||"",companyId:cid,password:undefined}));
   }
   return out;
+}
+async function setDemoPasswords(users,idMap){
+  for(const fu of users){
+    if(!idMap[fu.id]||!fu.password)continue;
+    try{await sbRpc("set_user_password",{p_user_id:idMap[fu.id],p_password:fu.password})}
+    catch(e){console.warn("demo password",fu.username,e)}
+  }
 }
 const DEF_PROJ=[{id:"p1",name:"פרויקט אלפא"},{id:"p2",name:"פרויקט בטא"},{id:"p3",name:"פרויקט גמא"}];
 const DEF_STAGES=[
@@ -2730,76 +2826,33 @@ function LoginScreen({onLogin,lightMode,toggleLight}){
     const pwErrors=validatePassword(regPass);
     if(pwErrors.length>0)return setErr("הסיסמה חייבת לכלול: "+pwErrors.join(", "));
     setLoading(true);setErr("");
-    try{
-      // Check if username exists
-      const existing=await SB.get("app_users",`username=eq.${encodeURIComponent(regUser.trim())}`);
-      if(existing&&existing.length>0){setErr("שם משתמש תפוס");setLoading(false);return}
-      // Create company
-      const compId=genuuid();
-      await SB.upsert("companies",[{id:compId,name:companyName.trim(),slug:companyName.trim().toLowerCase().replace(/\s+/g,"-").replace(/[^a-z0-9\u0590-\u05ff-]/g,"")}]);
-      // Create free subscription
-      await SB.upsert("subscriptions",[{id:genuuid(),company_id:compId,plan:"free",status:"trial",trial_ends_at:new Date(Date.now()+14*24*3600000).toISOString(),max_users:3,max_orders:10}]);
-      // Create admin user
-      const hash=await sha256(regPass);
-      const adminUser={id:uid(),username:regUser.trim(),password_hash:hash,role:"admin",name:adminName.trim(),project_access:"all",stage_access:"all",can_edit:true,can_view:true,active:true,hourly_rate:0,company_id:compId};
-      await SB.upsert("app_users",[adminUser]);
-      // Create default stages for this company
-      const defStages=DEF_STAGES.map(s=>({...stageToDb(s),company_id:compId}));
-      await SB.upsert("stages",defStages);
-      // Create default projects
-      const defProjects=DEF_PROJ.map(p=>({...projectToDb(p),company_id:compId}));
-      await SB.upsert("projects",defProjects);
-      toast("החברה נוצרה בהצלחה! 14 יום ניסיון חינם","success",5000);
-      // Auto login
-      const u=dbToUser({...adminUser,login_attempts:0,locked_until:null,last_login:new Date().toISOString()});
-      publishUsers([u]);
-      onLogin(u);
-    }catch(e){setErr("שגיאה ביצירת חשבון: "+(e.message||e))}
-    setLoading(false);
+    // The company, its trial plan and its first admin are created by the server
+    // in one step — the browser has no right to write any of them itself.
+    const r=await authCall("register",{company_name:companyName.trim(),admin_name:adminName.trim(),username:regUser.trim(),password:regPass});
+    if(!r.ok){setErr(r.message||"שגיאה ביצירת חשבון");setLoading(false);return}
+    setAuthSession(sessionFromAuth(r.session));
+    const u=dbToUser(r.user);
+    publishUsers([u]);
+    toast("החברה נוצרה בהצלחה! 14 יום ניסיון חינם","success",5000);
+    onLogin({...u,freshLogin:true});
   };
 
+  // The password is checked by the server, which also counts the attempts and
+  // locks the account after five. What comes back is the user and a session.
   const attempt=async()=>{
     if(!username.trim()||!password.trim()){setErr("יש למלא שם משתמש וסיסמה");return}
     setLoading(true);setErr("");
-    try{
-      const hash=await sha256(password);
-      const rows=await SB.get("app_users",`username=eq.${encodeURIComponent(username.trim())}&active=eq.true`);
-      if(!rows||rows.length===0){setErr("שם משתמש לא נמצא במערכת");setLoading(false);return}
-      const row=rows[0];
-      if(row.locked_until&&new Date(row.locked_until)>new Date()){
-        const minsLeft=Math.ceil((new Date(row.locked_until)-new Date())/60000);
-        setErr(`החשבון נעול. נסה שוב בעוד ${minsLeft} דקות`);setLoading(false);return;
-      }
-      if(row.password_hash!==hash){
-        const attempts=(row.login_attempts||0)+1;
-        const lockData={login_attempts:attempts};
-        if(attempts>=MAX_LOGIN_ATTEMPTS){
-          lockData.locked_until=new Date(Date.now()+LOCKOUT_MIN*60000).toISOString();
-          setErr(`סיסמה שגויה. החשבון ננעל ל-${LOCKOUT_MIN} דקות`);
-        }else{
-          setErr(`סיסמה שגויה (${attempts}/${MAX_LOGIN_ATTEMPTS} ניסיונות)`);
-        }
-        try{await SB.patch("app_users",{id:row.id},lockData)}catch{}
-        setLoading(false);return;
-      }
-      try{await SB.patch("app_users",{id:row.id},{login_attempts:0,locked_until:null,last_login:new Date().toISOString()})}catch{}
-      const u=dbToUser(row);
-      const cached=getUsers();
-      const upd=cached.some(c=>c.id===u.id)?cached.map(c=>c.id===u.id?u:c):[...cached,u];
-      publishUsers(upd);
-      addAuditEntry({userId:u.id,username:u.username,name:u.name,action:"התחברות",target:"",details:""});
-      onLogin(u);
-    }catch(e){
-      try{
-        const hash=await sha256(password);
-        const users=getUsers();
-        const u=users.find(u=>u.username===username.trim()&&(u.password_hash===hash||u.password===password)&&u.active!==false);
-        if(!u){setErr("אין חיבור לשרת ולא נמצא משתמש מקומי");setLoading(false);return}
-        addAuditEntry({userId:u.id,username:u.username,name:u.name,action:"התחברות (offline)",target:"",details:""});
-        onLogin(u);
-      }catch(e2){setErr(`שגיאה: ${e.message||e}`)}
+    const r=await authCall("login",{username:username.trim(),password});
+    if(!r.ok){
+      const left=r.error==="bad_credentials"&&r.attempts?` (${r.attempts}/${r.max_attempts} ניסיונות)`:"";
+      const until=r.locked_until?` — עד ${new Date(r.locked_until).toLocaleTimeString("he-IL",{hour:"2-digit",minute:"2-digit"})}`:"";
+      setErr((r.message||"ההתחברות נכשלה")+left+until);setLoading(false);return;
     }
-    setLoading(false);
+    setAuthSession(sessionFromAuth(r.session));
+    const u=dbToUser(r.user);
+    const cached=getUsers();
+    publishUsers(cached.some(c=>c.id===u.id)?cached.map(c=>c.id===u.id?u:c):[...cached,u]);
+    onLogin({...u,freshLogin:true});
   };
   const lm=lightMode;
   return(
@@ -2824,8 +2877,6 @@ function LoginScreen({onLogin,lightMode,toggleLight}){
             {err&&<div style={{background:lm?"#fee2e2":"#450a0a",color:lm?"#dc2626":"#fca5a5",borderRadius:8,padding:"10px 14px",fontSize:13,border:lm?"1px solid #fecaca":"1px solid #7f1d1d"}}>❌ {err}</div>}
             <button onClick={attempt} disabled={loading} style={{background:loading?"#2563eb99":"var(--c-accent)",color:"#fff",border:"none",borderRadius:10,padding:"13px",fontWeight:700,fontSize:16,marginTop:4,fontFamily:"inherit"}}>{loading?"⏳ מתחבר...":"כניסה למערכת"}</button>
             <div style={{textAlign:"center",marginTop:4}}><span style={{fontSize:13,color:lm?"#5a6478":"#8b95a8"}}>אין לך חשבון? </span><button onClick={()=>{setMode("register");setErr("");setRegStep(1)}} style={{background:"none",border:"none",color:"var(--c-accent)",fontSize:13,fontWeight:700,fontFamily:"inherit",cursor:"pointer",textDecoration:"underline"}}>הרשמה חינם</button></div>
-            <div style={{position:"relative",textAlign:"center",margin:"8px 0"}}><div style={{position:"absolute",top:"50%",left:0,right:0,height:1,background:lm?"#dde1e8":"#1e2a42"}}/><span style={{position:"relative",padding:"0 12px",background:lm?"#ffffff":"#131829",fontSize:11,color:lm?"#9ca3af":"#5a6478"}}>או</span></div>
-            <button onClick={()=>onLogin({id:"demo_user",username:"demo",role:"admin",name:"משתמש דמו",projectAccess:"all",stageAccess:"all",canEdit:true,canView:true,active:true,hourlyRate:0,companyId:DEFAULT_COMPANY_ID,isDemo:true})} style={{background:"none",border:`1px solid ${lm?"#06b6d4":"#06b6d433"}`,borderRadius:10,padding:"11px",color:lm?"#0891b2":"#06b6d4",fontWeight:600,fontSize:14,fontFamily:"inherit"}}>🔍 נסה דמו — בלי הרשמה</button>
           </div>
         ):(
           <div style={{display:"flex",flexDirection:"column",gap:16}}>
@@ -3502,7 +3553,7 @@ function Dashboard({orders,projects,stages,users,workLogs,departments,customTask
 // ══════════════════════════════════════════════════════════════════════════
 // ═══ ORDERS (Work Orders / פקעות) ════════════════════════════════════════
 // ══════════════════════════════════════════════════════════════════════════
-function OrderForm({initial,projects,stages,stageBlocks,branchOpts=[],departments=[],onSave,onClose}){
+function OrderForm({initial,projects,stages,stageBlocks,branchOpts=[],departments=[],woTaken,onSave,onClose}){
   const {toast}=useToast();
   const [f,setF]=useState({
     woNumber:initial?.woNumber||"",description:initial?.description||"",pn:initial?.pn||"",
@@ -3528,6 +3579,9 @@ function OrderForm({initial,projects,stages,stageBlocks,branchOpts=[],department
   };
   const handleSave=()=>{
     if(!f.woNumber||!f.qty)return toast('יש למלא מספר פק"ע וכמות',"warning");
+    // The database keeps one row per מספר פק"ע and would refuse a second one;
+    // saying so here beats a save that silently never lands.
+    if(woTaken&&woTaken(f.woNumber))return toast(`פק"ע ${String(f.woNumber).trim()} כבר קיימת — אי אפשר לפתוח אותה פעמיים`,"warning",6000);
     let serials=initial?.serials||[];
     if(genSerials&&!initial){
       const prefix=snPrefix||f.pn||f.woNumber;
@@ -4504,7 +4558,8 @@ function Orders({orders,projects,stages,stageBlocks,updO,workLogs,onWorkLog,onDe
             </div>
           );
         }}/>
-      {showForm&&(<Modal onClose={()=>setShowForm(false)}><OrderForm initial={editing} projects={projects} stages={stages} stageBlocks={stageBlocks} branchOpts={branchOpts} departments={departments} onSave={data=>{
+      {showForm&&(<Modal onClose={()=>setShowForm(false)}><OrderForm initial={editing} projects={projects} stages={stages} stageBlocks={stageBlocks} branchOpts={branchOpts} departments={departments}
+        woTaken={wo=>orders.some(o=>o.id!==editing?.id&&woKey(o.woNumber)===woKey(wo))} onSave={data=>{
         const{_serials,...rest}=data;
         if(editing){
           updO(prev=>prev.map(o=>o.id===editing.id?{...editing,...rest}:o));
@@ -6748,6 +6803,25 @@ function AdminPanel({projects,stages,orders=[],onClose,lightMode,departments,upd
   const [editUser,setEditUser]=useState(null);
   const [addMode,setAddMode]=useState(false);
   const [revealPw,setRevealPw]=useState({}); // userId -> bool (show password in list)
+  // Passwords are not part of the user records: the server keeps them encrypted
+  // and decrypts, on request, only the ones this person may administer. They are
+  // held here, in this screen's memory, and never written to the device.
+  const [pwMap,setPwMap]=useState(null);
+  const loadPasswords=async()=>{
+    if(pwMap)return pwMap;
+    try{
+      const rows=await sbRpc("reveal_user_passwords",{p_ids:null});
+      const m=Object.fromEntries((rows||[]).map(r=>[r.id,r.password]));
+      setPwMap(m);return m;
+    }catch(e){toast("לא ניתן לטעון את הסיסמאות מהשרת: "+sbErrMsg(e),"error",6000);return null}
+  };
+  const pwOf=u=>(u&&pwMap&&pwMap[u.id])||"";
+  const notePw=(id,pw)=>setPwMap(m=>({...(m||{}),[id]:pw}));
+  // Sets a password through the server — the only place one can be set now.
+  const setPassword=async(id,pw)=>{
+    try{await sbRpc("set_user_password",{p_user_id:id,p_password:pw});notePw(id,pw);return null}
+    catch(e){return sbErrMsg(e)}
+  };
   const [credReport,setCredReport]=useState(false); // the printable username/password report
   const [editShowPw,setEditShowPw]=useState(false);
   const [newShowPw,setNewShowPw]=useState(false); // show the password being typed for a new user
@@ -6841,8 +6915,7 @@ function AdminPanel({projects,stages,orders=[],onClose,lightMode,departments,upd
     const pwErrors=validatePassword(newUser.password,MANAGED_PASSWORD_POLICY);
     if(pwErrors.length>0)return toast("הסיסמה חייבת לכלול: "+pwErrors.join(", "),"warning",5000);
     if(!isAdmin&&(newUser.role==="admin"||!myDept))return toast("אפשר להוסיף עובדים למחלקה שלך בלבד","warning");
-    const hash=await sha256(newUser.password);
-    const u={...newUser,username:uname,id:uid(),password_hash:hash,passwordPlain:newUser.password,password:undefined};
+    const u={...newUser,username:uname,id:uid(),password:undefined};
     if(!isAdmin)u.departmentId=myDept.id;
     delete u.password;
     const updated=[...users,u];
@@ -6858,6 +6931,10 @@ function AdminPanel({projects,stages,orders=[],onClose,lightMode,departments,upd
         return toast(`המשתמש לא נוצר: ${msg} — בחר שם משתמש אחר`,"error",7000);
       }
       toast("המשתמש נשמר במכשיר אך לא הגיע לשרת: "+msg,"error",7000);
+    }else{
+      // The row exists on the server now, so it can be given its password.
+      const pwErr=await setPassword(u.id,newUser.password);
+      if(pwErr)toast(`המשתמש נוצר, אבל הסיסמה לא נשמרה: ${pwErr} — ערוך אותו והקלד סיסמה שוב`,"error",8000);
     }
     UNDO.record({user:currentUser,action:"הוספת משתמש",target:newUser.username,details:newUser.name,
       changes:[{coll:"users",before:[],after:[u.id]}]});
@@ -6874,17 +6951,17 @@ function AdminPanel({projects,stages,orders=[],onClose,lightMode,departments,upd
     // (It used to be re-hashed only below 60 characters, which silently dropped
     // longer ones and left the account on its old password.)
     const typedPw=typeof u.password==="string"?u.password:"";
-    if(typedPw){
-      u.password_hash=await sha256(typedPw);
-      u.passwordPlain=typedPw;
-    }
     delete u.password;
     const before=users.find(usr=>usr.id===u.id);
     const updated=users.map(usr=>usr.id===u.id?u:usr);
     setUsersLocal(updated);
     const res=await saveUsers(updated,[u.id]);
-    if(!res.ok)toast((typedPw?"הסיסמה החדשה נשמרה במכשיר אך לא הגיעה לשרת — ההתחברות עדיין תעבוד עם הישנה: ":"העדכון לא הגיע לשרת: ")+sbErrMsg(res.error),"error",8000);
-    else if(typedPw)toast("הסיסמה עודכנה","success");
+    if(!res.ok)toast("העדכון לא הגיע לשרת: "+sbErrMsg(res.error)+(typedPw?" — הסיסמה לא שונתה":""),"error",8000);
+    else if(typedPw){
+      const pwErr=await setPassword(u.id,typedPw);
+      if(pwErr)toast("הסיסמה לא עודכנה — ההתחברות עדיין עם הישנה: "+pwErr,"error",8000);
+      else toast("הסיסמה עודכנה","success");
+    }
     UNDO.record({user:currentUser,action:"עדכון משתמש",target:editUser.username,details:editUser.name,
       changes:before?[{coll:"users",before:[before],after:[u.id]}]:[]});
     setEditUser(null);
@@ -6934,7 +7011,7 @@ function AdminPanel({projects,stages,orders=[],onClose,lightMode,departments,upd
                 <div style={{fontSize:14,fontWeight:700,color:text}}>משתמשים ({scopedUsers.length})</div>
                 <div style={{display:"flex",gap:7,flexWrap:"wrap"}}>
                   {isAdmin&&onPilotReset&&<Btn color="#ef4444" small onClick={()=>{onClose();onPilotReset()}} title="מחיקת עובדי הדמו והנתונים שלהם לפני תחילת פיילוט">🧹 ניקוי לפיילוט</Btn>}
-                  {isAdmin&&<Btn color="#8b5cf6" small onClick={()=>setCredReport(true)} title="דוח מסודר להדפסה של שמות המשתמש והסיסמאות — לכלל המפעל או לפי מחלקה">🔑 דוח סיסמאות</Btn>}
+                  {isAdmin&&<Btn color="#8b5cf6" small onClick={async()=>{await loadPasswords();setCredReport(true)}} title="דוח מסודר להדפסה של שמות המשתמש והסיסמאות — לכלל המפעל או לפי מחלקה">🔑 דוח סיסמאות</Btn>}
                   <Btn color="var(--c-accent)" small onClick={()=>{setNewShowPw(false);setNewUser(p=>({...p,departmentId:isAdmin?p.departmentId:(myDept?.id||"")}));setAddMode(true)}}>+ הוסף משתמש</Btn>
                 </div>
               </div>
@@ -7031,8 +7108,8 @@ function AdminPanel({projects,stages,orders=[],onClose,lightMode,departments,upd
                         {u.managerId&&users.find(m=>m.id===u.managerId)&&<span>⭐ תחת: {users.find(m=>m.id===u.managerId)?.name}</span>}
                         {u.hourlyRate>0&&<span title="עלות (שכר)">💰 עלות {fmtMoney(u.hourlyRate)}/שע'</span>}
                         {u.saleRate>0&&<span title="מחיר מכירה" style={{color:"#10b981"}}>🏷️ מכירה {fmtMoney(u.saleRate)}/שע'</span>}
-                        <span style={{display:"inline-flex",alignItems:"center",gap:4}}>🔑 {revealPw[u.id]?(u.passwordPlain?<b style={{color:"#f59e0b",fontFamily:"monospace"}}>{u.passwordPlain}</b>:<span style={{color:"#ef4444"}}>לא זמין — אפס סיסמה</span>):"••••••"}
-                          <button onClick={()=>setRevealPw(p=>({...p,[u.id]:!p[u.id]}))} title={revealPw[u.id]?"הסתר סיסמה":"הצג סיסמה"} style={{background:"none",border:"none",cursor:"pointer",fontSize:13,padding:0,lineHeight:1}}>{revealPw[u.id]?"🙈":"👁️"}</button>
+                        <span style={{display:"inline-flex",alignItems:"center",gap:4}}>🔑 {revealPw[u.id]?(pwOf(u)?<b style={{color:"#f59e0b",fontFamily:"monospace"}}>{pwOf(u)}</b>:<span style={{color:"#ef4444"}}>{pwMap?"לא זמין — אפס סיסמה":"טוען…"}</span>):"••••••"}
+                          <button onClick={()=>{if(!revealPw[u.id])loadPasswords();setRevealPw(p=>({...p,[u.id]:!p[u.id]}))}} title={revealPw[u.id]?"הסתר סיסמה":"הצג סיסמה"} style={{background:"none",border:"none",cursor:"pointer",fontSize:13,padding:0,lineHeight:1}}>{revealPw[u.id]?"🙈":"👁️"}</button>
                         </span>
                         <span>פרויקטים: {u.projectAccess==="all"?"הכל":Array.isArray(u.projectAccess)?u.projectAccess.length:"1"}</span>
                         <span>שלבים: {u.stageAccess==="all"?"הכל":Array.isArray(u.stageAccess)?u.stageAccess.length:"1"}</span>
@@ -7169,7 +7246,7 @@ function AdminPanel({projects,stages,orders=[],onClose,lightMode,departments,upd
       </div>
 
       {/* Username / password report — admins only */}
-      {credReport&&isAdmin&&<CredentialsReport users={users} departments={departments} lightMode={lm} onClose={()=>setCredReport(false)}/>}
+      {credReport&&isAdmin&&<CredentialsReport users={users.map(u=>pwOf(u)?{...u,passwordPlain:pwOf(u)}:u)} departments={departments} lightMode={lm} onClose={()=>setCredReport(false)}/>}
 
       {/* Edit User Modal */}
       {editUser&&(
@@ -7182,12 +7259,12 @@ function AdminPanel({projects,stages,orders=[],onClose,lightMode,departments,upd
               ))}
               <div><label style={{fontSize:11,color:muted,display:"block",marginBottom:3}}>🔑 סיסמה חדשה (ריק = ללא שינוי)</label>
                 <div style={{position:"relative"}}>
-                  <input style={inp} type={editShowPw?"text":"password"} name="eu_password" autoComplete="new-password" value={editUser.password||""} placeholder={editShowPw?(editUser.passwordPlain||"לא זמין"):"••••••"} onChange={e=>setEditUser(p=>({...p,password:e.target.value}))}/>
-                  <button onClick={()=>setEditShowPw(s=>!s)} title={editShowPw?"הסתר":"הצג"} style={{position:"absolute",left:8,top:"50%",transform:"translateY(-50%)",background:"none",border:"none",fontSize:15,cursor:"pointer",lineHeight:1}}>{editShowPw?"🙈":"👁️"}</button>
+                  <input style={inp} type={editShowPw?"text":"password"} name="eu_password" autoComplete="new-password" value={editUser.password||""} placeholder={editShowPw?(pwOf(editUser)||"לא זמין"):"••••••"} onChange={e=>setEditUser(p=>({...p,password:e.target.value}))}/>
+                  <button onClick={()=>{if(!editShowPw)loadPasswords();setEditShowPw(s=>!s)}} title={editShowPw?"הסתר":"הצג"} style={{position:"absolute",left:8,top:"50%",transform:"translateY(-50%)",background:"none",border:"none",fontSize:15,cursor:"pointer",lineHeight:1}}>{editShowPw?"🙈":"👁️"}</button>
                 </div>
                 {editUser.password
                   ?<div style={{fontSize:10,color:validatePassword(editUser.password,PASSWORD_POLICY).length?"#f59e0b":"#10b981",marginTop:3}}>{passwordHint(editUser.password)}</div>
-                  :editShowPw&&<div style={{fontSize:10,color:editUser.passwordPlain?"#f59e0b":"#ef4444",marginTop:3}}>{editUser.passwordPlain?`נוכחית: ${editUser.passwordPlain}`:"הסיסמה הנוכחית לא נשמרה כטקסט — הקלד סיסמה חדשה"}</div>}
+                  :editShowPw&&<div style={{fontSize:10,color:pwOf(editUser)?"#f59e0b":"#ef4444",marginTop:3}}>{pwOf(editUser)?`נוכחית: ${pwOf(editUser)}`:"הסיסמה הנוכחית לא זמינה לצפייה — הקלד סיסמה חדשה"}</div>}
               </div>
               <div><label style={{fontSize:11,color:muted,display:"block",marginBottom:3}}>תפקיד</label>
                 <select style={inp} value={editUser.role} onChange={e=>setEditUser(p=>({...p,role:e.target.value,canEdit:["admin","editor","dept_manager"].includes(e.target.value)}))}>
@@ -8611,10 +8688,11 @@ function exportTeamReportXlsx(m){
 // ══════════════════════════════════════════════════════════════════════════
 // Login details on a production floor are handed over on paper: the admin
 // prints the list once and gives each department its own page. The password is
-// printed as it was typed — the app already keeps it beside the hash for
-// exactly this reason (see `passwordPlain`) — so an account whose password was
-// set before that, or never through this panel, is listed as "not available"
-// instead of appearing blank and reading as an empty password.
+// printed as it was typed — the server keeps it, encrypted, for exactly this
+// reason, and the admin panel fills `passwordPlain` from it just before the
+// report opens — so an account whose readable password was never kept is
+// listed as "not available" instead of appearing blank and reading as an
+// empty password.
 const credRole=r=>ROLES[r]?.label||r||"—";
 
 // Users the report covers, grouped by department. `deptIds` empty = every
@@ -10894,6 +10972,135 @@ const ChkOpt=({checked,onChange,label,hint,color="#10b981"})=>(
   </label>
 );
 
+// ── 🔌 Priority ⇄ Engini ─────────────────────────────────────────────────
+// Where an admin connects Engini: the API key (shown once), the addresses
+// Engini calls, the switch that sends stage sign-offs back to Priority, and
+// what came in and went out lately. Everything is read and changed through
+// erp_* database functions, which refuse anyone but an admin.
+function ErpCard(){
+  const {toast}=useToast();
+  const [st,setSt]=useState(null);
+  const [err,setErr]=useState("");
+  const [busy,setBusy]=useState("");
+  const [newKey,setNewKey]=useState("");
+  const load=useCallback(async()=>{
+    setErr("");
+    try{setSt(await sbRpc("erp_status"))}
+    catch(e){setErr(sbErrMsg(e))}
+  },[]);
+  useEffect(()=>{load()},[load]);
+  const run=async(label,fn)=>{
+    setBusy(label);
+    try{await fn()}catch(e){toast(sbErrMsg(e),"error",6000)}
+    setBusy("");load();
+  };
+  const copy=t=>{try{navigator.clipboard.writeText(t);toast("הועתק","success")}catch{toast("ההעתקה נכשלה — סמנו והעתיקו ידנית","warning")}};
+  const c=st&&st.connection||null;
+  const ob=st&&st.outbox||{};
+  const base=`${SB_URL}/functions/v1/erp`;
+  const localMap=LS.get(PRI_MAP_LS)||{};
+  const localN=Object.keys(localMap).length;
+  const when=d=>d?new Date(d).toLocaleString("he-IL",{day:"2-digit",month:"2-digit",hour:"2-digit",minute:"2-digit"}):"—";
+  const row={display:"flex",gap:8,alignItems:"center",flexWrap:"wrap",marginBottom:10,fontSize:13};
+  const code={fontFamily:"monospace",fontSize:12,background:"var(--c-deep)",border:"1px solid var(--c-border)",borderRadius:6,padding:"3px 8px",direction:"ltr",wordBreak:"break-all"};
+  const routes=[["פקודות עבודה מ-Priority","POST","/work-orders"],["חתימות לשליחה ל-Priority","GET","/sign-offs"],
+    ["אישור שהחתימות נקלטו","POST","/sign-offs/ack"],["בדיקת חיבור","GET","/health"]];
+  return(
+    <Card style={{marginBottom:14,border:"1px solid #8b5cf644"}}>
+      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",gap:8,marginBottom:6}}>
+        <div style={{fontWeight:700}}>🔌 חיבור Priority דרך Engini</div>
+        <Btn small onClick={load} disabled={!!busy}>🔄 רענן</Btn>
+      </div>
+      <div style={{fontSize:12.5,color:"var(--c-muted)",lineHeight:1.7,marginBottom:12}}>
+        Engini שולח לכתובת למטה את פקודות העבודה מ-Priority, והן נכנסות בדיוק כמו ייבוא קובץ Priority — מתעדכנות לפי מספר פק"ע, בלי כפילויות.
+        במצב דו-כיווני כל חתימה על שלב באפליקציה (עם הזמן שלקח לכל יחידה) נשלחת חזרה לפעולה המתאימה ב-Priority.
+        כשהחיבור פעיל, ייבוא קובץ ידני נעשה רק במצב <b>״עדכן על הקיים״</b>.
+      </div>
+      {err&&<div style={{color:"#ef4444",fontSize:12.5,marginBottom:10}}>לא ניתן לטעון את מצב החיבור: {err}</div>}
+      {!st&&!err&&<div style={{fontSize:12.5,color:"var(--c-dim)"}}>טוען…</div>}
+      {st&&<>
+        <div style={row}>
+          <b>מפתח API:</b>
+          {c&&c.has_key
+            ?<span>פעיל · מסתיים ב-<span style={code}>…{c.key_hint}</span> · נוצר {when(c.key_created_at)}</span>
+            :<span style={{color:"var(--c-dim)"}}>עדיין לא נוצר</span>}
+          <Btn small color="#8b5cf6" disabled={!!busy} onClick={()=>{
+            if(c&&c.has_key&&!confirm("ליצור מפתח חדש? המפתח הנוכחי יפסיק לעבוד מיד, וצריך יהיה לעדכן את החדש ב-Engini."))return;
+            run("key",async()=>setNewKey(await sbRpc("erp_create_key")));
+          }}>{c&&c.has_key?"🔁 החלף מפתח":"🔑 צור מפתח"}</Btn>
+          {c&&c.has_key&&<Btn small disabled={!!busy} onClick={()=>{
+            if(!confirm("לבטל את המפתח? Engini לא יוכל להתחבר עד שייווצר מפתח חדש."))return;
+            run("revoke",()=>sbRpc("erp_revoke_key"));
+          }}>בטל מפתח</Btn>}
+        </div>
+        {newKey&&(
+          <div style={{background:"#f59e0b14",border:"1px solid #f59e0b66",borderRadius:10,padding:"10px 12px",marginBottom:12}}>
+            <div style={{fontWeight:700,fontSize:12.5,color:"#f59e0b",marginBottom:6}}>⚠️ המפתח מוצג פעם אחת בלבד — העתיקו אותו עכשיו להגדרות החיבור ב-Engini</div>
+            <div style={{...code,marginBottom:8}}>{newKey}</div>
+            <div style={{display:"flex",gap:8}}>
+              <Btn small color="#f59e0b" onClick={()=>copy(newKey)}>📋 העתק</Btn>
+              <Btn small onClick={()=>setNewKey("")}>העתקתי, סגור</Btn>
+            </div>
+          </div>
+        )}
+        <div style={{fontSize:12.5,fontWeight:600,marginBottom:6}}>הכתובות ש-Engini קורא להן (כותרת <span style={code}>x-api-key</span> עם המפתח):</div>
+        <div style={{display:"flex",flexDirection:"column",gap:5,marginBottom:12}}>
+          {routes.map(([label,method,path])=>(
+            <div key={path} style={{display:"flex",gap:8,alignItems:"center",flexWrap:"wrap",fontSize:12}}>
+              <span style={{minWidth:150,color:"var(--c-muted)"}}>{label}</span>
+              <span style={{...code,fontWeight:700}}>{method}</span>
+              <span style={code}>{base+path}</span>
+              <button onClick={()=>copy(base+path)} title="העתק" style={{background:"none",border:"none",cursor:"pointer",fontSize:13}}>📋</button>
+            </div>
+          ))}
+        </div>
+        <label style={{...row,cursor:"pointer"}}>
+          <input type="checkbox" checked={!!(c&&c.two_way)} disabled={!!busy}
+            onChange={e=>{const on=e.target.checked;
+              if(on&&!confirm("להפעיל שליחה חזרה ל-Priority?\nמעכשיו כל חתימה על שלב תיכנס לתור ש-Engini אוסף. כדאי להפעיל רק כש-Engini מוכן לאסוף אותן."))return;
+              run("two",()=>sbRpc("erp_update_settings",{p_two_way:on}));}}/>
+          <b>דו-כיווני:</b> שליחת חתימות שלבים חזרה ל-Priority
+        </label>
+        <div style={{display:"flex",gap:12,flexWrap:"wrap",fontSize:12.5,marginBottom:10,color:"var(--c-muted)"}}>
+          <span>⏳ ממתינות: <b style={{color:"var(--c-text)"}}>{ob.pending||0}</b></span>
+          <span>📤 אצל Engini: <b style={{color:"var(--c-text)"}}>{ob.sent||0}</b></span>
+          <span>✅ נקלטו ב-Priority: <b style={{color:"#10b981"}}>{ob.acked||0}</b></span>
+          <span>❌ נכשלו: <b style={{color:ob.failed?"#ef4444":"var(--c-text)"}}>{ob.failed||0}</b></span>
+          <span title="חתימות על פק״ע או שלב ש-Priority לא שלח עבורם פעולה — יישלחו כשהפעולה תגיע">🔗 ללא פעולה ב-Priority: <b style={{color:"var(--c-text)"}}>{ob.unmapped||0}</b></span>
+          {ob.failed>0&&<Btn small color="#ef4444" disabled={!!busy} onClick={()=>run("retry",async()=>{const n=await sbRpc("erp_retry_failed");toast(`${n} חתימות יישלחו שוב`,"success")})}>🔁 שלח שוב</Btn>}
+        </div>
+        <div style={{...row,fontSize:12.5}}>
+          <span>שיוך פעולות Priority לשלבים בשרת: <b>{(c&&c.mapped_ops)||0}</b> פעולות</span>
+          {localN>0&&<Btn small disabled={!!busy} onClick={()=>run("map",async()=>{await sbRpc("erp_update_settings",{p_stage_map:localMap});toast(`${localN} שיוכים הועלו`,"success")})}>⬆️ העלה את השיוך מהמכשיר הזה ({localN})</Btn>}
+        </div>
+        {c&&<div style={{fontSize:12,color:"var(--c-dim)",marginBottom:8}}>התקבל לאחרונה: {when(c.last_inbound_at)} · נאסף לאחרונה: {when(c.last_outbound_at)}</div>}
+        {(st.inbox||[]).length>0&&(
+          <div style={{overflowX:"auto",marginBottom:10}}>
+            <table style={{width:"100%",fontSize:12,borderCollapse:"collapse"}}>
+              <thead><tr style={{color:"var(--c-muted)",textAlign:"right"}}><th>מתי</th><th>שורות</th><th>פק"ע</th><th>חדשות</th><th>עודכנו</th><th>ללא שינוי</th><th>אסמכתא</th></tr></thead>
+              <tbody>{st.inbox.map(b=>(
+                <tr key={b.id} style={{borderTop:"1px solid var(--c-border)"}}>
+                  <td>{when(b.received_at)}</td><td>{b.rows_count}</td><td>{b.wos_count}</td>
+                  <td>{b.result&&b.result.added}</td><td>{b.result&&b.result.updated}</td><td>{b.result&&b.result.unchanged}</td>
+                  <td style={{direction:"ltr"}}>{b.batch_ref||""}</td>
+                </tr>))}</tbody>
+            </table>
+          </div>
+        )}
+        {(st.problems||[]).length>0&&(
+          <div style={{fontSize:12,display:"flex",flexDirection:"column",gap:4}}>
+            <b>חתימות שלא הגיעו ל-Priority:</b>
+            {st.problems.map(p=>(
+              <div key={p.id} style={{color:p.status==="failed"?"#ef4444":"var(--c-muted)"}}>
+                {p.status==="failed"?"❌":"🔗"} פק"ע {p.wo_number||"?"} · {p.stage_name||"?"} · {when(p.created_at)}
+                {p.status==="failed"?` — ${p.error||"נכשל"}`:" — אין ל-Priority פעולה מתאימה לשלב הזה בפק\"ע הזו"}
+              </div>))}
+          </div>
+        )}
+      </>}
+    </Card>
+  );
+}
 function ExcelTab({orders,projects,stages,stageBlocks,workLogs,users,customTasks,dailyPlans,departments,pnStandards,updO,updP,updS,importPnStds,importWorkLogs,mergeDuplicates,canImport,onAddPlans}){
   const {toast}=useToast();
   const {currentUser}=useAuth();
@@ -10947,13 +11154,17 @@ function ExcelTab({orders,projects,stages,stageBlocks,workLogs,users,customTasks
 
   // Replacing the order list has to remove the old rows from the server too,
   // otherwise the next sync pulls the replaced orders straight back in.
-  const commitOrders=list=>{
+  //
+  // The old rows are deleted *before* the new ones go up: the database refuses a
+  // second row with the same מספר פק"ע, and a replacement saved while the old
+  // row was still there would be turned away.
+  const commitOrders=async list=>{
     LS.set("importSnapshot",JSON.parse(JSON.stringify(orders)));
     let gone=[];
     if(mode==="replace"){
       const keep=new Set(list.map(o=>o.id));
       gone=orders.filter(o=>!keep.has(o.id)).map(o=>o.id);
-      if(gone.length)SB.delIds("orders",gone).catch(e=>console.warn("order cleanup skipped",e));
+      if(gone.length)await SB.delIds("orders",gone).catch(e=>console.warn("order cleanup skipped",e));
     }
     updO(prev=>mode==="replace"?list:[...prev,...list]);
     return gone;
@@ -10987,7 +11198,7 @@ function ExcelTab({orders,projects,stages,stageBlocks,workLogs,users,customTasks
     UNDO.record({user:currentUser,action,target,details,changes});
   };
 
-  const applyPri=()=>{
+  const applyPri=async()=>{
     const r=priRes;if(!r||!r.orders.length)return;
     // Remember how each operation was mapped — including the stages this import
     // creates — so the next monthly file lands on the same route with no work.
@@ -10998,6 +11209,9 @@ function ExcelTab({orders,projects,stages,stageBlocks,workLogs,users,customTasks
       else if(r.opStage[o.key])saved[o.key]=r.opStage[o.key];
     });
     LS.set(PRI_MAP_LS,saved);
+    // Engini's batches are mapped with the same table, so it is kept on the
+    // server as well (admins only — anyone else's call is simply refused).
+    sbRpc("erp_update_settings",{p_stage_map:saved}).catch(()=>{});
     if(r.newStages.length&&updS)updS(prev=>[...prev,...r.newStages]);
     if(r.newProjects.length&&updP)updP(prev=>[...prev,...r.newProjects]);
     if(mode==="merge"){
@@ -11017,7 +11231,7 @@ function ExcelTab({orders,projects,stages,stageBlocks,workLogs,users,customTasks
       toast(`עודכן מול הקיים · ${plan.added.length} פק"ע חדשות · ${plan.updated.length} עודכנו · ${plan.unchanged} ללא שינוי`,"success",7000);
       return;
     }
-    const gone=commitOrders(r.orders.map(({_pri,...o})=>o));
+    const gone=await commitOrders(r.orders.map(({_pri,...o})=>o));
     // The progress rides along with the orders it belongs to — and in "replace"
     // mode the logs of the orders that just went away go with them, or the next
     // sync pulls back progress for units that no longer exist.
@@ -11092,6 +11306,8 @@ function ExcelTab({orders,projects,stages,stageBlocks,workLogs,users,customTasks
         </div>
         {onAddPlans&&!planWorkers.length&&<div style={{fontSize:11.5,color:"var(--c-dim)",marginTop:8}}>אין עובדים בתחום האחריות שלך לשבץ</div>}
       </Card>
+
+      {canImport&&<ErpCard/>}
 
       {canImport?(
       <Card>
@@ -11370,7 +11586,7 @@ function ExcelTab({orders,projects,stages,stageBlocks,workLogs,users,customTasks
           {cur.orders.length>12&&<div style={{fontSize:11.5,color:"var(--c-dim)",padding:"6px 2px"}}>מוצגות 12 מתוך {cur.orders.length} פקודות</div>}
           </div>
           <div style={{display:"flex",gap:10,alignItems:"center",flexWrap:"wrap"}}>
-            <Btn color="#10b981" disabled={!cur.orders.length||(!!mergePlan&&!mergePlan.added.length&&!mergePlan.updated.length)} onClick={()=>{
+            <Btn color="#10b981" disabled={!cur.orders.length||(!!mergePlan&&!mergePlan.added.length&&!mergePlan.updated.length)} onClick={async()=>{
               if(priRes){applyPri();return}
               if(mode==="merge"){
                 // The template goes through the same update-in-place path as a
@@ -11388,7 +11604,7 @@ function ExcelTab({orders,projects,stages,stageBlocks,workLogs,users,customTasks
                 toast(`עודכן מול הקיים · ${plan.added.length} פק"ע חדשות · ${plan.updated.length} עודכנו · ${plan.unchanged} ללא שינוי`,"success",7000);
                 return;
               }
-              const gone=commitOrders(res.orders);
+              const gone=await commitOrders(res.orders);
               if(importWorkLogs&&((res.logs||[]).length||gone.length))importWorkLogs(res.logs||[],gone);
               recordImport({action:"ייבוא Excel",target:`${res.orders.length} פקעות`,
                 details:`${mode==="replace"?"החלפה":"הוספה"} | ${res.stats.serials} סידוריים | ${res.stats.defects} תקלות | ${res.stats.shortages} חוסרים | ${res.stats.logs} רישומי התקדמות`,
@@ -12586,7 +12802,9 @@ function App(){
   const {toast}=useToast();
   const [lightMode,setLightMode]=useState(()=>{try{return localStorage.getItem(LS_PREFIX+"light")==="1"}catch{return false}});
   const [currentUser,setCurrentUser]=useState(()=>{
-    try{const saved=localStorage.getItem(LS_PREFIX+"session");if(saved){const s=JSON.parse(saved);const cached=JSON.parse(localStorage.getItem(LS_PREFIX+"users")||"[]");const found=cached.find(u=>u.id===s.id&&u.username===s.username&&u.active!==false);if(found)return found}return null}catch{return null}
+    // A saved session is only a user once it comes with a server session too —
+    // one left over from the old client (no token) means signing in again.
+    try{if(!authSession())return null;const saved=localStorage.getItem(LS_PREFIX+"session");if(saved){const s=JSON.parse(saved);const cached=JSON.parse(localStorage.getItem(LS_PREFIX+"users")||"[]");const found=cached.find(u=>u.id===s.id&&u.username===s.username&&u.active!==false);if(found)return found}return null}catch{return null}
   });
   const [tab,setTab]=useState("dashboard");
   const [showAdmin,setShowAdmin]=useState(false);
@@ -12662,6 +12880,7 @@ function App(){
       if(workOpenRef.current){lastActivityRef.current=Date.now();return}
       toast("נותקת אוטומטית בגלל חוסר פעילות","warning");
       setCurrentUser(null);try{localStorage.removeItem(LS_PREFIX+"session")}catch{}
+      signOutAuth();
     },60000);
     return()=>{events.forEach(e=>window.removeEventListener(e,resetActivity));clearInterval(checker)};
   },[currentUser]);
@@ -12706,6 +12925,10 @@ function App(){
     // instead of 75,807. With no snapshot this is exactly what it always was —
     // one full read of everything.
     let unsentAtBoot=false;
+    // Nothing can be read before somebody signs in — the database answers only a
+    // signed-in user's token. The login reloads the page (handleLogin), and the
+    // boot below then runs exactly as it does for a returning user.
+    if(!authSession()){setLoading(false);return}
     const bootLoad=async()=>{
       let prev;
       if(sessionCid===_companyId){
@@ -12836,20 +13059,10 @@ function App(){
       if(!data?.stages?.length){
         SB.upsert("stages",DEF_STAGES.map(stageToDb)).catch(()=>{});
       }
-      // Seed fallback users + their departments with hashed passwords if no users in DB
-      if(!users?.length){
-        try{
-          // This company has no users of its own, but the demo logins may still be
-          // taken elsewhere in app_users — resolve the ids the same way the demo
-          // loader does so the seed merges instead of failing on the unique index.
-          const cid=_companyId||DEFAULT_COMPANY_ID;
-          const {idMap}=await resolveDemoUsers(FALLBACK_USERS,cid);
-          await SB.upsert("departments",DEF_DEPTS.map(d=>deptToDb({...d,managerId:idMap[d.managerId]||"",companyId:cid}))).catch(()=>{});
-          const seeded=await buildDemoUserRows(FALLBACK_USERS,idMap,cid);
-          await SB.upsert("app_users",seeded);
-          publishUsers(seeded.map(dbToUser));
-        }catch(e){console.warn("Seed users error",e)}
-      }
+      // A company is never seeded with demo logins any more. It used to be, whenever
+      // its user list came back empty — and those logins (admin/admin123, 1234 for
+      // everyone else) are printed in SETUP.md. A company now starts with the admin
+      // who signed it up, and an empty list here only means the read failed.
 
       // Restore session from fresh user list
       try{
@@ -13067,6 +13280,15 @@ function App(){
     document.addEventListener("visibilitychange",onVisible);
 
     // Try Supabase Realtime WebSocket
+    const RT_TABLES=["orders","work_logs","custom_tasks","stages","projects","stage_blocks","departments","daily_plans","pn_standards"];
+    // Each renewed token goes to every channel, or the server closes them when
+    // the old one expires.
+    const onToken=s=>{
+      if(!s||!ws||ws.readyState!==1)return;
+      RT_TABLES.forEach((t,i)=>{try{ws.send(JSON.stringify({topic:`realtime:public:${t}`,event:"access_token",
+        payload:{access_token:s.access_token},ref:"at"+i}))}catch{}});
+    };
+    AUTH_LISTENERS.add(onToken);
     const wsUrl=`wss://lwiurzkiojctwzllpnmr.supabase.co/realtime/v1/websocket?apikey=${SB_KEY}&vsn=1.0.0`;
     const connect=()=>{
       if(dead)return;
@@ -13074,12 +13296,15 @@ function App(){
         ws=new WebSocket(wsUrl);
         ws.onopen=()=>{
           console.log("Realtime WS connected");
-          const tables=["orders","work_logs","custom_tasks","stages","projects","stage_blocks","departments","daily_plans","pn_standards"];
-          tables.forEach((t,i)=>{
+          // Realtime applies the same row-level security as every read: a channel
+          // joined without the user's token streams nothing at all.
+          const token=authSession()?.access_token;
+          RT_TABLES.forEach((t,i)=>{
             ws.send(JSON.stringify({
               topic:`realtime:public:${t}`,
               event:"phx_join",
-              payload:{config:{broadcast:{ack:false},presence:{key:""},postgres_changes:[{event:"*",schema:"public",table:t}]}},
+              payload:{config:{broadcast:{ack:false},presence:{key:""},postgres_changes:[{event:"*",schema:"public",table:t}]},
+                ...(token?{access_token:token}:{})},
               ref:String(i+1)
             }));
           });
@@ -13187,7 +13412,7 @@ function App(){
     };
     connect();
 
-    return()=>{dead=true;document.removeEventListener("visibilitychange",onVisible);clearInterval(heartbeat);clearTimeout(reconnectTimer);clearTimeout(pollTimer);clearTimeout(flushTimer);try{ws?.close()}catch{}};
+    return()=>{dead=true;AUTH_LISTENERS.delete(onToken);document.removeEventListener("visibilitychange",onVisible);clearInterval(heartbeat);clearTimeout(reconnectTimer);clearTimeout(pollTimer);clearTimeout(flushTimer);try{ws?.close()}catch{}};
   },[currentUser?.id]);
 
   const ctRef=useRef(customTasks);
@@ -13458,11 +13683,31 @@ function App(){
     setCurrentUser(u);
     LS.set("session_company",cid);
     try{localStorage.setItem(LS_PREFIX+"session",JSON.stringify({id:u.id,username:u.username,companyId:cid}))}catch{}
+    // Nothing was read before the login (there was no token to read with), so
+    // the page starts over and boots the way it does for a returning user —
+    // snapshot first, then the delta.
+    if(u.freshLogin)setTimeout(()=>{try{location.reload()}catch{}},60);
   };
   const handleLogout=()=>{
     if(currentUser)addAuditEntry({userId:currentUser.id,username:currentUser.username,name:currentUser.name,action:"התנתקות",target:"",details:""});
     setCurrentUser(null);try{localStorage.removeItem(LS_PREFIX+"session")}catch{}
+    // After the journal entry has left with the token it needs.
+    setTimeout(signOutAuth,1500);
   };
+  // The server ended the session (signed out elsewhere, the user deactivated):
+  // back to the login screen.
+  useEffect(()=>{
+    AUTH_EXPIRED=()=>{toast("החיבור לשרת פג — יש להתחבר מחדש","warning",6000);setCurrentUser(null);
+      try{localStorage.removeItem(LS_PREFIX+"session")}catch{}};
+    return()=>{AUTH_EXPIRED=null};
+  },[]);
+  // The token is renewed ahead of time even on a screen nobody touches, so the
+  // realtime socket never sits on an expired one.
+  useEffect(()=>{
+    if(!currentUser)return;
+    const t=setInterval(()=>{ensureFreshAuth().catch(()=>{})},60000);
+    return()=>clearInterval(t);
+  },[currentUser]);
 
   const canEdit=currentUser?.role==="admin"||currentUser?.role==="editor"||currentUser?.canEdit===true;
 
@@ -14079,9 +14324,10 @@ function App(){
       const chunked=(arr,n)=>Array.from({length:Math.ceil(arr.length/n)},(_,i)=>arr.slice(i*n,(i+1)*n));
       // Demo departments + full team hierarchy (manager → 2 team leads → ≥3 workers each)
       const dDepts=DEF_DEPTS.map(d=>deptToDb({...d,managerId:idMap[d.managerId]||"",companyId:_companyId}));
-      // Seed demo users with hashed passwords (kept as plain text so managers can view them)
+      // Seed the demo users; their demo passwords are set through the server below.
       const demoUsers=await buildDemoUserRows(FALLBACK_USERS,idMap,_companyId);
       await SB.upsert("app_users",demoUsers);
+      await setDemoPasswords(FALLBACK_USERS,idMap);
       await SB.upsert("departments",dDepts);
       await SB.upsert("projects",dProj);
       await SB.upsert("stages",dStages);
@@ -14188,12 +14434,12 @@ function App(){
     try{
       // Delete demo records by ID prefix using Supabase like operator
       await Promise.all([
-        fetch(`${SB_URL}/rest/v1/work_logs?id=like.wl_demo_*`,{method:"DELETE",headers:sbHeaders()}),
-        fetch(`${SB_URL}/rest/v1/custom_tasks?id=like.demo_t_*`,{method:"DELETE",headers:sbHeaders()}),
+        sbFetch(`${SB_URL}/rest/v1/work_logs?id=like.wl_demo_*`,{method:"DELETE",headers:sbHeaders()}),
+        sbFetch(`${SB_URL}/rest/v1/custom_tasks?id=like.demo_t_*`,{method:"DELETE",headers:sbHeaders()}),
       ]);
-      await fetch(`${SB_URL}/rest/v1/orders?id=like.demo_o_*`,{method:"DELETE",headers:sbHeaders()});
-      await fetch(`${SB_URL}/rest/v1/departments?id=like.demo_d*`,{method:"DELETE",headers:sbHeaders()}).catch(()=>{});
-      await fetch(`${SB_URL}/rest/v1/pn_standards?id=like.demo_std_*`,{method:"DELETE",headers:sbHeaders()}).catch(()=>{});
+      await sbFetch(`${SB_URL}/rest/v1/orders?id=like.demo_o_*`,{method:"DELETE",headers:sbHeaders()});
+      await sbFetch(`${SB_URL}/rest/v1/departments?id=like.demo_d*`,{method:"DELETE",headers:sbHeaders()}).catch(()=>{});
+      await sbFetch(`${SB_URL}/rest/v1/pn_standards?id=like.demo_std_*`,{method:"DELETE",headers:sbHeaders()}).catch(()=>{});
       const noDemoStd=psRef.current.filter(r=>!String(r.id||"").startsWith("demo_std_"));
       setPnStandards(noDemoStd);LS.set("pnStandards",noDemoStd);psRef.current=noDemoStd;
       const data=await dbLoadAll();
@@ -14208,7 +14454,7 @@ function App(){
   };
   useEffect(()=>{const isi=window.matchMedia("(display-mode:standalone)").matches||window.navigator.standalone;if(isi){setIsStandalone(true);return;}const h=e=>{e.preventDefault();setInstallPrompt(e);setShowInstall(true)};window.addEventListener("beforeinstallprompt",h);window.addEventListener("appinstalled",()=>{setShowInstall(false);setInstallPrompt(null);setIsStandalone(true)});return()=>window.removeEventListener("beforeinstallprompt",h)},[]);
   // Service Worker
-  useEffect(()=>{if(!("serviceWorker" in navigator))return;navigator.serviceWorker.register("./sw.js?v=33").then(reg=>{swRegRef.current=reg;if(reg.waiting)setShowUpdate(true);reg.addEventListener("updatefound",()=>{const nw=reg.installing;if(!nw)return;nw.addEventListener("statechange",()=>{if(nw.state==="installed"&&navigator.serviceWorker.controller)setShowUpdate(true)})});setInterval(()=>reg.update(),30*60*1000)}).catch(()=>{});
+  useEffect(()=>{if(!("serviceWorker" in navigator))return;navigator.serviceWorker.register("./sw.js?v=34").then(reg=>{swRegRef.current=reg;if(reg.waiting)setShowUpdate(true);reg.addEventListener("updatefound",()=>{const nw=reg.installing;if(!nw)return;nw.addEventListener("statechange",()=>{if(nw.state==="installed"&&navigator.serviceWorker.controller)setShowUpdate(true)})});setInterval(()=>reg.update(),30*60*1000)}).catch(()=>{});
     // Reload only when a *replacement* worker takes over an already-controlled page
     // — i.e. a real update, which is what the update banner triggers.
     //

@@ -5,9 +5,11 @@
   "description": "OmniView — מערכת ניהול רצפת ייצור (PWA)",
   "scripts": {
     "build": "node vercel-build.js",
-    "test": "node tools/hold-test.js && node tools/number-test.js && node tools/plan-test.js && node --max-old-space-size=4096 tools/sync-test.js"
+    "test": "node tools/hold-test.js && node tools/number-test.js && node tools/plan-test.js && node --max-old-space-size=4096 tools/sync-test.js && node tools/db-test.js && node tools/erp-test.js && node tools/auth-test.js",
+    "build:erp-core": "node tools/build-erp-core.js"
   },
   "devDependencies": {
-    "@babel/standalone": "7.23.2"
+    "@babel/standalone": "7.23.2",
+    "pg": "^8.23.1"
   }
 }
