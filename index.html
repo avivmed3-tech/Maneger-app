@@ -523,6 +523,78 @@ async function sbGetAllSeq(table,params,cap,firstRows,size){
   }
   return out;
 }
+// ── Paging that costs the same on the last page as on the first ───────────
+// A page asked for by offset makes the database walk past every row before it
+// and throw them away: page 87 of work_logs reads 87,000 rows to return 1,000.
+// On an idle database that page took 1.5 seconds (measured on production), and a
+// whole read of 107 pages cost the database some 5.7 million rows. After the
+// Priority import of 13,882 פק"ע and 106,998 progress records, every phone
+// opening on yesterday's copy asked for all of them at once, six pages at a time:
+// the deep pages went past the three-second limit the database gives the app
+// (57014), the connection pool ran dry (PGRST003), one failed page failed the
+// read, and the read started again from the first page — on every phone, every
+// sweep, all morning. A שיבוץ made at two minutes past ten never reached the worker's
+// phone, because it was waiting behind that read.
+//
+// Asked instead for "the rows after the last one I have", in the order the read
+// is already in, every page is an index lookup and a thousand rows: 1.6 ms for
+// the same page 87. That needs the order to be a column the filter can name
+// safely — a timestamp — with id breaking the tie, which is exactly the order of
+// every delta read and of the full reads of the big tables. Anything else (a name,
+// a מק"ט) keeps the offset paging above; those tables are a few pages long.
+const SB_KEYSET_COLS=new Set(["created_at","updated_at"]);
+function sbKeysetCol(params){
+  const m=/(?:^|&)order=([a-z_]+)\.asc,id\.asc(?:&|$)/.exec(params);
+  return m&&SB_KEYSET_COLS.has(m[1])?m[1]:null;
+}
+// A value inside a PostgREST or=(…): quoted, so the "." ":" "+" and "," that a
+// timestamp or an imported id can hold are read as the value and nothing else.
+const sbQuote=v=>'"'+String(v).replace(/\\/g,"\\\\").replace(/"/g,'\\"')+'"';
+// The rows strictly after `last` in (col, id) order. The gte is what the index
+// starts its scan on; the or= drops the rows of that one timestamp already read.
+// A batch upsert stamps its 200 rows with one timestamp, so that is never more
+// than a batch.
+const sbAfter=(col,last)=>`${col}=gte.${encodeURIComponent(last[col])}&or=${encodeURIComponent(`(${col}.gt.${sbQuote(last[col])},id.gt.${sbQuote(last.id)})`)}`;
+// The cursor is read off the rows, so the column has to come back with them.
+const sbSelectWith=(params,col)=>params.replace(/(^|&)select=([^&]*)/,(m,pre,list)=>
+  list==="*"||list.split(",").includes(col)?m:`${pre}select=${list},${col}`);
+// Reads a table one page after another along (col, id). `pages` stops it early
+// with `more` set — what was read is a whole prefix of the order, so the caller
+// can keep it and carry on from there next time. A page that fails throws with
+// the rows read before it on `partial`, for the same reason.
+//
+// Postgres puts NULLs after everything else and a "greater than" never reaches
+// them, so a read that does not already exclude them (a delta's col=gte does)
+// takes the non-NULL rows first and then the NULL ones, walked by id alone.
+async function sbWalk(table,params,col,{cap=400000,pages=Infinity}={}){
+  const out=[];
+  const run=async(base,col)=>{
+    let last=null,widest=0,n=0;
+    while(out.length<cap){
+      if(n>=pages)return true;
+      const q=!last?base:col?`${base}&${sbAfter(col,last)}`:`${base}&id=gt.${encodeURIComponent(last.id)}`;
+      let page;
+      // Only the first page asks for a total. It is what tells a short first page
+      // (the whole table) from a page cut at the server's ceiling, without one more
+      // request for nothing on every idle sweep.
+      try{page=await sbPage(table,q,0,SB_PAGE,!last)}
+      catch(e){e.partial=out;e.cursor=!!last;throw e}
+      n++;
+      const rows=page.rows;
+      for(const r of rows)out.push(r);
+      if(!rows.length)break;
+      if(!last&&page.total>=0&&rows.length>=page.total)break;
+      if(rows.length<widest)break;
+      widest=Math.max(widest,rows.length);
+      last=rows[rows.length-1];
+    }
+    return false;
+  };
+  const base=sbSelectWith(params,col);
+  if(new RegExp(`(?:^|&)${col}=gte\\.`).test(params))return{rows:out,more:await run(base,col)};
+  if(await run(`${base}&${col}=not.is.null`,col))return{rows:out,more:true};
+  return{rows:out,more:await run(`${base}&${col}=is.null`,null)};
+}
 // One upsert request. Returns null once the server has taken the rows, and the
 // error text when it has not. Each retry only ever *narrows* what is sent — one
 // more column the database turns out not to have — so a real failure still
@@ -733,14 +805,32 @@ const SEL_OFF={};
 const sbColErr=e=>/42703|PGRST100|PGRST202|does not exist/i.test(String((e&&e.message)||e||""));
 // One read of one table, narrowed to the columns above wherever the database
 // allows it. Everything that reads a mirrored table goes through here.
-async function sbRead(table,params,cap){
+// A server that will not parse the cursor filters (a PostgREST older than the
+// app expects) is read by offset for the rest of the session: slower under load,
+// and still correct.
+let SB_KEYSET_OFF=false;
+// Answers {rows, more}: `more` is a read stopped at `opt.pages`, see sbWalk.
+async function sbRead(table,params,cap,opt){
   const sel=(!SEL_OFF[table]&&COLS[table])?`select=${COLS[table]}&`:"";
-  try{return await SB.getAll(table,sel+params,cap)}
+  const read=async p=>{
+    const col=!SB_KEYSET_OFF&&sbKeysetCol(p);
+    if(col){
+      try{return await sbWalk(table,p,col,{cap,...opt})}
+      catch(e){
+        if(!(e&&e.cursor&&/PGRST100|failed to parse/i.test(String(e.message||e))))throw e;
+        delete e.partial;
+        SB_KEYSET_OFF=true;
+        console.warn("[SB] השרת לא קיבל את סינון הדפים — חוזרים לדפדוף לפי מיקום",String(e.message||e));
+      }
+    }
+    return{rows:await SB.getAll(table,p,cap),more:false};
+  };
+  try{return await read(sel+params)}
   catch(e){
     if(!sel||!sbColErr(e))throw e;
     SEL_OFF[table]=true;
     console.warn(`[SB] ${table} — רשימת העמודות נדחתה, חוזרים לקריאת כל העמודות`);
-    return SB.getAll(table,params,cap);
+    return read(params);
   }
 }
 
@@ -1046,20 +1136,37 @@ const MIRROR=[
 const MIRROR_BY_TABLE={};
 MIRROR.forEach(s=>{MIRROR_BY_TABLE[s.t]=s});
 
+// How many pages one table's delta may read in one sweep. After a big import the
+// delta is the whole table again — 107 pages of work_logs — and a sweep that
+// lands only once all of it is in keeps every other table waiting behind it and
+// keeps none of it if the phone reloads at page 100. Twenty pages is a few
+// seconds on a phone; the sweep applies them, moves the watermark past them, and
+// comes straight back for the next twenty.
+const DELTA_PAGES=20;
 // One table: the rows that moved since the watermark when there is one to go on,
-// the whole table otherwise.
+// the whole table otherwise. `more` — the delta stopped before the end, at its
+// page budget or at a page that failed (`error`); what it did read is a whole
+// prefix in updated_at order, so it is kept and the next read starts after it.
 async function dbReadTable(spec,cf,prev){
   const wm=prev?WATERMARKS[spec.t]:"";
   if(wm&&!DELTA_OFF[spec.t]){
     try{
-      return{rows:await sbRead(spec.t,cf+`updated_at=gte.${encodeURIComponent(wm)}&`+DELTA_ORDER),delta:true};
+      const r=await sbRead(spec.t,cf+`updated_at=gte.${encodeURIComponent(wm)}&`+DELTA_ORDER,undefined,{pages:DELTA_PAGES});
+      return{rows:r.rows,delta:true,more:r.more};
     }catch(e){
+      // Taken off the error, which is logged and kept: it must not hold the rows.
+      const part=e&&e.partial;
+      if(e)delete e.partial;
+      if(part&&part.length)return{rows:part,delta:true,more:true,error:e};
       if(!/updated_at/i.test(String((e&&e.message)||e)))throw e;
       DELTA_OFF[spec.t]=true;
       console.warn(`[SB] ${spec.t}.updated_at לא קיים במסד — הסנכרון המצטבר חוזר לקריאה מלאה`);
     }
   }
-  return{rows:await sbRead(spec.t,cf+spec.order),delta:false};
+  // A full read is all or nothing: half a table is not the table. So the pages it
+  // did get go nowhere, and are not left hanging off the error either.
+  try{return{rows:(await sbRead(spec.t,cf+spec.order)).rows,delta:false}}
+  catch(e){if(e)delete e.partial;throw e}
 }
 
 // Fold what came back into what is already held. Handing back the *same array*
@@ -1148,6 +1255,17 @@ async function dbReadIdle(){while(dbReadBusy())await new Promise(r=>setTimeout(r
 // read is incremental; omitted, every table is read whole. `prev.reconcile` adds
 // the deletion check above, which is cheap enough to run every few minutes and
 // replaces the full re-read that used to serve the same purpose.
+//
+// The answer can be partial, and says so:
+//   more   — a table has rows still to come (see DELTA_PAGES); sweep again soon.
+//   failed — [{t, error, progress}] tables whose read failed. Each keeps what this
+//            device already held (plus, with `progress`, the pages read before
+//            the failure), and every other table lands as usual. A table fails
+//            the whole read only when there is nothing held to fall back on.
+//
+// It used to be all or nothing: one page of work_logs past the database's time
+// limit threw away the שיבוץ, the משימות and the פק"ע that had all arrived
+// beside it, and the next sweep asked for every one of them again.
 async function dbLoadAll(prev){
   const id=++dbReadSeq;
   DB_READS.set(id,Date.now());
@@ -1158,14 +1276,23 @@ async function dbLoadAllNow(prev){
   const cid=_companyId||DEFAULT_COMPANY_ID;
   const cfNoAmp=`company_id=eq.${cid}`;
   const cf=cfNoAmp+"&";
-  const out={},watermarks={};
+  const out={},watermarks={},failed=[];
+  let more=false;
   await Promise.all(MIRROR.map(async spec=>{
     let read;
     try{read=await dbReadTable(spec,cf,prev)}
     catch(e){
       if(spec.optional){out[spec.key]=null;return}
       if(spec.soft){out[spec.key]=(prev&&prev[spec.key])||[];return}
-      throw e;
+      if(!prev||!Array.isArray(prev[spec.key]))throw e;
+      console.warn(`[SB] ${spec.t} — הקריאה נכשלה, נשאר מה שכבר במכשיר:`,String((e&&e.message)||e));
+      out[spec.key]=prev[spec.key];failed.push({t:spec.t,error:e,progress:false});
+      return;
+    }
+    if(read.more)more=true;
+    if(read.error){
+      console.warn(`[SB] ${spec.t} — הקריאה נעצרה אחרי ${read.rows.length} שורות; ממשיכים משם:`,String((read.error&&read.error.message)||read.error));
+      failed.push({t:spec.t,error:read.error,progress:true});
     }
     const fresh=read.rows.map(r=>spec.map(r));
     const wm=maxUpdatedAt(read.rows);
@@ -1194,11 +1321,13 @@ async function dbLoadAllNow(prev){
     SYNC.prime(spec.t,fresh,spec.toDb);
   }));
   out.watermarks=watermarks;
+  if(more)out.more=true;
+  if(failed.length)out.failed=failed;
   return out;
 }
 async function dbLoadUsers(){
   const cid=_companyId||DEFAULT_COMPANY_ID;
-  const rows=await sbRead("app_users",`company_id=eq.${cid}&`+ORDER_BY.app_users);
+  const {rows}=await sbRead("app_users",`company_id=eq.${cid}&`+ORDER_BY.app_users);
   return rows.map(dbToUser);
 }
 // Demo departments — each has one manager (dept_manager) + two team leads, every team lead has ≥3 workers.
@@ -12853,8 +12982,10 @@ function App(){
         // rows, so refreshing it is what keeps the next delta short.
         scheduleSnapshot();
         // Clears the ⏳ the snapshot path put up: what is on screen is now what the
-        // server holds, not yesterday's copy of it.
-        setSync("ok");
+        // server holds, not yesterday's copy of it. Unless it is not all there
+        // yet — a big import still coming in pages, or a table that could not be
+        // read — in which case the ⏳ stays and the sweep carries on from here.
+        setSync(data.more||data.failed?"saving":"ok");
         // Rows the snapshot holds that the server was never seen to accept — see
         // the priming above. Nothing else would send them: no click has happened,
         // so no save is coming. The rows that did land were just read back by the
@@ -12866,11 +12997,13 @@ function App(){
       }
       if(users?.length){publishUsers(users)}
 
-      // Seed default projects/stages/users if DB is empty
-      if(!data?.projects?.length){
+      // Seed default projects/stages/users if DB is empty — which a table that
+      // could not be read says nothing about.
+      const unread=t=>!!(data?.failed||[]).some(f=>f.t===t);
+      if(!data?.projects?.length&&!unread("projects")){
         SB.upsert("projects",DEF_PROJ.map(projectToDb)).catch(()=>{});
       }
-      if(!data?.stages?.length){
+      if(!data?.stages?.length&&!unread("stages")){
         SB.upsert("stages",DEF_STAGES.map(stageToDb)).catch(()=>{});
       }
       // Seed fallback users + their departments with hashed passwords if no users in DB
@@ -12964,6 +13097,9 @@ function App(){
   // database that used to serve the same purpose and cost 40 MB a time.
   const RECONCILE_MS=5*60*1000;
   const lastReconcileRef=useRef(0);
+  // The sweep loop's "come back in a moment", for a refresh that brought only the
+  // first pages of a big import and leaves the rest to the sweep.
+  const pollSoonRef=useRef(null);
   // Assigned below, once the collection refs exist: the collections as they stand,
   // in the shape an incremental read merges into, and a burst of rows straight
   // from realtime messages.
@@ -12997,6 +13133,12 @@ function App(){
       lastReconcileRef.current=Date.now();
       if(data)applyRemoteRef.current(data);
       if(users?.length)publishUsers(users);
+      // What did land is on screen either way; the header says whether that is
+      // everything. A table that made no progress at all is an error; one still
+      // coming in pages is ⏳, and the sweep picks it up in a moment.
+      const stuck=(data?.failed||[]).find(f=>!f.progress);
+      if(stuck)throw stuck.error;
+      if(data?.more){setSync("saving");pollSoonRef.current?.();return}
       setSync("ok");
     }catch{setSync("error")}
   };
@@ -13046,6 +13188,7 @@ function App(){
     let sweepSoon=false;
     const arm=ms=>{if(dead)return;clearTimeout(pollTimer);pollTimer=setTimeout(poll,ms)};
     const pollSoon=()=>{sweepSoon=true;arm(POLL_BLOCKED)};
+    pollSoonRef.current=pollSoon;
 
     // Rows off the socket wait here for a moment and go in together — see
     // applyRows for what one message at a time cost. A later message about the same
@@ -13103,9 +13246,18 @@ function App(){
         if(data&&remoteApplyBlocked()){pollSoon();return}
         if(data){
           // Only the collections that actually moved are applied — see applyRemote.
+          // That includes a sweep in which one table failed: the rest of it is
+          // good, and a שיבוץ must not wait on a page of work_logs.
           applyRemoteRef.current(data);
+          // A table still coming in pages: straight back for the next ones.
+          if(data.more)sweepSoon=true;
+          // A table that failed without getting anywhere counts against the
+          // server as a failed sweep always did. One that got some pages in before
+          // its failure is still moving, and is simply carried on with.
+          const stuck=(data.failed||[]).find(f=>!f.progress);
+          if(stuck)throw stuck.error;
           dbFailsRef.current=0;setDbDown(null);
-          setSync("ok");
+          setSync(data.more?"saving":"ok");
         }
       }catch(e){
         console.warn("Poll error",e);
@@ -13246,7 +13398,7 @@ function App(){
     };
     connect();
 
-    return()=>{dead=true;document.removeEventListener("visibilitychange",onVisible);clearInterval(heartbeat);clearTimeout(reconnectTimer);clearTimeout(pollTimer);clearTimeout(flushTimer);try{ws?.close()}catch{}};
+    return()=>{dead=true;if(pollSoonRef.current===pollSoon)pollSoonRef.current=null;document.removeEventListener("visibilitychange",onVisible);clearInterval(heartbeat);clearTimeout(reconnectTimer);clearTimeout(pollTimer);clearTimeout(flushTimer);try{ws?.close()}catch{}};
   },[currentUser?.id]);
 
   const ctRef=useRef(customTasks);
