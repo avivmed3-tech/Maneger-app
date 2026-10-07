@@ -1113,11 +1113,48 @@ async function dbGoneIds(spec,cfNoAmp,rows){
   return gone.size?gone:null;
 }
 
+// ── One read of the database at a time ────────────────────────────────────
+// On an ordinary sweep a read is a few empty arrays, and two of them side by side
+// cost nothing. Right after a big import it is every row the import wrote: a
+// Priority file of 13,882 פק"ע brought 106,998 progress records with it, 107
+// pages that a computer reads in twelve seconds and a phone in a minute or so.
+//
+// Nothing stopped a second read from starting while the first was still on its
+// way. The boot load, the sweep two seconds after it, every return to the app,
+// every tap on refresh, a logout and login: each began the same hundred thousand
+// rows again from the same watermark. They shared one phone's connection and one
+// thread, so each went slower the more there were, and none of them got to the
+// end. One phone started seventeen such reads in ten minutes and fetched 129
+// pages between them, not one read's 107; it sat on yesterday's numbers the whole
+// time, with ⏳ in the header, while the database answered every request in a
+// third of a second.
+//
+// So a sweep that finds a read already running does not start its own: the
+// running one is bringing the same rows, and the sweep after it is a delta of
+// almost nothing. A refresh waits for it and then reads. The age limit is for a
+// fetch that never settles, on a connection that dropped without saying so: it
+// must not hold every later sweep back forever.
+const DB_READS=new Map();
+let dbReadSeq=0;
+const DB_READ_STALE_MS=3*60*1000;
+function dbReadBusy(){
+  const now=Date.now();
+  for(const t of DB_READS.values())if(now-t<DB_READ_STALE_MS)return true;
+  return false;
+}
+async function dbReadIdle(){while(dbReadBusy())await new Promise(r=>setTimeout(r,250))}
+
 // `prev` — the collections currently held, keyed as they are in state. Given, the
 // read is incremental; omitted, every table is read whole. `prev.reconcile` adds
 // the deletion check above, which is cheap enough to run every few minutes and
 // replaces the full re-read that used to serve the same purpose.
 async function dbLoadAll(prev){
+  const id=++dbReadSeq;
+  DB_READS.set(id,Date.now());
+  try{return await dbLoadAllNow(prev)}
+  finally{DB_READS.delete(id)}
+}
+async function dbLoadAllNow(prev){
   const cid=_companyId||DEFAULT_COMPANY_ID;
   const cfNoAmp=`company_id=eq.${cid}`;
   const cf=cfNoAmp+"&";
@@ -12943,10 +12980,14 @@ function App(){
   // in flight, or a save just landed — a fetch that started before the save finished
   // returns stale rows and would overwrite the local change (the "click resets" bug).
   const remoteApplyBlocked=()=>pendingSaveRef.current||saveRunningRef.current||Date.now()-lastPersistRef.current<5000;
-  const refreshFromDB=useCallback(async(force)=>{
+  const refreshNow=async(force)=>{
     if(!force&&remoteApplyBlocked())return;
     setSync("saving");
     try{
+      // A read that is still running — the boot load, a sweep — is bringing the
+      // same rows. Waiting for it first means this one only asks for what moved
+      // since, instead of racing it for the same hundred thousand rows.
+      await dbReadIdle();
       // A manual refresh must not clobber unsaved local changes — wait for any
       // in-flight save, flush any pending one, and bail if the data still isn't saved
       for(let i=0;i<50&&saveRunningRef.current;i++)await new Promise(r=>setTimeout(r,100));
@@ -12958,6 +12999,17 @@ function App(){
       if(users?.length)publishUsers(users);
       setSync("ok");
     }catch{setSync("error")}
+  };
+  // A refresh already on its way is the answer to the next tap as well: someone
+  // looking at stale numbers taps it again and again, and each tap used to be
+  // another full read beside the first.
+  const refreshRunRef=useRef(null);
+  const refreshFromDB=useCallback(force=>{
+    if(refreshRunRef.current)return refreshRunRef.current;
+    const run=refreshNow(force);
+    refreshRunRef.current=run;
+    run.finally(()=>{if(refreshRunRef.current===run)refreshRunRef.current=null});
+    return run;
   },[]);
 
   // ── Supabase Realtime (with polling fallback) ──────────────────
@@ -13033,6 +13085,13 @@ function App(){
       if(document.visibilityState==="hidden"){arm(POLL_LIVE);return}
       // Skip while a local change is unsaved / just saved (avoid overwriting it)
       if(remoteApplyBlocked()){arm(POLL_BLOCKED);return}
+      // A read is already running — the boot load, a refresh, the sweep before a
+      // logout, or this sweep's own previous pass that someone re-armed. It brings
+      // the same rows; a second one beside it only halves the speed of both. See
+      // DB_READS. sweepSoon makes a sweep of this loop that is still running re-arm
+      // quickly when it lands, so whatever asked for this one is not kept waiting
+      // a whole interval.
+      if(dbReadBusy()){sweepSoon=true;arm(POLL_BLOCKED);return}
       try{
         sweepSoon=false;
         const due=Date.now()-lastReconcileRef.current>RECONCILE_MS;
