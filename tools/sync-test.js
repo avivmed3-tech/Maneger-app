@@ -566,6 +566,54 @@ ok(!settled.v.some(o=>o.id==="imp5")&&settled.v.length===999,"and a plain delete
 if(typeof stop==="function")stop();
 ctx.fetch_=(url,opts)=>handle(url,opts);
 
+console.log("\n── 11. a read already running ─────────────────────────────");
+// After a Priority import of 13,882 פק"ע and 106,998 progress records, a phone
+// opened on yesterday's snapshot and began reading all of them — and then the
+// sweep two seconds later began the same read again, and so did every tap on
+// refresh, every return to the app, every logout and login. Seventeen reads in
+// ten minutes, 129 pages between them, and not one of them finished. A sweep
+// now leaves a running read alone, and a refresh waits for it.
+let openGate;const gate3=new Promise(r=>{openGate=r});
+const starts={};
+ctx.fetch_=async(url,opts)=>{
+  const t=new URL(url).pathname.split("/rest/v1/")[1];
+  const rng=opts&&opts.headers&&opts.headers.Range;
+  if(rng&&rng.startsWith("0-")&&!(opts&&opts.method))starts[t]=(starts[t]||0)+1;
+  await gate3;return handle(url,opts);
+};
+// The header is only drawn once the splash is down, so render a second time with
+// `loading` cleared and pick the refresh handler off the props it is given.
+let tapRefresh=null;
+m=mountApp();
+m.loading.v=false;hooks.slot=0;hooks.effects=[];
+const realCE=React.createElement;
+React.createElement=(type,props)=>{if(props&&typeof props.onRefresh==="function")tapRefresh=props.onRefresh;return null};
+run("App")();
+React.createElement=realCE;
+ok(typeof tapRefresh==="function","the header's refresh button was found");
+const sweepLoop=hooks.effects.find(f=>/realtime\/v1\/websocket/.test(String(f)));
+const running=run("dbLoadAll()");
+ok(run("dbReadBusy()"),"a read on its way is seen as one");
+const stopLoop=sweepLoop();
+fireParked();
+await settle();
+ok(starts.work_logs===1,`the sweep does not start a second read beside it (${starts.work_logs} read of work_logs)`);
+const taps=[tapRefresh(),tapRefresh(),tapRefresh()];
+ok(taps[0]===taps[1]&&taps[1]===taps[2],"three taps on refresh are one refresh");
+fireParked();
+await settle();
+ok(starts.work_logs===1,`and the refresh waits instead of racing it (${starts.work_logs} read of work_logs)`);
+openGate();
+await running;
+await taps[0];
+ok(starts.work_logs===2,`once it lands, the refresh reads — once (${starts.work_logs} reads of work_logs)`);
+ok(!run("dbReadBusy()"),"and nothing is left marked as running");
+fireParked();
+await settle(40);
+ok(starts.work_logs===3,`with nothing running, the sweep reads again (${starts.work_logs} reads of work_logs)`);
+if(typeof stopLoop==="function")stopLoop();
+ctx.fetch_=(url,opts)=>handle(url,opts);
+
 console.log(`\n${fails?"✗ "+fails+" failed":"✓ all assertions passed"}`);
 process.exit(fails?1:0);
 })().catch(e=>{console.error("harness error:",e);process.exit(1)});
