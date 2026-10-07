@@ -26,29 +26,66 @@ const {code}=Babel.transform(html.slice(s,e),{presets:["react"],sourceType:"scri
 
 // ── fake PostgREST ────────────────────────────────────────────────────────
 const DB={};                       // table -> [rows]
-const stats={requests:0,rowsOut:0,bytesOut:0,byTable:{}};
-function note(t,rows,bytes){
-  stats.requests++;stats.rowsOut+=rows;stats.bytesOut+=bytes;
-  const b=stats.byTable[t]||(stats.byTable[t]={req:0,rows:0,bytes:0});
-  b.req++;b.rows+=rows;b.bytes+=bytes;
+// `scanned` is what the database pays for a page: an offset is walked past row by
+// row before the page itself is read, so page N of an offset read costs N pages.
+const stats={requests:0,rowsOut:0,bytesOut:0,scanned:0,byTable:{}};
+function note(t,rows,bytes,scanned){
+  stats.requests++;stats.rowsOut+=rows;stats.bytesOut+=bytes;stats.scanned+=scanned;
+  const b=stats.byTable[t]||(stats.byTable[t]={req:0,rows:0,bytes:0,scanned:0});
+  b.req++;b.rows+=rows;b.bytes+=bytes;b.scanned+=scanned;
 }
 const PAGE_CAP=1000;
+// The filters the app sends, the way PostgREST reads them: col=op.value, any
+// number of them on one column, and or=(col.op."value",…) with quoted values.
+const cmp=(a,b)=>a<b?-1:a>b?1:0;
+function match(val,expr){
+  if(expr==="is.null")return val==null;
+  if(expr==="not.is.null")return val!=null;
+  const m=/^(eq|gt|gte|lt|lte|in)\.([\s\S]*)$/.exec(expr);
+  if(!m)throw new Error("fake PostgREST: unknown filter "+expr);
+  const [,op,arg]=m;
+  if(op==="in")return new Set(arg.slice(1,-1).split(",").map(x=>x.replace(/^"|"$/g,""))).has(String(val));
+  if(val==null)return false;
+  const c=cmp(String(val),arg);
+  return op==="eq"?c===0:op==="gt"?c>0:op==="gte"?c>=0:op==="lt"?c<0:c<=0;
+}
+function orTerms(s){
+  const out=[];let cur="",q=false;
+  for(let i=0;i<s.length;i++){
+    const ch=s[i];
+    if(q&&ch==="\\"){cur+=s[++i];continue}
+    if(ch==='"'){q=!q;continue}
+    if(!q&&ch===","){out.push(cur);cur="";continue}
+    cur+=ch;
+  }
+  out.push(cur);
+  return out.map(t=>{const i=t.indexOf(".");return{col:t.slice(0,i),expr:t.slice(i+1)}});
+}
 function handle(url,opts){
   const u=new URL(url);
   const table=u.pathname.split("/rest/v1/")[1];
   const p=u.searchParams;
   let rows=(DB[table]||[]).slice();
-  const cid=p.get("company_id");
-  if(cid)rows=rows.filter(r=>String(r.company_id)===cid.replace(/^eq\./,""));
-  const gte=p.get("updated_at");
-  if(gte)rows=rows.filter(r=>String(r.updated_at)>=decodeURIComponent(gte.replace(/^gte\./,"")));
-  const inIds=p.get("id");
-  if(inIds&&inIds.startsWith("in.")){
-    const set=new Set(inIds.slice(4,-1).split(",").map(x=>x.replace(/^"|"$/g,"")));
-    rows=rows.filter(r=>set.has(r.id));
+  for(const [k,v] of p.entries()){
+    if(k==="select"||k==="order")continue;
+    if(k==="or"){
+      if(!/^\(.*\)$/.test(v))throw new Error("fake PostgREST: bad or= "+v);
+      const terms=orTerms(v.slice(1,-1));
+      rows=rows.filter(r=>terms.some(t=>match(r[t.col],t.expr)));
+      continue;
+    }
+    rows=rows.filter(r=>match(r[k],v));
   }
-  const order=(p.get("order")||"").split(",")[0];
-  if(order){const col=order.split(".")[0];rows.sort((a,b)=>String(a[col]??"")<String(b[col]??"")?-1:String(a[col]??"")>String(b[col]??"")?1:String(a.id)<String(b.id)?-1:1)}
+  // NULLs last, as Postgres sorts them ascending.
+  const order=(p.get("order")||"").split(",").filter(Boolean).map(o=>o.split(".")[0]);
+  if(order.length)rows.sort((a,b)=>{
+    for(const col of order){
+      const x=a[col],y=b[col];
+      if(x==null||y==null){if(x==null&&y==null)continue;return x==null?1:-1}
+      const c=cmp(String(x),String(y));if(c)return c;
+    }
+    return 0;
+  });
   const total=rows.length;
   const sel=p.get("select");
   if(sel&&sel!=="*"){const cols=sel.split(",");rows=rows.map(r=>{const o={};for(const c of cols)if(c in r)o[c]=r[c];return o})}
@@ -57,7 +94,7 @@ function handle(url,opts){
   const page=rows.slice(from,Math.min(to+1,from+PAGE_CAP));
   const method=(opts&&opts.method)||"GET";
   const body=method==="HEAD"?"":JSON.stringify(page);
-  note(table,method==="HEAD"?0:page.length,body.length);
+  note(table,method==="HEAD"?0:page.length,body.length,method==="HEAD"?0:from+page.length);
   return{
     ok:true,status:200,
     headers:{get:h=>h.toLowerCase()==="content-range"?`${from}-${from+page.length-1}/${total}`:null},
@@ -133,7 +170,7 @@ ctx.window=ctx;ctx.globalThis=ctx;ctx.self=ctx;
 vm.createContext(ctx);
 vm.runInContext(code,ctx,{filename:"app.js"});
 
-function resetStats(){stats.requests=0;stats.rowsOut=0;stats.bytesOut=0;stats.byTable={}}
+function resetStats(){stats.requests=0;stats.rowsOut=0;stats.bytesOut=0;stats.scanned=0;stats.byTable={}}
 
 const run=expr=>vm.runInContext(expr,ctx);
 const CID="00000000-0000-0000-0000-000000000001";
@@ -575,10 +612,16 @@ console.log("\n── 11. a read already running ──────────�
 // now leaves a running read alone, and a refresh waits for it.
 let openGate;const gate3=new Promise(r=>{openGate=r});
 const starts={};
+// A read starts on its first page: row 0, and no cursor saying where the page
+// before it ended (a keyset page is always row 0 too — it is the cursor that
+// moves). The NULL tail of a full read is part of the same read.
+const firstPage=(url,opts)=>{
+  const rng=opts&&opts.headers&&opts.headers.Range;
+  return!!rng&&rng.startsWith("0-")&&!(opts&&opts.method)&&!/[?&](or=|id=gt\.)|=is\.null/.test(url);
+};
 ctx.fetch_=async(url,opts)=>{
   const t=new URL(url).pathname.split("/rest/v1/")[1];
-  const rng=opts&&opts.headers&&opts.headers.Range;
-  if(rng&&rng.startsWith("0-")&&!(opts&&opts.method))starts[t]=(starts[t]||0)+1;
+  if(firstPage(url,opts))starts[t]=(starts[t]||0)+1;
   await gate3;return handle(url,opts);
 };
 // The header is only drawn once the splash is down, so render a second time with
@@ -612,6 +655,184 @@ fireParked();
 await settle(40);
 ok(starts.work_logs===3,`with nothing running, the sweep reads again (${starts.work_logs} reads of work_logs)`);
 if(typeof stopLoop==="function")stopLoop();
+ctx.fetch_=(url,opts)=>handle(url,opts);
+
+console.log("\n── 12. the morning after a replace import ─────────────────");
+// What happened in production. A Priority import replaced every פק"ע (13,882) and
+// every progress record (106,998). A phone holding yesterday's copy had to read
+// all of them again as a delta, six offset pages at a time: the deep pages cost
+// the database a second and a half each, went past its three-second limit as
+// soon as a few phones did it at once, and one failed page threw away the whole
+// sweep — including the שיבוץ the department manager had just made, which sat on
+// the server and never reached the worker. Scaled down here to 1,500 פק"ע and
+// 30,000 records, written in batches of 300 that share a timestamp, as an
+// import's upserts do.
+ctx.fetch_=(url,opts)=>handle(url,opts);
+const KEYS=["orders","projects","stages","stageBlocks","workLogs","customTasks","departments","dailyPlans","pnStandards"];
+const at=n=>new Date(Date.UTC(2026,9,7,5,38,0)+n*7).toISOString();
+const mkOrder=(id,i,t)=>({id,wo_number:"FT2-"+id,pn:"PN"+(i%40),description:"",qty:10,unit_price:0,project_id:"p1",branch:"53",
+  received_date:null,target_date:null,stage_ids:["s1","s2"],block_id:null,serials:[{id:id+"s1",sn:"1"}],shortages:[],defects:[],
+  delivered_serials:[],status:"partial",erp_status:"ממתין ליצור",erp_note:null,company_id:CID,created_at:t,updated_at:t});
+const mkLog=(id,i,t)=>({id,user_id:"u"+(i%9),user_name:"עובדת",serial_id:null,serial_sn:null,stage_id:"s1",order_id:"n"+(i%1500),
+  start_time:t,end_time:t,completed:true,duration_min:0,paused:false,pause_start:null,total_pause_min:0,pause_log:[],
+  bulk:true,bulk_group_id:null,bulk_count:1,hold_info:null,company_id:CID,created_at:t,updated_at:t});
+// Yesterday: what the phone went to sleep holding.
+DB.orders=Array.from({length:300},(_,i)=>mkOrder("y"+i,i,iso(i)));
+DB.work_logs=Array.from({length:2000},(_,i)=>mkLog("old"+i,i,iso(i)));
+DB.daily_plans=[];
+run("resetWatermarks()");run("SYNC.reset()");run("for(const k in LAST_ID_SWEEP)delete LAST_ID_SWEEP[k]");
+const yday=await run("dbLoadAll()");
+run("commitWatermarks")(yday);
+const ydayWm={...run("WATERMARKS")};
+const heldY={reconcile:false};for(const k of KEYS)heldY[k]=yday[k];
+// The import. Ids are scrambled against the timestamps, so the tie-break on id
+// is what decides the order inside a batch — and a page ends in mid-batch.
+const IMPORT=30000,BATCH=300;
+DB.orders=Array.from({length:1500},(_,i)=>mkOrder("n"+i,i,at(Math.floor(i/BATCH))));
+DB.work_logs=Array.from({length:IMPORT},(_,i)=>mkLog("L"+((i*7919)%IMPORT),i,at(10+Math.floor(i/BATCH))));
+const serverLogIds=new Set(DB.work_logs.map(r=>r.id));
+// …and an hour later, the department manager's שיבוץ.
+DB.daily_plans.push({id:"plan_ofir",user_id:"ko75x6a",user_name:"ילנה",plan_date:"2026-10-07",order_id:"n7",stage_id:"s1",
+  target_qty:10,serial_ids:[],note:null,done:false,created_by:"19v6ezm",created_by_name:"אופיר",company_id:CID,
+  created_at:at(500),updated_at:at(500)});
+const newLogs=list=>list.filter(w=>w.id.startsWith("L"));
+
+// ── what the old paging cost the database ─────────────────────────────────
+const deltaQ=`select=${run("COLS").work_logs}&company_id=eq.${CID}&updated_at=gte.${encodeURIComponent(ydayWm.work_logs)}&${run("DELTA_ORDER")}`;
+resetStats();
+const byOffset=await run("SB.getAll")("work_logs",deltaQ);
+const offsetScanned=stats.scanned;
+ok(byOffset.length===IMPORT,`(offset paging reads the ${IMPORT} rows too)`);
+
+// ── the first sweep: everything small lands, work_logs comes in part ──────
+resetStats();
+const s1=await run("dbLoadAll")(heldY);
+ok(s1.dailyPlans.some(p=>p.id==="plan_ofir"),"the שיבוץ reaches the phone on the first sweep");
+ok(s1.orders.filter(o=>o.id.startsWith("n")).length===1500,'so do all 1,500 imported פק"ע');
+ok(s1.more===true,"work_logs is not all there yet, and the sweep says so");
+ok(newLogs(s1.workLogs).length===20*1000,`it brought twenty pages of it (${newLogs(s1.workLogs).length})`);
+ok(!!s1.watermarks.work_logs&&s1.watermarks.work_logs>ydayWm.work_logs,"and moved the work_logs watermark past them");
+const ks1=stats.byTable.work_logs.scanned;
+run("commitWatermarks")(s1);
+const held1={reconcile:false};for(const k of KEYS)held1[k]=s1[k];
+resetStats();
+const s2=await run("dbLoadAll")(held1);
+const ksAll=ks1+stats.byTable.work_logs.scanned;
+ok(!s2.more,"the next sweep finishes it");
+const got=newLogs(s2.workLogs);
+ok(got.length===IMPORT&&new Set(got.map(w=>w.id)).size===IMPORT,`every imported record, once (${got.length})`);
+ok(got.every(w=>serverLogIds.has(w.id)),"and only those");
+console.log(`  database rows walked to deliver ${IMPORT} records: by offset ${offsetScanned}, by keyset ${ksAll}`);
+ok(ksAll<=IMPORT+2*BATCH,`keyset: no page walks past rows it does not return (${ksAll})`);
+ok(offsetScanned>10*ksAll,`offset paging walked ${Math.round(offsetScanned/ksAll)}× as many rows for the same read`);
+run("commitWatermarks")(s2);
+// Yesterday's records are gone from the server; the reconcile takes them off.
+const heldR={reconcile:true};for(const k of KEYS)heldR[k]=s2[k];
+run("for(const k in LAST_ID_SWEEP)delete LAST_ID_SWEEP[k]");
+const s3=await run("dbLoadAll")(heldR);
+ok(s3.workLogs.length===IMPORT&&s3.workLogs.every(w=>serverLogIds.has(w.id)),"after the reconcile the phone holds exactly what the server does");
+
+// ── a page that fails half way ────────────────────────────────────────────
+const timeout={ok:false,status:500,text:async()=>JSON.stringify({code:"57014",message:"canceling statement due to statement timeout"})};
+let wlPages=0,failAt=5;
+const wlUrls=[];
+ctx.fetch_=(url,opts)=>{
+  if(/\/work_logs\?/.test(url)&&!(opts&&opts.method)){wlUrls.push(url);if(++wlPages===failAt)return timeout}
+  return handle(url,opts);
+};
+run("resetWatermarks()");run("commitWatermarks")({watermarks:ydayWm});run("SYNC.reset()");
+const f1=await run("dbLoadAll")(heldY);
+ok(f1.dailyPlans.some(p=>p.id==="plan_ofir"),"a work_logs page past the time limit no longer holds back the שיבוץ");
+ok(f1.orders.filter(o=>o.id.startsWith("n")).length===1500,'…nor the פק"ע');
+ok(!!f1.failed&&f1.failed.length===1&&f1.failed[0].t==="work_logs"&&f1.failed[0].progress===true,"the failure is reported, as one that got somewhere");
+ok(newLogs(f1.workLogs).length===4000,`the four pages read before it are kept (${newLogs(f1.workLogs).length})`);
+ok(f1.more===true,"and the sweep is told to carry on");
+run("commitWatermarks")(f1);
+wlUrls.length=0;failAt=-1;
+const held3={reconcile:false};for(const k of KEYS)held3[k]=f1[k];
+resetStats();
+const f2=await run("dbLoadAll")(held3);
+const resumedFrom=decodeURIComponent((/updated_at=gte\.([^&]+)/.exec(wlUrls[0])||[])[1]||"");
+ok(resumedFrom===f1.watermarks.work_logs,"the next sweep starts where the failure stopped it, not at yesterday");
+run("commitWatermarks")(f2);
+const held4={reconcile:false};for(const k of KEYS)held4[k]=f2[k];
+const f3=await run("dbLoadAll")(held4);
+const reread=stats.byTable.work_logs.rows-(IMPORT-4000);
+ok(reread<=2*BATCH,`and reads only what is left — ${reread} rows read twice, against 4,000 had it started over`);
+ok(newLogs(f3.workLogs).length===IMPORT&&new Set(newLogs(f3.workLogs).map(w=>w.id)).size===IMPORT,"until all of it is in, once");
+
+// A failure on the very first page: nothing to keep, everything else still lands.
+wlPages=0;failAt=1;
+run("resetWatermarks()");run("commitWatermarks")({watermarks:ydayWm});run("SYNC.reset()");
+const g1=await run("dbLoadAll")(heldY);
+ok(g1.dailyPlans.some(p=>p.id==="plan_ofir"),"a work_logs read that fails at once still lets the שיבוץ through");
+ok(g1.workLogs===heldY.workLogs,"work_logs stays what the phone held, untouched");
+ok(!!g1.failed&&g1.failed[0].progress===false&&!g1.watermarks.work_logs,"reported as a failure that got nowhere, its watermark left alone");
+// With nothing held to fall back on there is nothing to show either, so a cold
+// read still fails whole — as it always did.
+wlPages=0;failAt=1;
+let coldErr=null;
+try{await run("dbLoadAll()")}catch(e){coldErr=e}
+ok(!!coldErr,"a cold read (nothing held) still fails as a whole");
+ctx.fetch_=(url,opts)=>handle(url,opts);
+
+// ── full reads walk by keyset too, NULLs included ─────────────────────────
+DB.daily_plans.push({...DB.daily_plans[0],id:"plan_null",created_at:null});
+const orderUrls=[];
+ctx.fetch_=(url,opts)=>{if(/\/orders\?/.test(url))orderUrls.push(decodeURIComponent(url));return handle(url,opts)};
+run("resetWatermarks()");run("SYNC.reset()");
+resetStats();
+const cold=await run("dbLoadAll()");
+ok(cold.orders.length===1500&&new Set(cold.orders.map(o=>o.id)).size===1500,'a full read of 1,500 פק"ע across pages: all of them, once');
+ok(orderUrls.every(u=>/select=[^&]*created_at/.test(u)),"the cursor column is asked for with them");
+ok(cold.dailyPlans.filter(p=>p.id==="plan_null").length===1,"a row with no created_at is read, once");
+ok(cold.workLogs.length===IMPORT,`work_logs whole (${cold.workLogs.length})`);
+ok(stats.byTable.work_logs.scanned<=IMPORT+1000,`with no offset walked past (${stats.byTable.work_logs.scanned} rows for ${IMPORT})`);
+ctx.fetch_=(url,opts)=>handle(url,opts);
+DB.daily_plans=DB.daily_plans.filter(p=>p.id!=="plan_null");
+
+// ── the sweep loop itself ─────────────────────────────────────────────────
+// The app, not just the sync layer: the sweep applies what did land, even though
+// a table failed, and comes straight back for the rest.
+run("resetWatermarks()");run("commitWatermarks")({watermarks:ydayWm});run("SYNC.reset()");
+wlPages=0;failAt=3;
+ctx.fetch_=(url,opts)=>{
+  if(/\/work_logs\?/.test(url)&&!(opts&&opts.method)&&++wlPages===failAt)return timeout;
+  return handle(url,opts);
+};
+// Which delay each sweep re-arms itself with.
+const armed=[];
+const parkSet=ctx.setTimeout;
+ctx.setTimeout=(fn,ms,...a)=>{if(fn&&fn.name==="poll")armed.push(ms);return parkSet(fn,ms,...a)};
+const quiet=async()=>{await settle(5);while(run("dbReadBusy()"))await settle(5);await settle(10)};
+parked.clear();
+m=mountApp();
+const loop=hooks.effects.find(f=>/realtime\/v1\/websocket/.test(String(f)));
+const stopLoop2=loop();
+fireParked();
+await quiet();
+const plansNow=hooks.cells.find(c=>Array.isArray(c.v)&&c.v.some(p=>p&&p.id==="plan_ofir"));
+ok(!!plansNow,"the sweep put the שיבוץ on screen while work_logs was failing");
+const logsNow=()=>hooks.cells.find(c=>Array.isArray(c.v)&&c.v.some(w=>w&&typeof w.id==="string"&&w.id.startsWith("L")&&"stageId" in w));
+ok(!!logsNow()&&newLogs(logsNow().v).length===2000,`with the two pages that came before the failure (${logsNow()?newLogs(logsNow().v).length:0})`);
+ok(armed[armed.length-1]===1500,`and comes back for the rest in a moment, not at the next interval (${armed[armed.length-1]} ms)`);
+for(let i=0;i<6&&!(logsNow()&&newLogs(logsNow().v).length===IMPORT);i++){fireParked();await quiet()}
+ok(!!logsNow()&&newLogs(logsNow().v).length===IMPORT,`a few sweeps later all ${IMPORT} are on screen (${logsNow()?newLogs(logsNow().v).length:0})`);
+ok(armed[armed.length-1]>1500,`and once it is all in, the sweep goes back to its usual pace (${armed[armed.length-1]} ms)`);
+if(typeof stopLoop2==="function")stopLoop2();
+ctx.setTimeout=parkSet;
+ctx.fetch_=(url,opts)=>handle(url,opts);
+
+// A server that cannot parse the cursor filters must not leave a phone with
+// nothing: the read falls back to offset paging, slower and still whole.
+ctx.fetch_=(url,opts)=>/[?&]or=/.test(url)
+  ?{ok:false,status:400,text:async()=>JSON.stringify({code:"PGRST100",message:"\"failed to parse logic tree\""})}
+  :handle(url,opts);
+run("resetWatermarks()");run("commitWatermarks")({watermarks:ydayWm});run("SYNC.reset()");
+const fb=await run("dbLoadAll")(heldY);
+ok(!fb.failed&&newLogs(fb.workLogs).length===IMPORT,`a server that refuses the cursor still gets read, by offset (${newLogs(fb.workLogs).length})`);
+ok(run("SB_KEYSET_OFF")===true,"and the session stays on offset paging from then on");
+run("SB_KEYSET_OFF=false");
 ctx.fetch_=(url,opts)=>handle(url,opts);
 
 console.log(`\n${fails?"✗ "+fails+" failed":"✓ all assertions passed"}`);
