@@ -41,7 +41,7 @@ vm.runInContext([
   slice("const isQtyLog=","\n","isQtyLog"),
   slice("const isQtyRun=","\n","isQtyRun"),
   slice("const isOnHold=","// ── ","the HOLD helpers"),
-  "module.exports={buildLogIndex,isQtyLog,isOnHold,isHoldSegment,holdCarryMin,holdShares,logWorkedMin,holdHandOff};"
+  "module.exports={buildLogIndex,isQtyLog,isOnHold,isHoldSegment,holdCarryMin,holdShares,logWorkedMin,holdHandOff,holdPickUp};"
 ].join("\n"),ctx);
 const H=ctx.module.exports;
 
@@ -81,6 +81,43 @@ ok(Math.abs(share(seg)-150/200)<1e-9,"Dana is credited 150/200 of the unit");
 ok(Math.abs(share(fin)+share(seg)-1)<1e-9,"together: exactly one unit");
 ok(H.buildLogIndex(logs).done.has("S1|st1"),"the stage is done once Moshe signs it");
 ok(H.holdShares([seg])(seg)===0,"before anyone signs, a segment stands for no unit yet");
+
+console.log("\n── 4. nobody reassigned it — Moshe picks it up from the list ──");
+// Same Dana HOLD as in §1, but this time no manager steps in: Moshe finds it in
+// the general list at 20:00 and carries on with it himself.
+const p=H.holdPickUp([held],["L1"],moshe,T(20));
+const mine=p.next.find(w=>w.id==="L1"),pseg=p.next.find(w=>H.isHoldSegment(w));
+ok(p.next.length===2,"one open log and one segment, exactly like a manager's hand-over");
+ok(mine.userId===moshe.id,"the open log is Moshe's");
+ok(!H.isOnHold(mine)&&!mine.paused&&!mine.pauseStart,"and it is running — no second tap needed");
+ok(mine.startTime===T(20)&&mine.totalPauseMin===0&&mine.pauseLog.length===0,"his clock starts clean at the pick-up");
+ok(H.logWorkedMin(mine,Date.parse(T(21)))===60,"an hour later he has 60' of his own");
+ok(H.holdCarryMin(mine)===150,"Dana's 150' ride along, so the unit's timer reads the whole stage");
+ok(pseg&&pseg.userId===dana.id&&pseg.durationMin===150,"Dana keeps her 150' as a segment");
+ok(!mine.holdInfo.assignedBy&&!mine.holdInfo.assignedByName,"nobody is named as having assigned it");
+ok(H.buildLogIndex(p.next).running.has("S1|st1")&&!H.buildLogIndex(p.next).done.has("S1|st1"),"the unit is in progress, not done");
+const done2={...mine,completed:true,durationMin:60};
+const sh2=H.holdShares([done2,pseg]);
+ok(Math.abs(sh2(done2)-60/210)<1e-9&&Math.abs(sh2(pseg)-150/210)<1e-9,"signed: 60/210 to Moshe, 150/210 to Dana — one unit between them");
+ok(H.holdPickUp([held],["L1"],dana,T(20)).next.length===1&&H.holdPickUp([held],["L1"],dana,T(20)).before.length===0,"Dana's own HOLD is not 'picked up' by Dana — she resumes it");
+const reuse=H.holdPickUp([held],["L1"],moshe,T(20));
+const replay=H.holdPickUp([held],["L1"],moshe,T(20),reuse);
+ok(replay.next.find(w=>H.isHoldSegment(w)).id===reuse.segs[0].id,"replaying the plan writes the very segment the journal recorded");
+ok(H.holdPickUp(p.next,["L1"],moshe,T(21)).next===p.next,"once it is his and running, picking it up again changes nothing");
+
+// A group started together is picked up together, and stays one group.
+const g=(id,sn)=>({...held,id,serialId:sn,serialSn:sn,bulk:true,bulkGroupId:"G1",bulkCount:2});
+const gp=H.holdPickUp([g("A","S1"),g("B","S2")],["A","B"],moshe,T(20));
+const ga=gp.next.find(w=>w.id==="A"),gb=gp.next.find(w=>w.id==="B");
+ok(ga.userId===moshe.id&&gb.userId===moshe.id,"both units of the group move");
+ok(ga.bulkGroupId&&ga.bulkGroupId===gb.bulkGroupId&&ga.bulkGroupId!=="G1","under one new group id of their own");
+
+// A quantity run on HOLD: no serial, a count.
+const run={...held,id:"Q1",serialId:null,serialSn:null,bulk:true,bulkCount:30};
+const qp=H.holdPickUp([run],["Q1"],moshe,T(20));
+const qrun=qp.next.find(w=>w.id==="Q1"),qseg=qp.next.find(w=>H.isHoldSegment(w));
+ok(qrun.userId===moshe.id&&qrun.bulkCount===30&&!H.isOnHold(qrun),"a quantity run moves with its count and starts running");
+ok(qseg&&!H.isQtyLog(qseg),"Dana's segment is time, not a 30-unit signature");
 
 console.log(fail?`\n✗ ${fail} failed`:"\n✓ all HOLD checks passed");
 process.exit(fail?1:0);
