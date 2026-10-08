@@ -121,6 +121,23 @@ button{font-family:inherit;cursor:pointer}
 }
 .nav-wrapper{padding-top:var(--safe-top)}
 .main-content{padding-bottom:calc(16px + var(--safe-bottom))}
+/* ── Worker bottom navigation ──────────────────────────────────────────────
+   A worker's whole app is three places — what is mine, the work waiting, the
+   פק"ע — so they sit under the thumb, labelled, the way a phone app does it,
+   instead of in a tab strip at the top. */
+.bottom-nav{position:fixed;bottom:0;left:0;right:0;z-index:55;background:var(--c-card);border-top:1px solid var(--c-border);padding-bottom:var(--safe-bottom);box-shadow:0 -6px 22px rgba(0,0,0,.2)}
+body.light-mode .bottom-nav{box-shadow:0 -4px 16px rgba(16,24,40,.07)}
+.bottom-nav-inner{display:flex;max-width:640px;margin:0 auto}
+.bottom-nav button{flex:1;min-width:0;height:62px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:4px;background:none;border:none;color:var(--c-muted);font-family:inherit;position:relative;padding:0 4px;transition:color .15s}
+.bottom-nav button.on{color:var(--c-accent)}
+.bottom-nav button.on::before{content:"";position:absolute;top:0;left:50%;transform:translateX(-50%);width:42px;height:3px;border-radius:0 0 3px 3px;background:var(--c-accent)}
+.bn-ico-wrap{position:relative;line-height:1}
+.bn-ico{display:inline-block;font-size:21px;line-height:1;filter:grayscale(.6);opacity:.8;transition:filter .15s,opacity .15s,transform .15s}
+.bottom-nav button.on .bn-ico{filter:none;opacity:1;transform:translateY(-1px)}
+.bn-label{font-size:11.5px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:100%;font-variant-numeric:tabular-nums}
+.bottom-nav button.on .bn-label{font-weight:800}
+.bn-badge{position:absolute;top:-7px;inset-inline-start:calc(100% - 9px);min-width:18px;height:18px;padding:0 5px;border-radius:9px;color:#fff;font-size:10.5px;font-weight:800;line-height:18px;text-align:center;box-shadow:0 0 0 2px var(--c-card);font-style:normal}
+.bn-live{display:inline-block;width:7px;height:7px;border-radius:50%;background:#f59e0b;margin-inline-end:4px;vertical-align:middle;animation:pulse 1.4s infinite}
 @keyframes pulse{0%,100%{opacity:1}50%{opacity:.5}}
 @keyframes fadeIn{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:none}}
 .fade-in{animation:fadeIn .3s ease-out}
@@ -1710,6 +1727,22 @@ function holdHandOff(logs,logIds,to,by,at,reuse){
   const handed=new Set(before.map(w=>w.id)),have=new Set((logs||[]).map(w=>w.id));
   const add=segs.filter(g=>handed.has(g.holdInfo.fromLogId)&&!have.has(g.id));
   return{next:before.length?next.concat(add):logs,before,segs,groups,at};
+}
+// Work on HOLD is back in the general list for anybody whose stage it is, so a
+// unit nobody reassigned is not stuck waiting for a manager. A worker who carries
+// on with somebody else's HOLD makes the very hand-over a manager would — the
+// minutes already put in stay with whoever put them in (see holdHandOff) — and
+// the clock starts at once, because they took it in order to work on it.
+// Own HOLD is not this: it is resumed, not handed over, so it is left untouched.
+function holdPickUp(logs,logIds,me,at,reuse){
+  const r=holdHandOff(logs,logIds,me,me,at,reuse);
+  if(!r.before.length)return r;
+  const moved=new Set(r.before.map(w=>w.id));
+  const next=r.next.map(w=>!moved.has(w.id)?w:{...w,
+    paused:false,pauseStart:null,totalPauseMin:0,pauseLog:[],
+    // Nobody assigned it — "הועבר אליך ע״י" would name the worker themselves.
+    holdInfo:{...w.holdInfo,held:false,assignedBy:"",assignedByName:"",pickedUpAt:at}});
+  return{...r,next};
 }
 // Units already on someone's bench for a stage, so the screen never offers the
 // same units to be started twice. Callers without an index pay for a scan.
@@ -3972,6 +4005,59 @@ function QtySignOff({order,stages,workLogs,onSignOff,onDeleteLog,compact,onStart
   );
 }
 
+// ── ▶️ על פק"ע ללא סידוריים — שורה, לא טבלה ───────────────────────────────
+// One stage of a פק"ע without serial numbers, the way a worker meets it: what is
+// left, how many, ▶️. QtySignOff answers the same question as a table — every
+// stage of the route, signed / left / progress / sign — and on a phone its ▶️
+// sat in the last column, past the edge of the screen behind a sideways scroll.
+// Here it is one row per stage with nothing to scroll to, and the count already
+// reads "everything still free", so the usual case is a single tap. `target` is
+// a work-plan quota, when the row is shown under one.
+function QtyStageStart({order,stage,workLogs,qtyIdx,runIdx,target,onStart,blocked}){
+  const qty=Number(order.qty)||0;
+  const signed=Math.min(qty,qtySigned(qtyIdx,workLogs,order.id,stage.id));
+  const running=qtyRunning(runIdx,workLogs,order.id,stage.id);
+  const left=Math.max(0,qty-signed);
+  // Units another timer already covers are not offered twice.
+  const free=Math.max(0,left-running);
+  const def=target>0?Math.min(target,free):free;
+  // Untouched, the count follows `def` as the list moves underneath it; once the
+  // worker types, it is theirs — including empty, while they are mid-edit.
+  const [raw,setRaw]=useState(null);
+  const n=raw===null?def:Math.max(0,Math.min(free,Math.floor(Number(raw)||0)));
+  const step=d=>setRaw(String(Math.max(1,Math.min(free,n+d))));
+  const sb={width:40,height:40,borderRadius:10,border:"1px solid var(--c-border2)",background:"var(--c-card)",color:"var(--c-text)",
+    fontSize:20,fontWeight:700,lineHeight:1,padding:0,display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0,fontFamily:"inherit"};
+  return(
+    <div style={{display:"flex",alignItems:"center",gap:10,flexWrap:"wrap",background:"var(--c-deep)",border:`1px solid ${(stage.color||"#8b95a8")}44`,borderRadius:10,padding:"9px 11px"}}>
+      <div style={{flex:"1 1 150px",minWidth:0}}>
+        <div style={{fontWeight:700,fontSize:14,color:stage.color}}>{stage.name}</div>
+        <div style={{fontSize:11.5,color:"var(--c-dim)",marginTop:2}}>
+          נחתמו {signed}/{qty} · נותרו <b style={{color:left?"#f59e0b":"var(--c-dim)"}}>{left}</b>
+          {running>0&&<span style={{color:"#f59e0b"}}> · ⏱️ {running} בעבודה</span>}
+          {target>0&&<span style={{color:"#06b6d4"}}> · יעד בתוכנית: {target}</span>}
+        </div>
+        <div style={{marginTop:5,maxWidth:220}}><PBar pct={qty?Math.round(signed/qty*100):0} h={4}/></div>
+      </div>
+      {left===0?<span style={{fontSize:12.5,color:"#10b981",fontWeight:700}}>✅ השלב הושלם</span>
+      :free===0?<span style={{fontSize:12,color:"#f59e0b"}} title="כל היחידות שנותרו בשלב הזה כבר בעבודה אצל מישהו">⏱️ כל מה שנותר כבר בעבודה</span>
+      :(
+        <div style={{display:"flex",alignItems:"center",gap:6}}>
+          <button style={{...sb,opacity:n>=free?.4:1}} onClick={()=>step(1)} disabled={n>=free} aria-label="עוד יחידה">+</button>
+          <input type="number" inputMode="numeric" min="1" max={free} aria-label="כמות יחידות"
+            value={raw===null?String(def):raw} onChange={e=>setRaw(e.target.value)} onFocus={e=>e.target.select()}
+            onBlur={()=>{if(raw!==null&&!(Number(raw)>0))setRaw(null)}}
+            style={{width:64,height:40,textAlign:"center",fontSize:16,fontWeight:700,padding:"4px 6px"}}/>
+          <button style={{...sb,opacity:n<=1?.4:1}} onClick={()=>step(-1)} disabled={n<=1} aria-label="יחידה פחות">−</button>
+          <Btn color="#f59e0b" disabled={!!blocked||!(n>0)} onClick={()=>{onStart(stage,n);setRaw(null)}}
+            title={blocked||`ייפתח טיימר על ${n} יחידות — הפסקה וסיום בדיוק כמו ביחידה עם מספר סידורי`}
+            style={{height:42,padding:"0 18px",fontSize:15}}>▶️ התחל</Btn>
+        </div>
+      )}
+    </div>
+  );
+}
+
 function SerialsManager({order,stages,onUpdate,workLogs,onSignOff}){
   const {canEdit,currentUser}=useAuth();
   const isAdmin=currentUser?.role==="admin";
@@ -4959,7 +5045,13 @@ function AdminTasksBoard({customTasks,onDeleteTask,onMarkPartialTask,onMarkDoneT
 const PlanTag=({small,label="תוכנית העבודה שלי"})=>(
   <span style={{background:"#06b6d422",color:"#06b6d4",border:"1px solid #06b6d455",borderRadius:10,padding:small?"1px 7px":"2px 9px",fontSize:small?10:11,fontWeight:700,whiteSpace:"nowrap"}}>📅 {label}</span>
 );
-function MyWork({orders,stages,workLogs,onStartWork,onEndWork,onPauseWork,onResumeWork,onHoldWork,onDeleteLog,customTasks,onAddTask,onStartTask,onEndTask,onPauseTask,onResumeTask,onDeleteTask,onMarkPartialTask,onMarkDoneTask,users,dailyPlans,onMarkPlanDone}){
+// view — which half of the screen to show. A worker gets two tabs: "mine" is what
+// is theirs (the job running now, the work plan a manager assigned, HOLD, tasks)
+// and "queue" is everything in the plant waiting on their stages. They used to be
+// one long page, with the assignment buried above a list of every פק"ע. Leads and
+// department managers keep both on one tab ("all"), next to their other tabs.
+function MyWork({orders,stages,workLogs,onStartWork,onEndWork,onPauseWork,onResumeWork,onHoldWork,onPickupHold,onDeleteLog,customTasks,onAddTask,onStartTask,onEndTask,onPauseTask,onResumeTask,onDeleteTask,onMarkPartialTask,onMarkDoneTask,users,dailyPlans,onMarkPlanDone,view="all",onGoTab}){
+  const showMine=view!=="queue",showQueue=view!=="mine";
   const {toast}=useToast();
   const {currentUser}=useAuth();
   const myAccess=useMemo(()=>currentUser.stageAccess==="all"?stages.map(s=>s.id):(Array.isArray(currentUser.stageAccess)?currentUser.stageAccess:[]),[currentUser,stages]);
@@ -4996,11 +5088,28 @@ function MyWork({orders,stages,workLogs,onStartWork,onEndWork,onPauseWork,onResu
   const [fPn,setFPn]=useState("all");
   const [fStage,setFStage]=useState("all");
   const [fBranch,setFBranch]=useState("all");
+  // What kind of work: units with serial numbers, quantity-reported פק"ע, or only
+  // work somebody already started and left on HOLD.
+  const [fType,setFType]=useState("all");
+  // On a phone the three dropdowns took a third of the screen before the first
+  // פק"ע; they fold away behind one button, and open by themselves while in use.
+  const [showAdv,setShowAdv]=useState(view==="all");
+  const [planOpen,setPlanOpen]=useState({});   // plan id → show all its units
+  // A job that has just started is the thing to look at: its card sits at the top
+  // of the screen, and the ▶️ that started it may have been far down the list.
+  const lastActiveRef=useRef(undefined);
+  useEffect(()=>{
+    const id=myActiveLog&&!myActiveLog.paused?myActiveLog.id:null;
+    if(lastActiveRef.current!==undefined&&id&&id!==lastActiveRef.current)window.scrollTo({top:0,behavior:"smooth"});
+    lastActiveRef.current=id;
+  },[myActiveLog]);
   const [showTaskForm,setShowTaskForm]=useState(false);
   const [taskName,setTaskName]=useState("");
   const [taskDesc,setTaskDesc]=useState("");
 
   const {done:doneIdx,running:runIdx,busy:busyIdx}=useLogIndex(workLogs);
+  const myQtyIdx=useQtyIndex(workLogs);
+  const myQtyRunIdx=useQtyRunIndex(workLogs);
   // A "נתונים בלבד" פק"ע is not work anybody picks up — see isDataOnly.
   const accessible=useMemo(()=>orders.filter(o=>!isDataOnly(o)&&(o.stageIds||[]).some(sid=>myAccessSet.has(sid))),[orders,myAccessSet]);
   // One stage lookup table for this screen. orderRoute() builds its own Map from
@@ -5022,7 +5131,16 @@ function MyWork({orders,stages,workLogs,onStartWork,onEndWork,onPauseWork,onResu
   // A unit belongs to my plan when a plan line covers its order+stage — either by
   // naming its serial explicitly, or by covering the whole פק"ע (no serials listed).
   const isPlanned=(orderId,stageId,serialId)=>myPlans.some(p=>p.orderId===orderId&&p.stageId===stageId&&(!Array.isArray(p.serialIds)||p.serialIds.length===0||p.serialIds.includes(serialId)));
-  const planUnitsLeft=myPlans.reduce((s,p)=>s+planPending(p.orderId,p.stageId,p.serialIds).length,0);
+  // A plan on a פק"ע without serial numbers has no units to list — what is left
+  // is a count: the stage's unsigned units, up to the plan's quota when it set one.
+  const planQtyLeft=(p,o)=>{
+    const left=Math.max(0,(Number(o?.qty)||0)-qtySigned(myQtyIdx,workLogs,p.orderId,p.stageId));
+    return p.targetQty>0?Math.min(left,Number(p.targetQty)):left;
+  };
+  const planUnitsLeft=myPlans.reduce((s,p)=>{
+    const o=orders.find(x=>x.id===p.orderId);
+    return s+(isQtyOrder(o)?planQtyLeft(p,o):planPending(p.orderId,p.stageId,p.serialIds).length);
+  },0);
   // Auto sign-off: when every unit of an assigned plan's stage is completed, mark the plan done.
   useEffect(()=>{
     if(!onMarkPlanDone)return;
@@ -5060,6 +5178,79 @@ function MyWork({orders,stages,workLogs,onStartWork,onEndWork,onPauseWork,onResu
       paused:false,pauseStart:null,totalPauseMin:0,pauseLog:[],
       bulk:true,bulkGroupId:null,bulkCount:n});
     toast(`התחלת עבודה על ${n} יחידות · ${stage.name}`,"success");
+  };
+  // Every unit of an assignment on one timer, straight from the assignment — the
+  // same group the 📦 mode of the list starts, on the stage the plan names.
+  const startGroup=(orderId,stageId,serialIds)=>{
+    if(myActiveLog&&!myActiveLog.paused){toast("יש לך עבודה פעילה. סיים או עצור לפני שמתחיל חדשה.","warning");return}
+    const order=orders.find(o=>o.id===orderId);if(!order||!serialIds.length)return;
+    if(!confirm(`להתחיל טיימר קבוצתי על ${serialIds.length} יחידות?\n\nכל היחידות ירוצו על טיימר אחד, ויסתיימו יחד בלחיצה על ✅ סיימתי.`))return;
+    const groupId=uid(),at=nowISO();
+    serialIds.forEach(sId=>{
+      const serial=(order.serials||[]).find(s=>s.id===sId);
+      onStartWork({id:uid(),userId:currentUser.id,userName:currentUser.name,serialId:sId,stageId,orderId,serialSn:serial?.sn||"",startTime:at,endTime:null,completed:false,durationMin:0,paused:false,pauseStart:null,totalPauseMin:0,pauseLog:[],bulk:true,bulkGroupId:groupId,bulkCount:serialIds.length});
+    });
+  };
+
+  // ── HOLD in the general list ────────────────────────────────────────────
+  // Work somebody stopped in the middle is offered to everyone whose stage it is,
+  // marked as already started, so a unit nobody reassigned does not sit waiting
+  // for a manager. Whoever continues it gets the clock from there; the minutes
+  // already in it stay with whoever put them in (see holdPickUp). One row per
+  // unit, or per group that was started together — a group moves as one, so it
+  // is offered only to someone who may work every stage in it.
+  const heldRows=useMemo(()=>{
+    if(!showQueue&&!(myPlans||[]).length)return[];
+    const acc=new Set(accessible.map(o=>o.id));
+    const m=new Map();
+    workLogs.forEach(w=>{
+      if(!isOnHold(w)||!acc.has(w.orderId))return;
+      const k=w.bulkGroupId?`g:${w.bulkGroupId}`:w.id;
+      const r=m.get(k)||{key:k,logs:[],mine:w.userId===currentUser.id};
+      r.logs.push(w);m.set(k,r);
+    });
+    return[...m.values()].filter(r=>r.logs.every(w=>myAccessSet.has(w.stageId)));
+  },[showQueue,myPlans,workLogs,accessible,myAccessSet,currentUser]);
+  // What the list marks on each פק"ע. On a lead's single tab their own HOLD already
+  // has its card a little higher on the same page, so the list leaves it out.
+  const listHeld=useMemo(()=>view==="all"?heldRows.filter(r=>!r.mine):heldRows,[view,heldRows]);
+  const heldByOrder=useMemo(()=>{
+    const m=new Map();
+    listHeld.forEach(r=>{const k=r.logs[0].orderId;if(!m.has(k))m.set(k,[]);m.get(k).push(r)});
+    return m;
+  },[listHeld]);
+  const heldUnits=r=>isQtyRun(r.logs[0])?`${r.logs[0].bulkCount} יח'`:r.logs.map(x=>x.serialSn).filter(Boolean).join(", ");
+  const continueHeld=r=>{
+    if(myActiveLog&&!myActiveLog.paused){toast("יש לך עבודה פעילה. סיים, עצור או העבר אותה ל-HOLD לפני שממשיכים עבודה אחרת.","warning");return}
+    if(r.mine){r.logs.forEach(w=>onResumeWork(w.id));return}
+    if(!onPickupHold)return;
+    const w=r.logs[0],st=stageMap.get(w.stageId),total=logWorkedMin(w)+holdCarryMin(w);
+    if(!confirm(`להמשיך את העבודה של ${w.userName||"עובד אחר"}?\n\n${heldUnits(r)}${st?` · ${st.name}`:""}\n\nהזמן שכבר נעבד (${fmtTime(total)}) נשאר רשום על שם מי שעבד אותו, ומעכשיו הטיימר סופר את הזמן שלך.`))return;
+    if(onPickupHold(r.logs.map(x=>x.id)))toast("ממשיכים — הטיימר רץ, והזמן מעכשיו נרשם על שמך","success");
+    else toast("העבודה כבר לא ב-HOLD — כנראה מישהו אחר כבר המשיך אותה","warning");
+  };
+  // One HOLD row as it appears in a list: marked as started, by whom, how long
+  // it has had so far, and ▶️ to carry on.
+  const heldRowView=(r,{compact}={})=>{
+    const w=r.logs[0],st=stageMap.get(w.stageId),total=logWorkedMin(w)+holdCarryMin(w),hi=w.holdInfo||{};
+    const busy=!!(myActiveLog&&!myActiveLog.paused);
+    return(
+      <div key={r.key} style={{display:"flex",justifyContent:"space-between",alignItems:"center",gap:8,flexWrap:"wrap",background:"#f973160f",border:"1px solid #f9731666",borderRadius:9,padding:compact?"7px 10px":"9px 12px"}}>
+        <div style={{minWidth:0,flex:"1 1 180px"}}>
+          <div style={{display:"flex",alignItems:"center",gap:7,flexWrap:"wrap"}}>
+            <span style={{fontSize:10.5,background:"#f9731622",color:"#f97316",border:"1px solid #f9731655",borderRadius:10,padding:"1px 8px",fontWeight:700,whiteSpace:"nowrap"}}>🟧 {r.mine?"שלך — ב-HOLD":"הותחל — ממתין להמשך"}</span>
+            <span style={{fontWeight:700,fontSize:13}}>{heldUnits(r)}{isQtyRun(w)?<span style={{fontWeight:400,color:"var(--c-dim)"}}> {QTY_UNIT_TAG}</span>:null}</span>
+            {st&&<span style={{fontSize:11.5,color:st.color}}>← {st.name}</span>}
+          </div>
+          <div style={{fontSize:11,color:"var(--c-dim)",marginTop:3}}>
+            {r.mine?"עצרת":`${w.userName||"עובד"} עצר/ה`}{hi.heldAt?` ב-${new Date(hi.heldAt).toLocaleString("he-IL",{day:"2-digit",month:"2-digit",hour:"2-digit",minute:"2-digit"})}`:""}
+            {" · "}נעבד עד כה: <b style={{color:"var(--c-text)"}}>{fmtTime(total)}</b>
+          </div>
+        </div>
+        <Btn color="#f97316" onClick={()=>continueHeld(r)} disabled={busy} title={busy?"יש לך עבודה פעילה — סיים או עצור אותה קודם":r.mine?"המשך מאיפה שעצרת":"המשך את העבודה — הזמן מעכשיו נספר לך"}
+          style={{padding:"9px 16px",fontSize:13.5}}>▶️ המשך</Btn>
+      </div>
+    );
   };
 
   const startBulk=(oId)=>{
@@ -5141,7 +5332,7 @@ function MyWork({orders,stages,workLogs,onStartWork,onEndWork,onPauseWork,onResu
     const group=myActiveLog.bulkGroupId?myActiveLogs.filter(w=>w.bulkGroupId===myActiveLog.bulkGroupId):[myActiveLog];
     onHoldWork(group.map(w=>w.id));
     setRunDone("");
-    toast("העבודה נשמרה ב-HOLD — אפשר להתחיל עבודה אחרת ולחזור אליה מתי שתרצה","success",4500);
+    toast("העבודה נשמרה ב-HOLD — אפשר להתחיל עבודה אחרת ולחזור אליה מתי שתרצה. היא מופיעה גם בתור העבודה, כך שעובד אחר יכול להמשיך אותה — וכל אחד מקבל את הזמן שעבד","success",6000);
   };
   const resumeHeld=row=>{
     if(myActiveLog&&!myActiveLog.paused){toast("יש לך עבודה פעילה. סיים, עצור או העבר אותה ל-HOLD לפני שממשיכים עבודה אחרת.","warning");return}
@@ -5166,7 +5357,11 @@ function MyWork({orders,stages,workLogs,onStartWork,onEndWork,onPauseWork,onResu
   // Every pending unit I may start, tagged with whether it came from the work
   // plan my manager assigned me today. Planned units sort first — inside each
   // פק"ע and across פק"עים — so my own plan always sits at the top of the list.
-  const orderQueues=useMemo(()=>accessible.map(o=>{
+  // Units somebody left on HOLD ride along on their פק"ע, marked as started.
+  // Only the queue half of the screen reads any of this, so a worker's own tab
+  // does not pay for a walk over every serial in the plant.
+  const orderQueues=useMemo(()=>!showQueue?[]:accessible.map(o=>{
+    if(!(o.serials||[]).length)return null;
     // The route, read straight off the shared stage map rather than through
     // orderRoute() — same result, without a fresh Map per פק"ע.
     const allStagesOrdered=(o.stageIds||[]).map(id=>stageMap.get(id)).filter(Boolean);
@@ -5174,41 +5369,41 @@ function MyWork({orders,stages,workLogs,onStartWork,onEndWork,onPauseWork,onResu
       // The unit's true next stage (stages must run in order)
       const next=allStagesOrdered.find(st=>!doneIdx.has(logKey(s.id,st.id)));
       if(!next||!myAccessSet.has(next.id))return null;                                    // done, or not mine to do
-      if(runIdx.has(logKey(s.id,next.id)))return null;                                    // already running
+      if(runIdx.has(logKey(s.id,next.id)))return null;                                    // already running (or on HOLD — see `held`)
       return{...s,next,planned:isPlanned(o.id,next.id,s.id)};
     }).filter(Boolean).sort((a,b)=>(b.planned?1:0)-(a.planned?1:0));
     // id carried on the queue itself so the virtual list keys rows by פק"ע rather
     // than by position — the list re-sorts as plan units are worked off.
-    return{id:o.id,order:o,units,planned:units.filter(u=>u.planned).length};
-  }).filter(q=>q.units.length>0).sort((a,b)=>b.planned-a.planned),
-    [accessible,stageMap,doneIdx,runIdx,myAccessSet,myPlans]);
+    return{id:o.id,kind:"serial",order:o,units,held:heldByOrder.get(o.id)||[],planned:units.filter(u=>u.planned).length};
+  }).filter(q=>q&&(q.units.length>0||q.held.length>0)),
+    [showQueue,accessible,stageMap,doneIdx,runIdx,myAccessSet,myPlans,heldByOrder]);
   // ── פק"ע שאינן מנוהלות סיריאלית ───────────────────────────────────────
   // These never reach the queue above and never could: that queue is built from
   // units, and a פק"ע with no serial numbers has none. It is still work, and it is
   // still *this* worker's work wherever one of its stages is theirs — so it gets
-  // its own list, where the report is a quantity instead of a unit. Only the
+  // its own rows, where the report is a quantity instead of a unit. Only the
   // orders that still have something unsigned on a stage of mine are listed, the
   // same rule the unit queue follows.
   const [openQty,setOpenQty]=useState("");
-  const myQtyIdx=useQtyIndex(workLogs);
-  const myQtyRunIdx=useQtyRunIndex(workLogs);
-  const qtyOrders=useMemo(()=>accessible.filter(o=>{
+  const qtyOrders=useMemo(()=>!showQueue?[]:accessible.filter(o=>{
     if(!isQtyOrder(o))return false;
     const cap=Number(o.qty)||0;
     return (o.stageIds||[]).some(sid=>myAccessSet.has(sid)&&qtySigned(myQtyIdx,workLogs,o.id,sid)<cap);
-  }),[accessible,myAccessSet,myQtyIdx,workLogs]);
+  }),[showQueue,accessible,myAccessSet,myQtyIdx,workLogs]);
   // ── What the filters may offer ──────────────────────────────────────────
   // Every option is drawn from the queue itself and carries its own count, so a
   // value that would empty the screen is never in the list to be picked. Both
-  // lists feed it — the unit queue and the quantity-reported פק"ע — because a
+  // kinds feed it — the unit queue and the quantity-reported פק"ע — because a
   // filter that hid one of them would look like the work had disappeared.
   const queueOpts=useMemo(()=>{
     const pn=new Map(),br=new Map(),st=new Map();
     const bump=(m,k,n)=>m.set(k,(m.get(k)||0)+n);
     orderQueues.forEach(q=>{
-      bump(pn,(q.order.pn||"").trim(),q.units.length);
-      bump(br,branchCode(q.order.branch),q.units.length);
+      const n=q.units.length+q.held.length;
+      bump(pn,(q.order.pn||"").trim(),n);
+      bump(br,branchCode(q.order.branch),n);
       q.units.forEach(u=>bump(st,u.next.id,1));
+      q.held.forEach(r=>bump(st,r.logs[0].stageId,1));
     });
     qtyOrders.forEach(o=>{
       bump(pn,(o.pn||"").trim(),1);
@@ -5225,11 +5420,16 @@ function MyWork({orders,stages,workLogs,onStartWork,onEndWork,onPauseWork,onResu
         const na=Number(a[0]),nb=Number(b[0]);
         return(isFinite(na)&&isFinite(nb))?na-nb:String(a[0]).localeCompare(String(b[0]),"he",{numeric:true});
       }),
-      st:[...st].sort((a,b)=>(stageMap.get(a[0])?.order||0)-(stageMap.get(b[0])?.order||0))
+      st:[...st].sort((a,b)=>(stageMap.get(a[0])?.order||0)-(stageMap.get(b[0])?.order||0)),
+      // Kinds of work, for the chips above the list.
+      serial:orderQueues.reduce((n,q)=>n+q.units.length,0),
+      qty:qtyOrders.length,
+      held:listHeld.length
     };
-  },[orderQueues,qtyOrders,myAccessSet,stageMap]);
-  const filterOn=fText.trim()!==""||fPn!=="all"||fStage!=="all"||fBranch!=="all";
-  const clearFilters=()=>{setFText("");setFPn("all");setFStage("all");setFBranch("all");setBulkSelected([])};
+  },[orderQueues,qtyOrders,listHeld,myAccessSet,stageMap]);
+  const advOn=fPn!=="all"||fStage!=="all"||fBranch!=="all";
+  const filterOn=fText.trim()!==""||advOn||fType!=="all";
+  const clearFilters=()=>{setFText("");setFPn("all");setFStage("all");setFBranch("all");setFType("all");setBulkSelected([])};
   // The three פק"ע-level filters. The שלב filter is not here: it is a property of
   // the unit, not of the פק"ע, so it is applied a row further in.
   const orderMatches=useCallback(o=>{
@@ -5244,31 +5444,461 @@ function MyWork({orders,stages,workLogs,onStartWork,onEndWork,onPauseWork,onResu
         &&!String(o.description||"").toLowerCase().includes(q))return false;
     return true;
   },[fPn,fBranch,fText]);
-  const visibleQueues=useMemo(()=>orderQueues
+  const heldInStage=useCallback(r=>fStage==="all"||r.logs[0].stageId===fStage,[fStage]);
+  const visibleQueues=useMemo(()=>fType==="qty"?[]:orderQueues
     .filter(q=>orderMatches(q.order))
     .map(q=>{
-      let units=q.units;
-      if(onlyPlan)units=units.filter(u=>u.planned);
+      let units=fType==="held"?[]:q.units,held=q.held;
+      if(onlyPlan){units=units.filter(u=>u.planned);held=held.filter(r=>r.logs.some(w=>isPlanned(q.order.id,w.stageId,w.serialId)))}
       if(fStage!=="all")units=units.filter(u=>u.next.id===fStage);
-      return units===q.units?q:{...q,units,planned:units.filter(u=>u.planned).length};
+      held=held.filter(heldInStage);
+      return(units===q.units&&held===q.held)?q:{...q,units,held,planned:units.filter(u=>u.planned).length};
     })
-    .filter(q=>q.units.length>0),[orderQueues,onlyPlan,fStage,orderMatches]);
-  // The quantity list answers to the same filters. A שלב filter keeps only the
+    .filter(q=>q.units.length>0||q.held.length>0),[orderQueues,onlyPlan,fStage,fType,orderMatches,heldInStage,myPlans]);
+  // The quantity rows answer to the same filters. A שלב filter keeps only the
   // פק"ע that still have something unsigned on *that* stage, which is the rule
   // the list already follows for the worker's stages as a whole.
-  const visibleQtyOrders=useMemo(()=>qtyOrders.filter(o=>{
+  const visibleQtyOrders=useMemo(()=>fType==="serial"?[]:qtyOrders.filter(o=>{
     if(!orderMatches(o))return false;
+    if(fType==="held"&&!(heldByOrder.get(o.id)||[]).some(heldInStage))return false;
+    if(onlyPlan&&!myPlans.some(p=>p.orderId===o.id))return false;
     if(fStage==="all")return true;
     if(!myAccessSet.has(fStage)||!(o.stageIds||[]).includes(fStage))return false;
     return qtySigned(myQtyIdx,workLogs,o.id,fStage)<(Number(o.qty)||0);
-  }),[qtyOrders,orderMatches,fStage,myAccessSet,myQtyIdx,workLogs]);
+  }),[qtyOrders,orderMatches,fStage,fType,onlyPlan,myPlans,heldByOrder,heldInStage,myAccessSet,myQtyIdx,workLogs]);
+  // One list, in the order the פק"ע come, whatever kind they are — the quantity
+  // ones used to wait in a box of their own under every serial פק"ע in the plant,
+  // where nobody scrolled to them. My plan first, then work that was started and
+  // left on HOLD, then the rest.
+  const workItems=useMemo(()=>{
+    const ser=new Map(visibleQueues.map(q=>[q.id,q]));
+    const qty=new Set(visibleQtyOrders.map(o=>o.id));
+    const out=[];
+    accessible.forEach(o=>{
+      const q=ser.get(o.id);
+      if(q){out.push(q);return}
+      if(qty.has(o.id))out.push({id:o.id,kind:"qty",order:o,
+        held:(heldByOrder.get(o.id)||[]).filter(heldInStage),
+        planned:myPlans.filter(p=>p.orderId===o.id).length});
+    });
+    const rank=it=>(it.planned>0?2:0)+(it.held.length>0?1:0);
+    // Array sort is stable — inside a rank the פק"ע keep their order.
+    return out.sort((a,b)=>rank(b)-rank(a));
+  },[accessible,visibleQueues,visibleQtyOrders,heldByOrder,heldInStage,myPlans]);
   const visibleUnitCount=useMemo(()=>visibleQueues.reduce((n,q)=>n+q.units.length,0),[visibleQueues]);
+  const visibleHeldCount=useMemo(()=>workItems.reduce((n,it)=>n+it.held.length,0),[workItems]);
   // Admin view: the same two figures were recomputed inline in the markup on every
   // render — including the pending-unit count, which walks every serial of every
   // פק"ע against its whole route.
   const adminActiveWork=useMemo(()=>workLogs.filter(w=>!w.completed&&!isOnHold(w)),[workLogs]);
   const adminTotalPending=useMemo(()=>orders.reduce((s,o)=>{const oSt=o.stageIds||[];
     return s+(o.serials||[]).filter(sr=>!oSt.every(sid=>doneIdx.has(logKey(sr.id,sid)))).length},0),[orders,doneIdx]);
+
+
+  // ── The sections of the worker's screen ─────────────────────────────────
+  // Built once here and placed by `view` below: the job running now and the
+  // assignment belong to "mine", the list of everything waiting to "queue", and a
+  // lead's single tab ("all") shows them in the order it always did.
+  const busyNow=!!(myActiveLog&&!myActiveLog.paused);
+  const runBlocked=busyNow?"יש לך עבודה פעילה — סיים או עצור אותה לפני שמתחיל חדשה":"";
+  const PLAN_CHIPS=12;
+  const linkBtn={background:"none",border:"none",color:"#06b6d4",fontSize:12.5,fontWeight:600,cursor:"pointer",fontFamily:"inherit",padding:"4px 2px"};
+  // The job running now — on both of a worker's tabs, so ⏸️ and ✅ are never a tab away.
+  const activeCard=myActiveLog&&(
+    <Card style={{marginBottom:14,border:`2px solid ${myActiveLog.paused?"#8b95a8":"#f59e0b"}`,background:myActiveLog.paused?"var(--c-card)":"linear-gradient(135deg,var(--c-card),#f59e0b14)"}}>
+      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",flexWrap:"wrap",gap:10}}>
+        <div>
+          <div style={{fontSize:12,color:myActiveLog.paused?"#8b95a8":"#f59e0b",fontWeight:700,marginBottom:4}}>{myActiveLog.paused?"⏸️ בהפסקה":"⏱️ עובד כרגע:"}{myActiveLogs.length>1&&<span style={{marginRight:6,fontSize:11,background:"#3b82f622",color:"#60a5fa",padding:"2px 8px",borderRadius:12}}>×{myActiveLogs.length} יחידות</span>}</div>
+          <div style={{fontWeight:700,fontSize:16}}>
+            {isQtyRun(myActiveLog)
+              ?<>{myActiveLog.bulkCount} יחידות · {orders.find(o=>o.id===myActiveLog.orderId)?.woNumber||'פק"ע'}</>
+              :<>{myActiveLog.serialSn}{myActiveLogs.length>1&&` + ${myActiveLogs.length-1}`}</>}
+          </div>
+          <div style={{fontSize:13,color:"var(--c-muted)"}}>
+            {stages.find(s=>s.id===myActiveLog.stageId)?.name}
+            {isQtyRun(myActiveLog)&&<span style={{fontSize:11,color:"#10b981",marginRight:6}}>· דיווח לפי כמות (ללא סידוריים)</span>}
+          </div>
+          <div style={{fontSize:12,color:"var(--c-dim)",marginTop:4}}>התחלה: {new Date(myActiveLog.startTime).toLocaleTimeString("he-IL",{hour:"2-digit",minute:"2-digit"})}</div>
+          {breakCountOf(myActiveLog)>0&&<div style={{fontSize:11,color:"#8b95a8",marginTop:2}}>הפסקות: {fmtTime(breakMinOf(myActiveLog))} ({breakCountOf(myActiveLog)} פעמים)</div>}
+          {!myActiveLog.paused&&<ActiveTimer startTime={myActiveLog.startTime} pauseMin={myActiveLog.totalPauseMin||0} carryMin={holdCarryMin(myActiveLog)}/>}
+          {holdCarryMin(myActiveLog)>0&&<div style={{fontSize:11,color:"#f97316",marginTop:2}}>
+            ↪️ המשך עבודה של {(myActiveLog.holdInfo?.prev||[]).map(p=>p.userName).join(", ")||"עובד אחר"} — הטיימר כולל {fmtTime(holdCarryMin(myActiveLog))} שכבר עבדו. בדוחות נספר לך רק הזמן שלך.
+          </div>}
+          {isStaleWork(myActiveLog.startTime,myActiveLog.totalPauseMin)&&<div style={{fontSize:12,color:"#ef4444",fontWeight:700,marginTop:4}}>⚠️ העבודה פתוחה מעל 12 שעות — אם סיימת, לחץ "סיימתי"</div>}
+          {myActiveLog.paused&&<div style={{fontSize:22,fontWeight:800,color:"#8b95a8",marginTop:6}}>⏸️ מושהה</div>}
+          {/* A batch does not always come out whole. What gets signed is what was
+              really finished — the started count unless it is corrected here. */}
+          {isQtyRun(myActiveLog)&&(
+            <div style={{display:"flex",alignItems:"center",gap:6,flexWrap:"wrap",marginTop:8}}>
+              <span style={{fontSize:11.5,color:"var(--c-dim)"}}>יחידות שסיימתי בפועל:</span>
+              <input type="number" min="0" max={myActiveLog.bulkCount} value={runDone} placeholder={String(myActiveLog.bulkCount)}
+                onChange={e=>setRunDone(e.target.value)} style={{width:72,padding:"5px 7px",fontSize:12}}
+                title="ברירת המחדל היא הכמות שהתחלת. סיימת פחות? עדכן כאן — זו הכמות שתיחתם, והשאר יישאר פתוח לדיווח נוסף"/>
+              <span style={{fontSize:11,color:"var(--c-dim)"}}>מתוך {myActiveLog.bulkCount}</span>
+            </div>
+          )}
+        </div>
+        {/* The gap is the point: ⏸️ and ✅ used to be 8px apart and the same size,
+            and ✅ is the one this screen cannot undo. */}
+        <div style={{display:"flex",flexDirection:"column",gap:26}}>
+          <Btn color={myActiveLog.paused?"#3b82f6":"#f97316"} onClick={togglePause} style={{fontSize:14,padding:"10px 20px"}}>{myActiveLog.paused?"▶️ חזור לעבודה":"⏸️ הפסקה"}</Btn>
+          <Btn color="#10b981" onClick={endWork} style={{fontSize:16,padding:"12px 24px"}}>✅ סיימתי</Btn>
+          {onHoldWork&&<Btn color="#f97316" small onClick={holdWork} title="עצירת העבודה באמצע השלב (סוף יום, עבודה דחופה אחרת). הזמן נשמר, ואפשר להמשיך אחר כך — או שעובד אחר ימשיך אותה מתור העבודה, וכל אחד יקבל את הזמן שעבד"
+            style={{background:"transparent",border:"1px solid #f9731688",color:"#f97316"}}>🟧 HOLD — עצור והמשך אחר כך</Btn>}
+          {canCancelStart&&<button onClick={cancelStart} title="התחלת בטעות? ביטול מחזיר את העבודה לרשימה — בלי דיווח ובלי זמן"
+            style={{background:"none",border:"none",color:"#ef4444",fontSize:12,cursor:"pointer",fontFamily:"inherit"}}>🗑️ בטל התחלה (התחלתי בטעות)</button>}
+        </div>
+      </div>
+    </Card>
+  );
+  // My work on HOLD.
+  const myHeldCard=myHeldRows.length>0&&(
+    <Card style={{marginBottom:14,border:"2px solid #f9731655"}}>
+      <div style={{fontWeight:700,fontSize:14,color:"#f97316",marginBottom:8}}>🟧 עבודות שלי ב-HOLD ({myHeldRows.length})</div>
+      <div style={{display:"flex",flexDirection:"column",gap:7}}>
+        {myHeldRows.map(r=>{
+          const w=r.logs[0],o=orders.find(x=>x.id===w.orderId),st=stages.find(x=>x.id===w.stageId),hi=w.holdInfo||{};
+          const total=logWorkedMin(w)+holdCarryMin(w);
+          const units=isQtyRun(w)?`${w.bulkCount} יח' ${QTY_UNIT_TAG}`:r.logs.map(x=>x.serialSn).filter(Boolean).join(", ");
+          return(
+            <div key={r.key} style={{display:"flex",justifyContent:"space-between",alignItems:"center",gap:10,flexWrap:"wrap",background:"var(--c-deep)",border:"1px solid var(--c-border)",borderRadius:8,padding:"8px 10px"}}>
+              <div style={{minWidth:0}}>
+                <div style={{fontWeight:700,fontSize:13}}>
+                  <span style={{color:"#60a5fa"}}>{o?.woNumber||'פק"ע'}</span>
+                  {st&&<span style={{color:st.color,marginInlineStart:6}}>{st.name}</span>}
+                  <span style={{color:"var(--c-muted)",fontWeight:500,marginInlineStart:6}}>{units}</span>
+                </div>
+                <div style={{fontSize:11,color:"var(--c-dim)",marginTop:2}}>
+                  זמן שנצבר: <b style={{color:"var(--c-text)"}}>{fmtTime(total)}</b>
+                  {hi.assignedByName&&<> · הועבר אליך ע״י {hi.assignedByName}{Array.isArray(hi.prev)&&hi.prev.length?` (מ-${hi.prev[hi.prev.length-1].userName})`:""}</>}
+                </div>
+              </div>
+              <Btn small color="#3b82f6" onClick={()=>resumeHeld(r)} disabled={!!(myActiveLog&&!myActiveLog.paused)}>▶️ המשך</Btn>
+            </div>
+          );
+        })}
+      </div>
+    </Card>
+  );
+  // Active custom task.
+  const activeTaskCard=activeTask&&(
+    <Card style={{marginBottom:14,border:`2px solid ${activeTask.paused?"#8b95a8":"#a78bfa"}`}}>
+      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",flexWrap:"wrap",gap:10}}>
+        <div>
+          <div style={{fontSize:12,color:activeTask.paused?"#8b95a8":"#a78bfa",fontWeight:700,marginBottom:4}}>{activeTask.paused?"⏸️ משימה בהפסקה":"📌 משימה פעילה:"}</div>
+          <div style={{fontWeight:700,fontSize:16}}>{activeTask.name}</div>
+          {activeTask.description&&<div style={{fontSize:12,color:"var(--c-muted)"}}>{activeTask.description}</div>}
+          {(activeTask.totalPauseMin>0||(activeTask.pauseLog||[]).length>0)&&<div style={{fontSize:11,color:"#8b95a8",marginTop:2}}>הפסקות: {fmtTime(activeTask.totalPauseMin||0)} ({(activeTask.pauseLog||[]).length})</div>}
+          {!activeTask.paused&&<ActiveTimer startTime={activeTask.startTime} pauseMin={activeTask.totalPauseMin||0}/>}
+          {activeTask.paused&&<div style={{fontSize:22,fontWeight:800,color:"#8b95a8",marginTop:6}}>⏸️ מושהה</div>}
+        </div>
+        <div style={{display:"flex",flexDirection:"column",gap:26}}>
+          <Btn color={activeTask.paused?"#3b82f6":"#f97316"} onClick={()=>activeTask.paused?onResumeTask(activeTask.id):onPauseTask(activeTask.id)} style={{fontSize:14,padding:"10px 20px"}}>{activeTask.paused?"▶️ חזור":"⏸️ הפסקה"}</Btn>
+          <Btn color="#10b981" onClick={()=>onEndTask(activeTask.id)} style={{fontSize:16,padding:"12px 24px"}}>✅ סיימתי</Btn>
+        </div>
+      </div>
+    </Card>
+  );
+  // Custom tasks — different view for admin vs worker.
+  const tasksCard=(
+    <Card style={{marginBottom:14,border:"1px solid #a78bfa33"}}>
+      {currentUser.role==="admin"?(
+        <div>
+          <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:10,flexWrap:"wrap",gap:6}}>
+            <div style={{fontWeight:700,fontSize:15,color:"#a78bfa"}}>📌 משימות שהקצתי</div>
+            <div style={{display:"flex",gap:6}}>
+              <span style={{fontSize:12,background:"#f59e0b22",color:"#f59e0b",padding:"2px 10px",borderRadius:12}}>{(customTasks||[]).filter(t=>!t.completed&&!t.partial).length} פתוחות</span>
+              <span style={{fontSize:12,background:"#3b82f622",color:"#60a5fa",padding:"2px 10px",borderRadius:12}}>{(customTasks||[]).filter(t=>t.partial&&!t.completed).length} חלקיות</span>
+            </div>
+          </div>
+          {(customTasks||[]).filter(t=>!t.completed).length===0?<EmptyState icon="📌" title="אין משימות פתוחות" subtitle="המנהל יכול להקצות לך משימות"/>:(
+            <div style={{display:"flex",flexDirection:"column",gap:6}}>
+              {(customTasks||[]).filter(t=>!t.completed).sort((a,b)=>(a.partial?1:0)-(b.partial?1:0)).map(t=>(
+                <div key={t.id} style={{background:"var(--c-deep)",borderRadius:8,padding:"10px 12px",border:t.partial?"1px solid #3b82f655":t.active?"1px solid #a78bfa":"1px solid var(--c-border)"}}>
+                  <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",flexWrap:"wrap",gap:6}}>
+                    <div>
+                      <span style={{fontWeight:600,fontSize:13}}>{t.name}</span>
+                      <span style={{fontSize:11,color:"#60a5fa",marginRight:8}}>→ {t.userName}</span>
+                      {t.partial&&<span style={{fontSize:11,background:"#3b82f622",color:"#60a5fa",padding:"2px 6px",borderRadius:10,marginRight:4}}>〰️ חלקית</span>}
+                      {t.price>0&&<span style={{fontSize:11,color:"#a78bfa",marginRight:6}}>₪{t.price}</span>}
+                      {t.active&&!t.partial&&<span style={{fontSize:11,background:"#a78bfa22",color:"#a78bfa",padding:"2px 6px",borderRadius:10}}>🔄 בביצוע</span>}
+                    </div>
+                    <div style={{display:"flex",gap:4,alignItems:"center"}}>
+                      <span style={{fontSize:11,color:"var(--c-dim)"}}>{fmt(t.createdAt?.slice(0,10))}</span>
+                      <button onClick={()=>onMarkPartialTask&&onMarkPartialTask(t.id)} title="חלקית" style={{background:t.partial?"#3b82f633":"transparent",border:"1px solid #3b82f644",borderRadius:6,padding:"2px 6px",fontSize:11,color:"#60a5fa",fontFamily:"inherit",cursor:"pointer"}}>〰️</button>
+                      <button onClick={()=>onMarkDoneTask&&onMarkDoneTask(t.id)} title="בוצע" style={{background:"transparent",border:"1px solid #10b98144",borderRadius:6,padding:"2px 6px",fontSize:11,color:"#10b981",fontFamily:"inherit",cursor:"pointer"}}>✅</button>
+                      <IBtn onClick={()=>{if(confirm("למחוק משימה?"))onDeleteTask(t.id)}}>🗑️</IBtn>
+                    </div>
+                  </div>
+                  {t.description&&<div style={{fontSize:11,color:"var(--c-muted)",marginTop:4}}>{t.description}</div>}
+                </div>
+              ))}
+            </div>
+          )}
+          {(customTasks||[]).filter(t=>t.completed).length>0&&(
+            <details style={{marginTop:10}}>
+              <summary style={{fontSize:11,color:"var(--c-dim)",cursor:"pointer",padding:"4px 0",borderTop:"1px solid var(--c-border)"}}>✅ הושלמו ({(customTasks||[]).filter(t=>t.completed).length})</summary>
+              <div style={{marginTop:6}}>
+                {(customTasks||[]).filter(t=>t.completed).slice(0,8).map(t=>(
+                  <div key={t.id} style={{fontSize:12,color:"var(--c-muted)",padding:"3px 0",display:"flex",gap:10,flexWrap:"wrap"}}>
+                    <span>✅ {t.name}</span><span style={{color:"#60a5fa"}}>{t.userName}</span><span style={{color:"#a78bfa"}}>{fmtTime(t.durationMin)}</span>{t.price>0&&<span style={{color:"#10b981"}}>₪{t.price}</span>}
+                  </div>
+                ))}
+              </div>
+            </details>
+          )}
+        </div>
+      ):(
+        <div>
+          <div style={{fontWeight:700,fontSize:15,color:"#a78bfa",marginBottom:10}}>📌 משימות שהוקצו לי</div>
+          {myTasks.filter(t=>!t.completed).length===0?<EmptyState icon="📌" title="אין משימות" subtitle="אין משימות פעילות כרגע"/>:(
+            <div style={{display:"flex",flexDirection:"column",gap:6}}>
+              {myTasks.filter(t=>!t.completed).map(t=>(
+                <div key={t.id} style={{display:"flex",justifyContent:"space-between",alignItems:"center",background:"var(--c-deep)",borderRadius:8,padding:"8px 12px",border:t.active?"1px solid #a78bfa":"1px solid var(--c-border)"}}>
+                  <div>
+                    <span style={{fontWeight:600,fontSize:13}}>{t.name}</span>
+                    {t.description&&<span style={{fontSize:11,color:"var(--c-dim)",marginRight:6}}> — {t.description}</span>}
+                    {t.price>0&&<span style={{fontSize:11,color:"#a78bfa",marginRight:6}}>₪{t.price}</span>}
+                    {t.active&&<span style={{fontSize:11,color:"#a78bfa",marginRight:6}}>🔄 פעיל</span>}
+                  </div>
+                  {!t.active?<Btn color="#a78bfa" small onClick={()=>onStartTask(t.id)} disabled={!!activeTask||!!myActiveLog}>▶️ התחל</Btn>:<Btn color="#10b981" small onClick={()=>onEndTask(t.id)}>✅ סיים</Btn>}
+                </div>
+              ))}
+            </div>
+          )}
+          {myTasks.filter(t=>t.completed).length>0&&(
+            <div style={{marginTop:10,borderTop:"1px solid var(--c-border)",paddingTop:8}}>
+              <div style={{fontSize:11,color:"var(--c-dim)",marginBottom:6}}>הושלמו:</div>
+              {myTasks.filter(t=>t.completed).slice(0,5).map(t=>(
+                <div key={t.id} style={{fontSize:12,color:"var(--c-muted)",padding:"3px 0",display:"flex",gap:10}}>
+                  <span>✅ {t.name}</span><span style={{color:"#a78bfa"}}>{fmtTime(t.durationMin)}</span>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+    </Card>
+  );
+  // My work plan — what a manager assigned me, each line with its own ▶️, so the
+  // assignment is where the work starts and not a pointer to a unit somewhere in
+  // the list below. A פק"ע without serial numbers gets a count and ▶️; one that
+  // somebody already started and left on HOLD is offered to carry on.
+  const planCard=myPlans.length>0&&(
+    <Card style={{marginBottom:14,border:"2px solid #06b6d4",background:"linear-gradient(135deg,var(--c-card),#06b6d414)"}}>
+      <div style={{display:"flex",alignItems:"center",gap:8,flexWrap:"wrap",marginBottom:4}}>
+        <div style={{fontWeight:700,fontSize:15,color:"#06b6d4"}}>📅 {view==="mine"?"העבודה שהוקצתה לי":"תוכנית העבודה שלי להיום"}</div>
+        <span style={{fontSize:11,background:"#06b6d422",color:"#06b6d4",border:"1px solid #06b6d455",padding:"2px 9px",borderRadius:10,fontWeight:700}}>{myPlans.length} שיבוצים · {planUnitsLeft} יחידות נותרו</span>
+        {myCarried.length>0&&<span style={{fontSize:11,background:"#f59e0b1f",color:"#f59e0b",border:"1px solid #f59e0b55",padding:"2px 9px",borderRadius:10,fontWeight:700}}>↩️ {myCarried.length} מימים קודמים</span>}
+      </div>
+      <div style={{fontSize:11,color:"var(--c-dim)",marginBottom:10}}>
+        {view==="all"
+          ?"אלו היחידות שהוקצו לך אישית להיום. אפשר להתחיל אותן ישירות מכאן, וברשימת העבודה שלמטה הן מסומנות ב-📅 תוכנית העבודה שלי."
+          :"אלו העבודות שהמנהל שיבץ לך. לוחצים ▶️ ליד היחידה ומתחילים — אין צורך לחפש אותה בתור העבודה."}
+        {myCarried.length>0?" שיבוץ שלא הסתיים ביום שלו ממשיך להופיע כאן, עם התאריך שבו שובץ.":""}
+      </div>
+      <div style={{display:"flex",flexDirection:"column",gap:8}}>
+        {myPlans.map(p=>{
+          const o=orders.find(x=>x.id===p.orderId),st=stageMap.get(p.stageId);
+          const hasSpecific=Array.isArray(p.serialIds)&&p.serialIds.length>0;
+          const qtyPlan=isQtyOrder(o);
+          const pend=qtyPlan?[]:planPending(p.orderId,p.stageId,p.serialIds);
+          const left=qtyPlan?planQtyLeft(p,o):pend.length;
+          const canStart=!!(st&&myAccessSet.has(st.id));
+          const late=planIsCarried(p,today)?planLateDays(p,today):0;
+          // Someone else's HOLD on exactly this assignment — mine is in its own card.
+          const held=heldRows.filter(r=>!r.mine&&r.logs[0].orderId===p.orderId&&r.logs[0].stageId===p.stageId&&
+            (!hasSpecific||r.logs.some(w=>p.serialIds.includes(w.serialId))));
+          // Units of the assignment not signed yet but not free either — running now.
+          const scope=!o||qtyPlan?[]:hasSpecific?(o.serials||[]).filter(sr=>p.serialIds.includes(sr.id)):(o.serials||[]);
+          const runningHere=scope.filter(sr=>!doneIdx.has(logKey(sr.id,p.stageId))&&runIdx.has(logKey(sr.id,p.stageId))).length;
+          const open=!!planOpen[p.id];
+          const shown=open?pend:pend.slice(0,PLAN_CHIPS);
+          return(
+            <div key={p.id} style={{background:"var(--c-deep)",borderRadius:10,padding:"10px 12px",border:`1px solid ${p.done?"#10b98144":late?"#f59e0b66":"#06b6d433"}`,opacity:p.done?.65:1}}>
+              <div style={{display:"flex",alignItems:"center",gap:8,flexWrap:"wrap",marginBottom:8}}>
+                <span style={{fontWeight:700,color:"#60a5fa"}}>{o?.woNumber||'פק"ע נמחקה'}</span>
+                {late>0&&<span title={`שובץ ליום ${fmt(p.date)} ולא הסתיים — ממשיך להיום`} style={{fontSize:10.5,background:"#f59e0b1f",color:"#f59e0b",border:"1px solid #f59e0b55",borderRadius:10,padding:"1px 8px",fontWeight:700,whiteSpace:"nowrap"}}>↩️ מתוכנית {fmt(p.date)} · {daysHeb(late)} באיחור</span>}
+                {o?.pn&&<span style={{fontSize:11,color:"#a78bfa"}}>P/N: {o.pn}</span>}
+                {st&&<span style={{fontSize:12,color:st.color}}>← {st.name}</span>}
+                <span style={{fontSize:11,color:"var(--c-dim)"}}>{qtyPlan?`לפי כמות${p.targetQty>0?` · יעד: ${p.targetQty} יח'`:""}`:hasSpecific?`${p.serialIds.length} מספרים סידוריים משובצים`:(p.targetQty>0?`יעד: ${p.targetQty} יח'`:"כל היחידות")} · נותרו {left}</span>
+                {p.done&&<span style={{fontSize:11,color:"#10b981"}}>✅ בוצע</span>}
+                {p.createdByName&&<span style={{fontSize:11,color:"var(--c-dim)"}}>· שובץ ע"י {p.createdByName}</span>}
+              </div>
+              {p.note&&<div style={{fontSize:12,color:"var(--c-muted)",marginBottom:8}}>📝 {p.note}</div>}
+              {!canStart&&st&&<div style={{fontSize:11,color:"#f59e0b"}}>⚠️ אין לך הרשאה לשלב זה — פנה למנהל</div>}
+              {canStart&&held.length>0&&<div style={{display:"flex",flexDirection:"column",gap:6,marginBottom:8}}>{held.map(r=>heldRowView(r,{compact:true}))}</div>}
+              {canStart&&qtyPlan&&<QtyStageStart order={o} stage={st} workLogs={workLogs} qtyIdx={myQtyIdx} runIdx={myQtyRunIdx}
+                target={Number(p.targetQty)||0} onStart={(s2,n)=>startQtyRun(o,s2,n)} blocked={runBlocked}/>}
+              {canStart&&pend.length>0&&(<>
+                <div style={{display:"flex",flexWrap:"wrap",gap:7}}>
+                  {shown.map(s=>(
+                    <Btn key={s.id} color={st.color} onClick={()=>startWork(s.id,st.id,p.orderId)} disabled={busyNow} title={runBlocked||`התחלת עבודה על ${s.sn} · ${st.name}`}
+                      style={{padding:"9px 14px",fontSize:13.5}}>▶️ {s.sn}</Btn>
+                  ))}
+                </div>
+                {pend.length>1&&<div style={{display:"flex",gap:10,flexWrap:"wrap",marginTop:8,alignItems:"center"}}>
+                  {pend.length>PLAN_CHIPS&&<button onClick={()=>setPlanOpen(m=>({...m,[p.id]:!open}))} style={linkBtn}>{open?"▲ הצג פחות":`▼ הצג את כל ${pend.length} היחידות`}</button>}
+                  <button onClick={()=>startGroup(p.orderId,st.id,pend.map(s=>s.id))} disabled={busyNow} title={runBlocked||"טיימר אחד לכל היחידות שנותרו בשיבוץ — מסתיימות יחד"}
+                    style={{background:"transparent",border:"1px solid #06b6d488",color:"#06b6d4",borderRadius:8,padding:"7px 12px",fontSize:12.5,fontWeight:600,cursor:busyNow?"default":"pointer",fontFamily:"inherit",opacity:busyNow?.5:1}}>📦 התחל את כולן יחד ({pend.length})</button>
+                </div>}
+              </>)}
+              {canStart&&o&&!qtyPlan&&pend.length===0&&held.length===0&&(runningHere>0
+                ?<div style={{fontSize:11,color:"#f59e0b"}}>⏱️ {runningHere===1?"היחידה שנותרה כבר בעבודה":`${runningHere} היחידות שנותרו כבר בעבודה`}</div>
+                :<div style={{fontSize:11,color:"#10b981"}}>🎉 כל היחידות בשלב זה הושלמו</div>)}
+            </div>
+          );
+        })}
+      </div>
+    </Card>
+  );
+  // Queue filters — the search box always, the rest folded away. Then the kind of
+  // work: units with serial numbers, quantity-reported פק"ע, or started-on-HOLD.
+  const kindChip=(on,c)=>({background:on?c+"22":"var(--c-deep)",border:`1px solid ${on?c:"var(--c-border2)"}`,color:on?c:"var(--c-muted)",
+    borderRadius:20,padding:"6px 12px",fontSize:12.5,fontWeight:600,fontFamily:"inherit",cursor:"pointer",whiteSpace:"nowrap"});
+  const kinds=[["all","הכל","#3b82f6"],["serial",`🔢 עם מספר סידורי · ${queueOpts.serial}`,"#3b82f6"],
+    ["qty",`✍️ לפי כמות · ${queueOpts.qty}`,"#10b981"],["held",`🟧 הותחלו · ${queueOpts.held}`,"#f97316"]]
+    .filter(([k])=>k==="all"||queueOpts[k]>0);
+  const advCount=[fPn,fStage,fBranch].filter(v=>v!=="all").length;
+  const filtersCard=(orderQueues.length>0||qtyOrders.length>0)&&(
+    <Card style={{padding:"11px 13px",marginBottom:10}}>
+      <div style={{display:"flex",gap:8,alignItems:"center"}}>
+        <input value={fText} onChange={e=>{setFText(e.target.value);setBulkSelected([])}} placeholder={'🔍 חיפוש פק"ע, מק"ט או תיאור...'} aria-label={'חיפוש פק"ע / מק"ט'} style={{flex:1,minWidth:0}}/>
+        <button onClick={()=>setShowAdv(v=>!v)} aria-expanded={showAdv}
+          style={{flexShrink:0,background:advOn?"#3b82f622":"var(--c-deep)",border:`1px solid ${advOn?"#3b82f6":"var(--c-border2)"}`,color:advOn?"#60a5fa":"var(--c-muted)",borderRadius:8,padding:"9px 12px",fontSize:12.5,fontWeight:600,fontFamily:"inherit",cursor:"pointer",whiteSpace:"nowrap"}}>
+          ⚙️ סינון{advCount?` (${advCount})`:""} {showAdv?"▲":"▼"}
+        </button>
+      </div>
+      {showAdv&&(
+        <div style={{display:"flex",gap:9,flexWrap:"wrap",alignItems:"flex-end",marginTop:9}}>
+          <div style={{display:"flex",flexDirection:"column",gap:3,flex:"1 1 135px"}}>
+            <label style={{fontSize:11,color:"var(--c-dim)"}}>מק"ט</label>
+            <select value={fPn} onChange={e=>{setFPn(e.target.value);setBulkSelected([])}} style={{padding:"7px 8px",fontSize:12}}>
+              <option value="all">כל המק"טים</option>
+              {queueOpts.pn.map(([v,n])=><option key={v||"__none"} value={v||"none"}>{v||'ללא מק"ט'} · {n}</option>)}
+            </select>
+          </div>
+          <div style={{display:"flex",flexDirection:"column",gap:3,flex:"1 1 135px"}}>
+            <label style={{fontSize:11,color:"var(--c-dim)"}}>שלב</label>
+            <select value={fStage} onChange={e=>{setFStage(e.target.value);setBulkSelected([])}} style={{padding:"7px 8px",fontSize:12}} title="רק השלבים שיש לך הרשאה אליהם">
+              <option value="all">כל השלבים שלי</option>
+              {queueOpts.st.map(([sid,n])=><option key={sid} value={sid}>{stageMap.get(sid)?.name||sid} · {n}</option>)}
+            </select>
+          </div>
+          <div style={{display:"flex",flexDirection:"column",gap:3,flex:"1 1 135px"}}>
+            <label style={{fontSize:11,color:"var(--c-dim)"}}>סניף (חטיבה)</label>
+            <select value={fBranch} onChange={e=>{setFBranch(e.target.value);setBulkSelected([])}} style={{padding:"7px 8px",fontSize:12}} title='מספר הסניף מגיע מה-ERP ומייצג את החטיבה העסקית'>
+              <option value="all">כל הסניפים</option>
+              {queueOpts.br.map(([v,n])=><option key={v||"__none"} value={v||"none"}>{v?branchLabel(v):"ללא סניף"} · {n}</option>)}
+            </select>
+          </div>
+        </div>
+      )}
+      {kinds.length>2&&(
+        <div style={{display:"flex",gap:6,flexWrap:"wrap",marginTop:9}}>
+          {kinds.map(([k,l,c])=><button key={k} onClick={()=>{setFType(k);setBulkSelected([])}} style={kindChip(fType===k,c)}>{l}</button>)}
+        </div>
+      )}
+      {filterOn&&(
+        <div style={{display:"flex",alignItems:"center",gap:10,flexWrap:"wrap",fontSize:11.5,color:"var(--c-dim)",marginTop:8}}>
+          {workItems.length
+            ?<span>מציג {workItems.length} פק"ע{visibleUnitCount>0?` · ${visibleUnitCount} יחידות`:""}{visibleHeldCount>0?` · ${visibleHeldCount} שהותחלו`:""}</span>
+            :<span style={{color:"#f59e0b"}}>אין עבודה שמתאימה לסינון — נסה לנקות אותו</span>}
+          <button onClick={clearFilters} style={{...linkBtn,color:"#ef4444"}}>✕ נקה סינון</button>
+        </div>
+      )}
+    </Card>
+  );
+  const openPlans=myPlans.filter(p=>!p.done).length;
+  const bulkRow=(
+    <div style={{display:"flex",gap:8,marginBottom:10,flexWrap:"wrap",alignItems:"center"}}>
+      {queueOpts.serial>0&&fType!=="qty"&&fType!=="held"&&<Btn color={bulkMode?"#ef4444":"#374151"} small onClick={()=>{setBulkMode(p=>!p);setBulkSelected([])}}>{bulkMode?"✕ בטל מצב קבוצתי":"📦 הפעלת טיימר קבוצתי"}</Btn>}
+      {view==="all"&&myPlans.length>0&&<SegBtn options={[["all","כל היחידות הממתינות"],["plan","📅 תוכנית העבודה שלי"]]} value={onlyPlan?"plan":"all"} onChange={v=>{setOnlyPlan(v==="plan");setBulkSelected([])}}/>}
+      {view==="all"&&myPlans.length>0&&<span style={{fontSize:11,color:"var(--c-dim)"}}>יחידות המסומנות ב-📅 הוקצו לך בתוכנית העבודה</span>}
+      {view==="queue"&&openPlans>0&&onGoTab&&<button onClick={()=>onGoTab("mywork")} style={{...linkBtn,fontSize:12}}>📅 יש לך {openPlans===1?"שיבוץ פתוח":`${openPlans} שיבוצים פתוחים`} — אפשר להתחיל אותם מ״העבודה שלי״ ←</button>}
+    </div>
+  );
+  // A פק"ע with serial numbers: its units, each with ▶️ — and above them anything
+  // somebody started on it and left on HOLD.
+  const serialCard=({order:o,units,held,planned})=>(
+    <Card key={o.id} style={{marginBottom:10,border:planned>0?"1px solid #06b6d455":held.length?"1px solid #f9731655":"1px solid var(--c-border)"}}>
+      <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:10,flexWrap:"wrap"}}>
+        <span style={{fontWeight:700,color:"#60a5fa"}}>{o.woNumber}</span>
+        {o.pn&&<span style={{fontSize:12,color:"#a78bfa"}}>P/N: {o.pn}</span>}
+        {units.length>0&&<span style={{fontSize:11,color:"var(--c-dim)"}}>({units.length} ממתינות)</span>}
+        {planned>0&&<PlanTag label={`תוכנית העבודה שלי · ${planned} יח'`}/>}
+        {bulkMode&&bulkSelected.length>0&&<Btn color="var(--c-accent)" small onClick={()=>startBulk(o.id)}>▶️ התחל {bulkSelected.length} יחידות</Btn>}
+      </div>
+      <div style={{display:"flex",flexDirection:"column",gap:6}}>
+        {held.map(r=>heldRowView(r,{compact:true}))}
+        {units.slice(0,15).map(s=>{
+          const nextStage=s.next;
+          const isSel=bulkSelected.includes(s.id);
+          return(
+            <div key={s.id} style={{display:"flex",justifyContent:"space-between",alignItems:"center",gap:8,flexWrap:"wrap",background:isSel?"#3b82f611":(s.planned?"#06b6d40f":"var(--c-deep)"),borderRadius:8,padding:"8px 12px",border:isSel?"1px solid #3b82f6":(s.planned?"1px solid #06b6d455":"1px solid transparent")}}>
+              <div style={{display:"flex",alignItems:"center",gap:8,flexWrap:"wrap"}}>
+                {bulkMode&&<input type="checkbox" checked={isSel} onChange={e=>{setBulkSelected(p=>e.target.checked?[...p,s.id]:p.filter(x=>x!==s.id))}}/>}
+                <span style={{fontWeight:600,fontSize:13}}>{s.sn}</span>
+                <span style={{fontSize:11,color:nextStage.color}}>← {nextStage.name}</span>
+                {s.planned&&<PlanTag small/>}
+              </div>
+              {!bulkMode&&<Btn color={nextStage.color} small onClick={()=>startWork(s.id,nextStage.id,o.id)} disabled={busyNow}>▶️ התחל</Btn>}
+            </div>
+          );
+        })}
+        {units.length>15&&<div style={{fontSize:12,color:"var(--c-dim)",textAlign:"center"}}>ועוד {units.length-15}...</div>}
+      </div>
+    </Card>
+  );
+  // A פק"ע without serial numbers: one row per stage of mine — a count and ▶️,
+  // nothing to scroll sideways for. Signing work already done, and the history,
+  // stay one tap away below.
+  const qtyCard=({order:o,held,planned})=>{
+    const cap=Number(o.qty)||0,br=branchCode(o.branch),open=openQty===o.id;
+    const mineStages=(o.stageIds||[]).map(id=>stageMap.get(id)).filter(st=>st&&myAccessSet.has(st.id)
+      &&(fStage==="all"||st.id===fStage)&&qtySigned(myQtyIdx,workLogs,o.id,st.id)<cap);
+    return(
+      <Card key={o.id} style={{marginBottom:10,border:planned>0?"1px solid #06b6d455":held.length?"1px solid #f9731655":"1px solid var(--c-border)"}}>
+        <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:10,flexWrap:"wrap"}}>
+          <span style={{fontWeight:700,color:"#60a5fa"}}>{o.woNumber}</span>
+          {o.pn&&<span style={{fontSize:12,color:"#a78bfa"}}>P/N: {o.pn}</span>}
+          {br&&<span style={{fontSize:11,color:branchColor(br)}}>🏢 {branchLabel(br)}</span>}
+          <span title='לפק"ע אין מספרים סידוריים — מדווחים כמות' style={{fontSize:11,background:"#10b9811a",color:"#10b981",border:"1px solid #10b98144",borderRadius:10,padding:"1px 8px",fontWeight:600,whiteSpace:"nowrap"}}>✍️ לפי כמות · {cap} יח'</span>
+          {planned>0&&<PlanTag small/>}
+        </div>
+        <div style={{display:"flex",flexDirection:"column",gap:7}}>
+          {held.map(r=>heldRowView(r,{compact:true}))}
+          {mineStages.map(st=><QtyStageStart key={st.id} order={o} stage={st} workLogs={workLogs} qtyIdx={myQtyIdx} runIdx={myQtyRunIdx}
+            onStart={(s2,n)=>startQtyRun(o,s2,n)} blocked={runBlocked}/>)}
+        </div>
+        <button onClick={()=>setOpenQty(open?"":o.id)} style={{...linkBtn,color:open?"#10b981":"var(--c-dim)",marginTop:6}}>
+          {open?"▲ סגור":"✍️ כבר עשיתי? חתימה בלי טיימר · היסטוריה ▼"}
+        </button>
+        {open&&<div style={{marginTop:8}}>
+          <QtySignOff order={o} stages={stages} workLogs={workLogs} onSignOff={onStartWork} onDeleteLog={onDeleteLog} compact/>
+        </div>}
+      </Card>
+    );
+  };
+  // Available Work — plan units first, each one tagged.
+  // Virtualised: a worker whose access spans the whole plant has a queue as
+  // long as the פק"ע list itself, and rendering every card up front — each
+  // with up to fifteen unit rows — put tens of thousands of nodes on the page
+  // before the tab could paint. Only what fits on screen is built, the same
+  // way the פק"ע list works.
+  const workList=<VirtualList items={workItems} estimate={200} gap={0} renderRow={it=>it.kind==="qty"?qtyCard(it):serialCard(it)}/>;
+  const queueEmpty=workItems.length===0&&(filterOn
+    ?<EmptyState icon="🔍" title="אין עבודה שמתאימה לסינון" subtitle="נקה את הסינון כדי לראות את כל העבודה שממתינה לך" action={clearFilters} actionLabel="✕ נקה סינון"/>
+    :onlyPlan
+    ?<EmptyState icon="📅" title="אין יחידות פתוחות בתוכנית שלך" subtitle="כל מה שהוקצה לך להיום בוצע — עבור ל'כל היחידות הממתינות' כדי לראות עבודה נוספת"/>
+    :<EmptyState icon="🎉" title="אין עבודה ממתינה!" subtitle="כל היחידות הושלמו"/>);
+  const openTasks=myTasks.filter(t=>!t.completed);
+  const mineEmpty=!myActiveLog&&!activeTask&&myPlans.length===0&&myHeldRows.length===0&&openTasks.length===0&&(
+    <Card style={{marginBottom:14}}>
+      <EmptyState icon="🙌" title="אין כרגע עבודה שהוקצתה לך" subtitle="כשהמנהל ישבץ לך עבודה או משימה, היא תופיע כאן. בינתיים אפשר לבחור עבודה מתור העבודה."
+        action={onGoTab?()=>onGoTab("queue"):null} actionLabel="🧰 לתור העבודה"/>
+    </Card>
+  );
 
   return(
     <div className="fade-in">
@@ -5333,361 +5963,26 @@ function MyWork({orders,stages,workLogs,onStartWork,onEndWork,onPauseWork,onResu
         </div>
       ):(
       <div>
-      <h2 style={{margin:"0 0 14px"}}>🔨 העבודה שלי</h2>
-
-      {/* My daily work plan (assigned by manager) */}
-      {myPlans.length>0&&(
-        <Card style={{marginBottom:14,border:"2px solid #06b6d4",background:"linear-gradient(135deg,var(--c-card),#02161c)"}}>
-          <div style={{display:"flex",alignItems:"center",gap:8,flexWrap:"wrap",marginBottom:4}}>
-            <div style={{fontWeight:700,fontSize:15,color:"#06b6d4"}}>📅 תוכנית העבודה שלי להיום</div>
-            <span style={{fontSize:11,background:"#06b6d422",color:"#06b6d4",border:"1px solid #06b6d455",padding:"2px 9px",borderRadius:10,fontWeight:700}}>{myPlans.length} שיבוצים · {planUnitsLeft} יחידות נותרו</span>
-            {myCarried.length>0&&<span style={{fontSize:11,background:"#f59e0b1f",color:"#f59e0b",border:"1px solid #f59e0b55",padding:"2px 9px",borderRadius:10,fontWeight:700}}>↩️ {myCarried.length} מימים קודמים</span>}
-          </div>
-          <div style={{fontSize:11,color:"var(--c-dim)",marginBottom:10}}>אלו היחידות שהוקצו לך אישית להיום. ברשימת העבודה שלמטה הן מסומנות ב-📅 תוכנית העבודה שלי — כדי להבדיל אותן משאר היחידות שממתינות.{myCarried.length>0?" שיבוץ שלא הסתיים ביום שלו ממשיך להופיע כאן, עם התאריך שבו שובץ.":""}</div>
-          <div style={{display:"flex",flexDirection:"column",gap:8}}>
-            {myPlans.map(p=>{
-              const o=orders.find(x=>x.id===p.orderId);const st=stages.find(s=>s.id===p.stageId);
-              const hasSpecific=Array.isArray(p.serialIds)&&p.serialIds.length>0;
-              const pend=planPending(p.orderId,p.stageId,p.serialIds);
-              const canStart=st&&myAccess.includes(st.id);
-              const late=planIsCarried(p,today)?planLateDays(p,today):0;
-              return(
-                <div key={p.id} style={{background:"var(--c-deep)",borderRadius:10,padding:"10px 12px",border:`1px solid ${p.done?"#10b98144":late?"#f59e0b66":"#06b6d433"}`,opacity:p.done?.65:1}}>
-                  <div style={{display:"flex",alignItems:"center",gap:8,flexWrap:"wrap",marginBottom:pend.length?8:0}}>
-                    <span style={{fontWeight:700,color:"#60a5fa"}}>{o?.woNumber||'פק"ע נמחקה'}</span>
-                    {late>0&&<span title={`שובץ ליום ${fmt(p.date)} ולא הסתיים — ממשיך להיום`} style={{fontSize:10.5,background:"#f59e0b1f",color:"#f59e0b",border:"1px solid #f59e0b55",borderRadius:10,padding:"1px 8px",fontWeight:700,whiteSpace:"nowrap"}}>↩️ מתוכנית {fmt(p.date)} · {daysHeb(late)} באיחור</span>}
-                    {o?.pn&&<span style={{fontSize:11,color:"#a78bfa"}}>P/N: {o.pn}</span>}
-                    {st&&<span style={{fontSize:12,color:st.color}}>← {st.name}</span>}
-                    <span style={{fontSize:11,color:"var(--c-dim)"}}>{hasSpecific?`${p.serialIds.length} מספרים סידוריים משובצים`:(p.targetQty>0?`יעד: ${p.targetQty} יח'`:"כל היחידות")} · נותרו {pend.length}</span>
-                    {p.done&&<span style={{fontSize:11,color:"#10b981"}}>✅ בוצע</span>}
-                    {p.createdByName&&<span style={{fontSize:11,color:"var(--c-dim)"}}>· שובץ ע"י {p.createdByName}</span>}
-                  </div>
-                  {p.note&&<div style={{fontSize:12,color:"var(--c-muted)",marginBottom:pend.length?8:0}}>📝 {p.note}</div>}
-                  {!canStart&&st&&<div style={{fontSize:11,color:"#f59e0b"}}>⚠️ אין לך הרשאה לשלב זה — פנה למנהל</div>}
-                  {canStart&&pend.length>0&&(
-                    <div style={{display:"flex",flexWrap:"wrap",gap:6}}>
-                      {pend.slice(0,12).map(s=>(
-                        <Btn key={s.id} color={st.color} small onClick={()=>startWork(s.id,st.id,p.orderId)} disabled={!!(myActiveLog&&!myActiveLog.paused)}>▶️ {s.sn}</Btn>
-                      ))}
-                      {pend.length>12&&<span style={{fontSize:11,color:"var(--c-dim)",alignSelf:"center"}}>ועוד {pend.length-12}...</span>}
-                    </div>
-                  )}
-                  {canStart&&pend.length===0&&<div style={{fontSize:11,color:"#10b981"}}>🎉 כל היחידות בשלב זה הושלמו</div>}
-                </div>
-              );
-            })}
-          </div>
-        </Card>
-      )}
-
-      {/* Active Work */}
-      {myActiveLog&&(
-        <Card style={{marginBottom:14,border:`2px solid ${myActiveLog.paused?"#8b95a8":"#f59e0b"}`,background:myActiveLog.paused?"var(--c-card)":"linear-gradient(135deg,var(--c-card),#1a1800)"}}>
-          <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",flexWrap:"wrap",gap:10}}>
-            <div>
-              <div style={{fontSize:12,color:myActiveLog.paused?"#8b95a8":"#f59e0b",fontWeight:700,marginBottom:4}}>{myActiveLog.paused?"⏸️ בהפסקה":"⏱️ עובד כרגע:"}{myActiveLogs.length>1&&<span style={{marginRight:6,fontSize:11,background:"#3b82f622",color:"#60a5fa",padding:"2px 8px",borderRadius:12}}>×{myActiveLogs.length} יחידות</span>}</div>
-              <div style={{fontWeight:700,fontSize:16}}>
-                {isQtyRun(myActiveLog)
-                  ?<>{myActiveLog.bulkCount} יחידות · {orders.find(o=>o.id===myActiveLog.orderId)?.woNumber||'פק"ע'}</>
-                  :<>{myActiveLog.serialSn}{myActiveLogs.length>1&&` + ${myActiveLogs.length-1}`}</>}
-              </div>
-              <div style={{fontSize:13,color:"var(--c-muted)"}}>
-                {stages.find(s=>s.id===myActiveLog.stageId)?.name}
-                {isQtyRun(myActiveLog)&&<span style={{fontSize:11,color:"#10b981",marginRight:6}}>· דיווח לפי כמות (ללא סידוריים)</span>}
-              </div>
-              <div style={{fontSize:12,color:"var(--c-dim)",marginTop:4}}>התחלה: {new Date(myActiveLog.startTime).toLocaleTimeString("he-IL",{hour:"2-digit",minute:"2-digit"})}</div>
-              {breakCountOf(myActiveLog)>0&&<div style={{fontSize:11,color:"#8b95a8",marginTop:2}}>הפסקות: {fmtTime(breakMinOf(myActiveLog))} ({breakCountOf(myActiveLog)} פעמים)</div>}
-              {!myActiveLog.paused&&<ActiveTimer startTime={myActiveLog.startTime} pauseMin={myActiveLog.totalPauseMin||0} carryMin={holdCarryMin(myActiveLog)}/>}
-              {holdCarryMin(myActiveLog)>0&&<div style={{fontSize:11,color:"#f97316",marginTop:2}}>
-                ↪️ המשך עבודה של {(myActiveLog.holdInfo?.prev||[]).map(p=>p.userName).join(", ")||"עובד אחר"} — הטיימר כולל {fmtTime(holdCarryMin(myActiveLog))} שכבר עבדו. בדוחות נספר לך רק הזמן שלך.
-              </div>}
-              {isStaleWork(myActiveLog.startTime,myActiveLog.totalPauseMin)&&<div style={{fontSize:12,color:"#ef4444",fontWeight:700,marginTop:4}}>⚠️ העבודה פתוחה מעל 12 שעות — אם סיימת, לחץ "סיימתי"</div>}
-              {myActiveLog.paused&&<div style={{fontSize:22,fontWeight:800,color:"#8b95a8",marginTop:6}}>⏸️ מושהה</div>}
-              {/* A batch does not always come out whole. What gets signed is what was
-                  really finished — the started count unless it is corrected here. */}
-              {isQtyRun(myActiveLog)&&(
-                <div style={{display:"flex",alignItems:"center",gap:6,flexWrap:"wrap",marginTop:8}}>
-                  <span style={{fontSize:11.5,color:"var(--c-dim)"}}>יחידות שסיימתי בפועל:</span>
-                  <input type="number" min="0" max={myActiveLog.bulkCount} value={runDone} placeholder={String(myActiveLog.bulkCount)}
-                    onChange={e=>setRunDone(e.target.value)} style={{width:72,padding:"5px 7px",fontSize:12}}
-                    title="ברירת המחדל היא הכמות שהתחלת. סיימת פחות? עדכן כאן — זו הכמות שתיחתם, והשאר יישאר פתוח לדיווח נוסף"/>
-                  <span style={{fontSize:11,color:"var(--c-dim)"}}>מתוך {myActiveLog.bulkCount}</span>
-                </div>
-              )}
-            </div>
-            {/* The gap is the point: ⏸️ and ✅ used to be 8px apart and the same size,
-                and ✅ is the one this screen cannot undo. */}
-            <div style={{display:"flex",flexDirection:"column",gap:26}}>
-              <Btn color={myActiveLog.paused?"#3b82f6":"#f97316"} onClick={togglePause} style={{fontSize:14,padding:"10px 20px"}}>{myActiveLog.paused?"▶️ חזור לעבודה":"⏸️ הפסקה"}</Btn>
-              <Btn color="#10b981" onClick={endWork} style={{fontSize:16,padding:"12px 24px"}}>✅ סיימתי</Btn>
-              {onHoldWork&&<Btn color="#f97316" small onClick={holdWork} title="עצירת העבודה באמצע השלב (סוף יום, עבודה דחופה אחרת). הזמן נשמר, ואפשר להמשיך אחר כך — או שהמנהל יעביר לעובד אחר"
-                style={{background:"transparent",border:"1px solid #f9731688",color:"#f97316"}}>🟧 HOLD — עצור והמשך אחר כך</Btn>}
-              {canCancelStart&&<button onClick={cancelStart} title="התחלת בטעות? ביטול מחזיר את העבודה לרשימה — בלי דיווח ובלי זמן"
-                style={{background:"none",border:"none",color:"#ef4444",fontSize:12,cursor:"pointer",fontFamily:"inherit"}}>🗑️ בטל התחלה (התחלתי בטעות)</button>}
-            </div>
-          </div>
-        </Card>
-      )}
-
-      {/* My work on HOLD */}
-      {myHeldRows.length>0&&(
-        <Card style={{marginBottom:14,border:"2px solid #f9731655"}}>
-          <div style={{fontWeight:700,fontSize:14,color:"#f97316",marginBottom:8}}>🟧 עבודות שלי ב-HOLD ({myHeldRows.length})</div>
-          <div style={{display:"flex",flexDirection:"column",gap:7}}>
-            {myHeldRows.map(r=>{
-              const w=r.logs[0],o=orders.find(x=>x.id===w.orderId),st=stages.find(x=>x.id===w.stageId),hi=w.holdInfo||{};
-              const total=logWorkedMin(w)+holdCarryMin(w);
-              const units=isQtyRun(w)?`${w.bulkCount} יח' ${QTY_UNIT_TAG}`:r.logs.map(x=>x.serialSn).filter(Boolean).join(", ");
-              return(
-                <div key={r.key} style={{display:"flex",justifyContent:"space-between",alignItems:"center",gap:10,flexWrap:"wrap",background:"var(--c-deep)",border:"1px solid var(--c-border)",borderRadius:8,padding:"8px 10px"}}>
-                  <div style={{minWidth:0}}>
-                    <div style={{fontWeight:700,fontSize:13}}>
-                      <span style={{color:"#60a5fa"}}>{o?.woNumber||'פק"ע'}</span>
-                      {st&&<span style={{color:st.color,marginInlineStart:6}}>{st.name}</span>}
-                      <span style={{color:"var(--c-muted)",fontWeight:500,marginInlineStart:6}}>{units}</span>
-                    </div>
-                    <div style={{fontSize:11,color:"var(--c-dim)",marginTop:2}}>
-                      זמן שנצבר: <b style={{color:"var(--c-text)"}}>{fmtTime(total)}</b>
-                      {hi.assignedByName&&<> · הועבר אליך ע״י {hi.assignedByName}{Array.isArray(hi.prev)&&hi.prev.length?` (מ-${hi.prev[hi.prev.length-1].userName})`:""}</>}
-                    </div>
-                  </div>
-                  <Btn small color="#3b82f6" onClick={()=>resumeHeld(r)} disabled={!!(myActiveLog&&!myActiveLog.paused)}>▶️ המשך</Btn>
-                </div>
-              );
-            })}
-          </div>
-        </Card>
-      )}
-
-      {/* Active Custom Task */}
-      {activeTask&&(
-        <Card style={{marginBottom:14,border:`2px solid ${activeTask.paused?"#8b95a8":"#a78bfa"}`}}>
-          <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",flexWrap:"wrap",gap:10}}>
-            <div>
-              <div style={{fontSize:12,color:activeTask.paused?"#8b95a8":"#a78bfa",fontWeight:700,marginBottom:4}}>{activeTask.paused?"⏸️ משימה בהפסקה":"📌 משימה פעילה:"}</div>
-              <div style={{fontWeight:700,fontSize:16}}>{activeTask.name}</div>
-              {activeTask.description&&<div style={{fontSize:12,color:"var(--c-muted)"}}>{activeTask.description}</div>}
-              {(activeTask.totalPauseMin>0||(activeTask.pauseLog||[]).length>0)&&<div style={{fontSize:11,color:"#8b95a8",marginTop:2}}>הפסקות: {fmtTime(activeTask.totalPauseMin||0)} ({(activeTask.pauseLog||[]).length})</div>}
-              {!activeTask.paused&&<ActiveTimer startTime={activeTask.startTime} pauseMin={activeTask.totalPauseMin||0}/>}
-              {activeTask.paused&&<div style={{fontSize:22,fontWeight:800,color:"#8b95a8",marginTop:6}}>⏸️ מושהה</div>}
-            </div>
-            <div style={{display:"flex",flexDirection:"column",gap:26}}>
-              <Btn color={activeTask.paused?"#3b82f6":"#f97316"} onClick={()=>activeTask.paused?onResumeTask(activeTask.id):onPauseTask(activeTask.id)} style={{fontSize:14,padding:"10px 20px"}}>{activeTask.paused?"▶️ חזור":"⏸️ הפסקה"}</Btn>
-              <Btn color="#10b981" onClick={()=>onEndTask(activeTask.id)} style={{fontSize:16,padding:"12px 24px"}}>✅ סיימתי</Btn>
-            </div>
-          </div>
-        </Card>
-      )}
-
-      {/* Custom Tasks Section — different view for admin vs worker */}
-      <Card style={{marginBottom:14,border:"1px solid #a78bfa33"}}>
-        {currentUser.role==="admin"?(
-          <div>
-            <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:10,flexWrap:"wrap",gap:6}}>
-              <div style={{fontWeight:700,fontSize:15,color:"#a78bfa"}}>📌 משימות שהקצתי</div>
-              <div style={{display:"flex",gap:6}}>
-                <span style={{fontSize:12,background:"#f59e0b22",color:"#f59e0b",padding:"2px 10px",borderRadius:12}}>{(customTasks||[]).filter(t=>!t.completed&&!t.partial).length} פתוחות</span>
-                <span style={{fontSize:12,background:"#3b82f622",color:"#60a5fa",padding:"2px 10px",borderRadius:12}}>{(customTasks||[]).filter(t=>t.partial&&!t.completed).length} חלקיות</span>
-              </div>
-            </div>
-            {(customTasks||[]).filter(t=>!t.completed).length===0?<EmptyState icon="📌" title="אין משימות פתוחות" subtitle="המנהל יכול להקצות לך משימות"/>:(
-              <div style={{display:"flex",flexDirection:"column",gap:6}}>
-                {(customTasks||[]).filter(t=>!t.completed).sort((a,b)=>(a.partial?1:0)-(b.partial?1:0)).map(t=>(
-                  <div key={t.id} style={{background:"var(--c-deep)",borderRadius:8,padding:"10px 12px",border:t.partial?"1px solid #3b82f655":t.active?"1px solid #a78bfa":"1px solid var(--c-border)"}}>
-                    <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",flexWrap:"wrap",gap:6}}>
-                      <div>
-                        <span style={{fontWeight:600,fontSize:13}}>{t.name}</span>
-                        <span style={{fontSize:11,color:"#60a5fa",marginRight:8}}>→ {t.userName}</span>
-                        {t.partial&&<span style={{fontSize:11,background:"#3b82f622",color:"#60a5fa",padding:"2px 6px",borderRadius:10,marginRight:4}}>〰️ חלקית</span>}
-                        {t.price>0&&<span style={{fontSize:11,color:"#a78bfa",marginRight:6}}>₪{t.price}</span>}
-                        {t.active&&!t.partial&&<span style={{fontSize:11,background:"#a78bfa22",color:"#a78bfa",padding:"2px 6px",borderRadius:10}}>🔄 בביצוע</span>}
-                      </div>
-                      <div style={{display:"flex",gap:4,alignItems:"center"}}>
-                        <span style={{fontSize:11,color:"var(--c-dim)"}}>{fmt(t.createdAt?.slice(0,10))}</span>
-                        <button onClick={()=>onMarkPartialTask&&onMarkPartialTask(t.id)} title="חלקית" style={{background:t.partial?"#3b82f633":"transparent",border:"1px solid #3b82f644",borderRadius:6,padding:"2px 6px",fontSize:11,color:"#60a5fa",fontFamily:"inherit",cursor:"pointer"}}>〰️</button>
-                        <button onClick={()=>onMarkDoneTask&&onMarkDoneTask(t.id)} title="בוצע" style={{background:"transparent",border:"1px solid #10b98144",borderRadius:6,padding:"2px 6px",fontSize:11,color:"#10b981",fontFamily:"inherit",cursor:"pointer"}}>✅</button>
-                        <IBtn onClick={()=>{if(confirm("למחוק משימה?"))onDeleteTask(t.id)}}>🗑️</IBtn>
-                      </div>
-                    </div>
-                    {t.description&&<div style={{fontSize:11,color:"var(--c-muted)",marginTop:4}}>{t.description}</div>}
-                  </div>
-                ))}
-              </div>
-            )}
-            {(customTasks||[]).filter(t=>t.completed).length>0&&(
-              <details style={{marginTop:10}}>
-                <summary style={{fontSize:11,color:"var(--c-dim)",cursor:"pointer",padding:"4px 0",borderTop:"1px solid var(--c-border)"}}>✅ הושלמו ({(customTasks||[]).filter(t=>t.completed).length})</summary>
-                <div style={{marginTop:6}}>
-                  {(customTasks||[]).filter(t=>t.completed).slice(0,8).map(t=>(
-                    <div key={t.id} style={{fontSize:12,color:"var(--c-muted)",padding:"3px 0",display:"flex",gap:10,flexWrap:"wrap"}}>
-                      <span>✅ {t.name}</span><span style={{color:"#60a5fa"}}>{t.userName}</span><span style={{color:"#a78bfa"}}>{fmtTime(t.durationMin)}</span>{t.price>0&&<span style={{color:"#10b981"}}>₪{t.price}</span>}
-                    </div>
-                  ))}
-                </div>
-              </details>
-            )}
-          </div>
-        ):(
-          <div>
-            <div style={{fontWeight:700,fontSize:15,color:"#a78bfa",marginBottom:10}}>📌 משימות שהוקצו לי</div>
-            {myTasks.filter(t=>!t.completed).length===0?<EmptyState icon="📌" title="אין משימות" subtitle="אין משימות פעילות כרגע"/>:(
-              <div style={{display:"flex",flexDirection:"column",gap:6}}>
-                {myTasks.filter(t=>!t.completed).map(t=>(
-                  <div key={t.id} style={{display:"flex",justifyContent:"space-between",alignItems:"center",background:"var(--c-deep)",borderRadius:8,padding:"8px 12px",border:t.active?"1px solid #a78bfa":"1px solid var(--c-border)"}}>
-                    <div>
-                      <span style={{fontWeight:600,fontSize:13}}>{t.name}</span>
-                      {t.description&&<span style={{fontSize:11,color:"var(--c-dim)",marginRight:6}}> — {t.description}</span>}
-                      {t.price>0&&<span style={{fontSize:11,color:"#a78bfa",marginRight:6}}>₪{t.price}</span>}
-                      {t.active&&<span style={{fontSize:11,color:"#a78bfa",marginRight:6}}>🔄 פעיל</span>}
-                    </div>
-                    {!t.active?<Btn color="#a78bfa" small onClick={()=>onStartTask(t.id)} disabled={!!activeTask||!!myActiveLog}>▶️ התחל</Btn>:<Btn color="#10b981" small onClick={()=>onEndTask(t.id)}>✅ סיים</Btn>}
-                  </div>
-                ))}
-              </div>
-            )}
-            {myTasks.filter(t=>t.completed).length>0&&(
-              <div style={{marginTop:10,borderTop:"1px solid var(--c-border)",paddingTop:8}}>
-                <div style={{fontSize:11,color:"var(--c-dim)",marginBottom:6}}>הושלמו:</div>
-                {myTasks.filter(t=>t.completed).slice(0,5).map(t=>(
-                  <div key={t.id} style={{fontSize:12,color:"var(--c-muted)",padding:"3px 0",display:"flex",gap:10}}>
-                    <span>✅ {t.name}</span><span style={{color:"#a78bfa"}}>{fmtTime(t.durationMin)}</span>
-                  </div>
-                ))}
-              </div>
-            )}
-          </div>
-        )}
-      </Card>
-
-      {/* Queue filters — פק"ע · מק"ט · שלב · סניף */}
-      {(orderQueues.length>0||qtyOrders.length>0)&&(
-        <Card style={{padding:"11px 13px",marginBottom:10}}>
-          <div style={{display:"flex",gap:9,flexWrap:"wrap",alignItems:"flex-end"}}>
-            <div style={{display:"flex",flexDirection:"column",gap:3,flex:"1 1 170px"}}>
-              <label style={{fontSize:11,color:"var(--c-dim)"}}>חיפוש פק"ע / מק"ט</label>
-              <input value={fText} onChange={e=>{setFText(e.target.value);setBulkSelected([])}} placeholder={'מספר פק"ע, מק"ט או תיאור...'}/>
-            </div>
-            <div style={{display:"flex",flexDirection:"column",gap:3}}>
-              <label style={{fontSize:11,color:"var(--c-dim)"}}>מק"ט</label>
-              <select value={fPn} onChange={e=>{setFPn(e.target.value);setBulkSelected([])}} style={{padding:"7px 8px",fontSize:12,minWidth:135}}>
-                <option value="all">כל המק"טים</option>
-                {queueOpts.pn.map(([v,n])=><option key={v||"__none"} value={v||"none"}>{v||'ללא מק"ט'} · {n}</option>)}
-              </select>
-            </div>
-            <div style={{display:"flex",flexDirection:"column",gap:3}}>
-              <label style={{fontSize:11,color:"var(--c-dim)"}}>שלב</label>
-              <select value={fStage} onChange={e=>{setFStage(e.target.value);setBulkSelected([])}} style={{padding:"7px 8px",fontSize:12,minWidth:135}} title="רק השלבים שיש לך הרשאה אליהם">
-                <option value="all">כל השלבים שלי</option>
-                {queueOpts.st.map(([sid,n])=><option key={sid} value={sid}>{stageMap.get(sid)?.name||sid} · {n}</option>)}
-              </select>
-            </div>
-            <div style={{display:"flex",flexDirection:"column",gap:3}}>
-              <label style={{fontSize:11,color:"var(--c-dim)"}}>סניף (חטיבה)</label>
-              <select value={fBranch} onChange={e=>{setFBranch(e.target.value);setBulkSelected([])}} style={{padding:"7px 8px",fontSize:12,minWidth:135}} title='מספר הסניף מגיע מה-ERP ומייצג את החטיבה העסקית'>
-                <option value="all">כל הסניפים</option>
-                {queueOpts.br.map(([v,n])=><option key={v||"__none"} value={v||"none"}>{v?branchLabel(v):"ללא סניף"} · {n}</option>)}
-              </select>
-            </div>
-            {filterOn&&<Btn small onClick={clearFilters}>✕ נקה סינון</Btn>}
-          </div>
-          {filterOn&&(
-            <div style={{fontSize:11.5,color:"var(--c-dim)",marginTop:8}}>
-              {(visibleQueues.length||visibleQtyOrders.length)
-                ?<>מציג {visibleUnitCount} יחידות ב-{visibleQueues.length} פק"ע{visibleQtyOrders.length>0?` · ועוד ${visibleQtyOrders.length} פק"ע לדיווח לפי כמות`:""}</>
-                :<span style={{color:"#f59e0b"}}>אין עבודה שמתאימה לסינון — נסה לנקות אותו</span>}
-            </div>
-          )}
-        </Card>
-      )}
-
-      {/* Bulk mode toggle + "my plan only" filter */}
-      <div style={{display:"flex",gap:8,marginBottom:10,flexWrap:"wrap",alignItems:"center"}}>
-        <Btn color={bulkMode?"#ef4444":"#374151"} small onClick={()=>{setBulkMode(p=>!p);setBulkSelected([])}}>{bulkMode?"✕ בטל מצב קבוצתי":"📦 הפעלת טיימר קבוצתי"}</Btn>
-        {myPlans.length>0&&<SegBtn options={[["all","כל היחידות הממתינות"],["plan","📅 תוכנית העבודה שלי"]]} value={onlyPlan?"plan":"all"} onChange={v=>{setOnlyPlan(v==="plan");setBulkSelected([])}}/>}
-        {myPlans.length>0&&<span style={{fontSize:11,color:"var(--c-dim)"}}>יחידות המסומנות ב-📅 הוקצו לך בתוכנית העבודה</span>}
-      </div>
-
-      {/* Available Work — plan units first, each one tagged.
-          Virtualised: a worker whose access spans the whole plant has a queue as
-          long as the פק"ע list itself, and rendering every card up front — each
-          with up to fifteen unit rows — put tens of thousands of nodes on the page
-          before the tab could paint. Only what fits on screen is built, the same
-          way the פק"ע list works. */}
-      <VirtualList items={visibleQueues} estimate={220} gap={0} renderRow={({order:o,units,planned})=>(
-        <Card key={o.id} style={{marginBottom:10,border:planned>0?"1px solid #06b6d455":"1px solid var(--c-border)"}}>
-          <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:10,flexWrap:"wrap"}}>
-            <span style={{fontWeight:700,color:"#60a5fa"}}>{o.woNumber}</span>
-            {o.pn&&<span style={{fontSize:12,color:"#a78bfa"}}>P/N: {o.pn}</span>}
-            <span style={{fontSize:11,color:"var(--c-dim)"}}>({units.length} ממתינות)</span>
-            {planned>0&&<PlanTag label={`תוכנית העבודה שלי · ${planned} יח'`}/>}
-            {bulkMode&&bulkSelected.length>0&&<Btn color="var(--c-accent)" small onClick={()=>startBulk(o.id)}>▶️ התחל {bulkSelected.length} יחידות</Btn>}
-          </div>
-          <div style={{display:"flex",flexDirection:"column",gap:6}}>
-            {units.slice(0,15).map(s=>{
-              const nextStage=s.next;
-              const isSel=bulkSelected.includes(s.id);
-              return(
-                <div key={s.id} style={{display:"flex",justifyContent:"space-between",alignItems:"center",gap:8,flexWrap:"wrap",background:isSel?"#3b82f611":(s.planned?"#06b6d40f":"var(--c-deep)"),borderRadius:8,padding:"8px 12px",border:isSel?"1px solid #3b82f6":(s.planned?"1px solid #06b6d455":"1px solid transparent")}}>
-                  <div style={{display:"flex",alignItems:"center",gap:8,flexWrap:"wrap"}}>
-                    {bulkMode&&<input type="checkbox" checked={isSel} onChange={e=>{setBulkSelected(p=>e.target.checked?[...p,s.id]:p.filter(x=>x!==s.id))}}/>}
-                    <span style={{fontWeight:600,fontSize:13}}>{s.sn}</span>
-                    <span style={{fontSize:11,color:nextStage.color}}>← {nextStage.name}</span>
-                    {s.planned&&<PlanTag small/>}
-                  </div>
-                  {!bulkMode&&<Btn color={nextStage.color} small onClick={()=>startWork(s.id,nextStage.id,o.id)} disabled={!!(myActiveLog&&!myActiveLog.paused)}>▶️ התחל</Btn>}
-                </div>
-              );
-            })}
-            {units.length>15&&<div style={{fontSize:12,color:"var(--c-dim)",textAlign:"center"}}>ועוד {units.length-15}...</div>}
-          </div>
-        </Card>
-      )}/>
-      {visibleQtyOrders.length>0&&(
-        <Card style={{marginBottom:12,border:"1px solid #10b98133"}}>
-          <div style={{fontWeight:700,fontSize:15,color:"#10b981",marginBottom:5}}>✍️ דיווח לפי כמות ({visibleQtyOrders.length}{filterOn&&visibleQtyOrders.length!==qtyOrders.length?` מתוך ${qtyOrders.length}`:""})</div>
-          <div style={{fontSize:11.5,color:"var(--c-dim)",lineHeight:1.7,marginBottom:10}}>
-            פק"ע שאינן מנוהלות סיריאלית — אין בהן מספר סידורי לבחור, ולכן בוחרים כמות: לוחצים <b style={{color:"#f59e0b"}}>▶️ התחל עבודה</b> ומקבלים את אותו טיימר של יחידה סיריאלית (הפסקה, סיימתי),
-            כך שגם על העבודה הזו יוצאים נתוני זמן בפועל מול זמן תקן. לעבודה שכבר בוצעה אפשר גם לחתום מיד ב-<b style={{color:"#10b981"}}>✍️ חתום</b>, בלי טיימר.
-            אפשר לדווח רק על השלבים שבהרשאות שלך, כל דיווח נרשם על שמך, ואפשר לבטל דיווח שלך אם טעית.
-          </div>
-          <VirtualList items={visibleQtyOrders} estimate={64} gap={7} renderRow={o=>{
-            const open=openQty===o.id;
-            const cap=Number(o.qty)||0;
-            const mineLeft=(o.stageIds||[]).reduce((n,sid)=>myAccessSet.has(sid)
-              ?n+Math.max(0,cap-Math.min(cap,qtySigned(myQtyIdx,workLogs,o.id,sid))):n,0);
-            // Of those, the units somebody already has a timer running on.
-            const mineRunning=(o.stageIds||[]).reduce((n,sid)=>myAccessSet.has(sid)?n+qtyRunning(myQtyRunIdx,workLogs,o.id,sid):n,0);
-            const br=branchCode(o.branch);
-            return(
-              <div key={o.id} style={{background:"var(--c-deep)",borderRadius:10,border:`1px solid ${open?"#10b98155":"var(--c-border)"}`,padding:"9px 12px"}}>
-                <div onClick={()=>setOpenQty(open?"":o.id)} style={{display:"flex",justifyContent:"space-between",alignItems:"center",gap:8,flexWrap:"wrap",cursor:"pointer"}}>
-                  <div style={{display:"flex",alignItems:"center",gap:8,flexWrap:"wrap"}}>
-                    <span style={{fontWeight:700,color:"#60a5fa"}}>{o.woNumber}</span>
-                    {o.pn&&<span style={{fontSize:12,color:"#a78bfa"}}>P/N: {o.pn}</span>}
-                    {br&&<span style={{fontSize:11,color:branchColor(br)}}>🏢 {branchLabel(br)}</span>}
-                    <span style={{fontSize:11,color:"var(--c-dim)"}}>כמות: {cap}</span>
-                    {mineLeft>0
-                      ?<span style={{fontSize:11,background:"#f59e0b1a",color:"#f59e0b",border:"1px solid #f59e0b44",padding:"2px 8px",borderRadius:12}}>נותרו {mineLeft} דיווחים שלך</span>
-                      :<span style={{fontSize:11,color:"#10b981"}}>✅ השלבים שלך נחתמו</span>}
-                    {mineRunning>0&&<span style={{fontSize:11,color:"#f59e0b"}} title="יחידות שיש עליהן טיימר פתוח כרגע — ייחתמו בסיום העבודה">⏱️ {mineRunning} בעבודה</span>}
-                  </div>
-                  <span style={{fontSize:12,color:open?"#10b981":"var(--c-dim)",fontWeight:600}}>{open?"▲ סגור":"▼ דווח כמות"}</span>
-                </div>
-                {open&&<div style={{marginTop:10}}>
-                  <QtySignOff order={o} stages={stages} workLogs={workLogs} onSignOff={onStartWork} onDeleteLog={onDeleteLog} compact
-                    onStartRun={(st,n)=>startQtyRun(o,st,n)}
-                    runBlocked={myActiveLog&&!myActiveLog.paused?"יש לך עבודה פעילה — סיים או עצור אותה לפני שמתחיל חדשה":""}/>
-                </div>}
-              </div>
-            );
-          }}/>
-        </Card>
-      )}
-      {!myActiveLog&&!activeTask&&visibleQueues.length===0&&visibleQtyOrders.length===0&&(filterOn
-        ?<EmptyState icon="🔍" title="אין עבודה שמתאימה לסינון" subtitle="נקה את הסינון כדי לראות את כל העבודה שממתינה לך" action={clearFilters} actionLabel="✕ נקה סינון"/>
-        :onlyPlan
-        ?<EmptyState icon="📅" title="אין יחידות פתוחות בתוכנית שלך" subtitle="כל מה שהוקצה לך להיום בוצע — עבור ל'כל היחידות הממתינות' כדי לראות עבודה נוספת"/>
-        :<EmptyState icon="🎉" title="אין עבודה ממתינה!" subtitle="כל היחידות הושלמו"/>)}
+      {view==="queue"?(
+        <div style={{marginBottom:12}}>
+          <h2 style={{margin:0}}>🧰 תור עבודה</h2>
+          <div style={{fontSize:12,color:"var(--c-dim)",marginTop:3}}>כל העבודה שממתינה בשלבים שלך — בוחרים יחידה או כמות ולוחצים ▶️</div>
+        </div>
+      ):<h2 style={{margin:"0 0 14px"}}>{view==="mine"?"📌 העבודה שלי":"🔨 העבודה שלי"}</h2>}
+      {view==="all"&&planCard}
+      {activeCard}
+      {view!=="all"&&activeTaskCard}
+      {view==="mine"&&planCard}
+      {showMine&&myHeldCard}
+      {view==="all"&&activeTaskCard}
+      {showMine&&(view==="all"||myTasks.length>0)&&tasksCard}
+      {view==="mine"&&mineEmpty}
+      {showQueue&&<>
+        {filtersCard}
+        {bulkRow}
+        {workList}
+        {(view==="queue"||(!myActiveLog&&!activeTask))&&queueEmpty}
+      </>}
     </div>
       )}
     </div>
@@ -11631,8 +11926,9 @@ function AlertsPanel({orders,stages,workLogs,users,onClose,dismissedAlerts,onDis
 // ══════════════════════════════════════════════════════════════════════════
 // ═══ PWA BANNERS ════════════════════════════════════════════════════════
 // ══════════════════════════════════════════════════════════════════════════
-function InstallBanner({onInstall,onDismiss,lm}){return(
-  <div style={{position:"fixed",bottom:16,left:12,right:12,zIndex:999,background:lm?"#eff6ff":"linear-gradient(135deg,#1e3a5f,#131829)",border:"2px solid #3b82f6",borderRadius:16,padding:"14px 16px",display:"flex",alignItems:"center",gap:12,boxShadow:lm?"0 4px 24px rgba(59,130,246,.25)":"0 8px 32px #000a"}}>
+// `lift` — a worker's bottom navigation is under it; sit above it, not on it.
+function InstallBanner({onInstall,onDismiss,lm,lift}){return(
+  <div style={{position:"fixed",bottom:lift?"calc(74px + env(safe-area-inset-bottom,0px))":16,left:12,right:12,zIndex:999,background:lm?"#eff6ff":"linear-gradient(135deg,#1e3a5f,#131829)",border:"2px solid #3b82f6",borderRadius:16,padding:"14px 16px",display:"flex",alignItems:"center",gap:12,boxShadow:lm?"0 4px 24px rgba(59,130,246,.25)":"0 8px 32px #000a"}}>
     <div style={{flexShrink:0,display:"flex"}}><Logo size={40}/></div>
     <div style={{flex:1,minWidth:0}}><div style={{fontWeight:700,fontSize:14,color:lm?"#1e40af":"#e2e8f0",marginBottom:2}}>התקן את האפליקציה</div><div style={{fontSize:12,color:lm?"#3b82f6":"#93c5fd"}}>גישה מהירה — גם offline</div></div>
     <div style={{display:"flex",gap:8,flexShrink:0}}><button onClick={onDismiss} style={{background:lm?"#dbeafe":"#374151",border:"none",borderRadius:8,padding:"8px 12px",color:lm?"#1d4ed8":"#94a3b8",fontSize:13,fontFamily:"inherit"}}>לא עכשיו</button><button onClick={onInstall} style={{background:"#3b82f6",border:"none",borderRadius:8,padding:"8px 16px",color:"#fff",fontSize:13,fontWeight:700,fontFamily:"inherit"}}>התקן ↓</button></div>
@@ -11787,6 +12083,47 @@ function PilotResetModal({users,workLogs,customTasks,dailyPlans,departments,onCl
   );
 }
 
+// ── ניווט תחתון לעובד ─────────────────────────────────────────────────────
+// `running` is the job (or task) on this worker's clock: while it runs, the
+// "mine" item reads its timer instead of its name, so a job started from the
+// queue — or left running while looking something up in פק"ע — is never out of
+// sight, and one tap goes back to its ⏸️ / ✅.
+function NavTimer({startTime,pauseMin=0,carryMin=0}){
+  const [now,setNow]=useState(()=>Date.now());
+  useEffect(()=>{const t=setInterval(()=>setNow(Date.now()),1000);return()=>clearInterval(t)},[]);
+  // Same arithmetic as ActiveTimer, so the two never disagree on screen.
+  const s=Math.max(0,Math.round((now-new Date(startTime).getTime())/1000)-pauseMin*60)+Math.round(carryMin*60);
+  const h=Math.floor(s/3600),m=Math.floor(s%3600/60),sec=s%60;
+  return<span className="bn-label" style={{color:"#f59e0b"}}><span className="bn-live"/>{h?`${h}:${String(m).padStart(2,"0")}`:m}:{String(sec).padStart(2,"0")}</span>;
+}
+function WorkerNav({tab,onTab,mineBadge,heldBadge,running}){
+  const items=[
+    {id:"mywork",icon:"📌",label:"העבודה שלי",badge:mineBadge,color:"#06b6d4",
+      title:"העבודה שרצה עכשיו, מה שהוקצה לך, HOLD ומשימות"},
+    {id:"queue",icon:"🧰",label:"תור עבודה",badge:heldBadge,color:"#f97316",
+      title:heldBadge>0?`כל העבודה שממתינה בשלבים שלך · ${heldBadge} הותחלו וממתינות להמשך`:"כל העבודה שממתינה בשלבים שלך"},
+    {id:"orders",icon:"📋",label:'פק"ע',title:'רשימת הפק"ע ופרטיהן'},
+  ];
+  return(
+    <nav className="bottom-nav" aria-label="ניווט ראשי">
+      <div className="bottom-nav-inner">
+        {items.map(it=>{
+          const on=tab===it.id;
+          return(
+            <button key={it.id} className={on?"on":""} aria-current={on?"page":undefined} title={it.title} onClick={()=>onTab(it.id)}>
+              <span className="bn-ico-wrap"><span className="bn-ico" aria-hidden="true">{it.icon}</span>{it.badge>0&&<i className="bn-badge" style={{background:it.color}}>{it.badge>99?"99+":it.badge}</i>}</span>
+              {it.id==="mywork"&&running
+                ?(running.paused?<span className="bn-label" style={{color:"#8b95a8"}}>⏸️ בהפסקה</span>
+                  :<NavTimer startTime={running.startTime} pauseMin={running.pauseMin} carryMin={running.carryMin}/>)
+                :<span className="bn-label">{it.label}</span>}
+            </button>
+          );
+        })}
+      </div>
+    </nav>
+  );
+}
+
 function Navbar({tab,setTab,tabs,lightMode,toggleLight,sync,onAdmin,onLogout,alertCount,onAlerts,onRefresh,onLiveBoard,onReport,onHistory,isAdmin,isManager,onLoadDemo,onDeleteDemo,onPilotReset,onInstall,canInstall}){
   const {currentUser}=useAuth();
   const [menuOpen,setMenuOpen]=useState(false);
@@ -11890,9 +12227,9 @@ function Navbar({tab,setTab,tabs,lightMode,toggleLight,sync,onAdmin,onLogout,ale
           <button onClick={()=>setMenuOpen(p=>!p)} aria-label={menuOpen?"סגור תפריט":"פתח תפריט"} style={{background:"none",border:`1px solid ${navBorder}`,borderRadius:8,padding:"5px 10px",fontSize:18,color:navMuted,lineHeight:1}}>{menuOpen?"✕":"☰"}</button>
         </div>
       </div>
-      <div className="mob-tabs" style={{borderTop:`1px solid ${navBorder}`}}>
+      {tabs.length>0&&<div className="mob-tabs" style={{borderTop:`1px solid ${navBorder}`}}>
         {tabs.map(t=>(<button key={t.id} onClick={()=>{setTab(t.id);setMenuOpen(false)}} style={{flex:"0 0 auto",padding:"8px 12px",background:"none",border:"none",color:tab===t.id?navActive:navMuted,borderBottom:tab===t.id?`3px solid ${navActive}`:"3px solid transparent",fontWeight:tab===t.id?700:400,fontSize:12,fontFamily:"inherit",whiteSpace:"nowrap"}}>{t.label}{t.badge>0&&<span style={{background:"#06b6d4",color:"#fff",fontSize:9,fontWeight:800,borderRadius:10,padding:"1px 5px",marginRight:4,verticalAlign:"middle"}}>📅 {t.badge}</span>}</button>))}
-      </div>
+      </div>}
       {menuOpen&&(
         <div onClick={()=>setMenuOpen(false)} style={{position:"fixed",inset:0,background:"#000c",zIndex:300}}>
           <div onClick={e=>e.stopPropagation()} className="fade-in" style={{position:"absolute",top:0,right:0,bottom:0,width:"min(300px,80vw)",background:navBg,borderLeft:`1px solid ${navBorder}`,padding:"20px 0",overflowY:"auto",boxShadow:"-8px 0 30px #0006"}}>
@@ -13987,6 +14324,23 @@ function App(){
       details:`${plan.before[0].userName||""} ← ${to.name}`,
       changes:[{coll:"workLogs",before:plan.before,after:[...plan.before.map(w=>w.id),...plan.segs.map(g=>g.id)]}]});
   };
+  // A worker carries on with somebody else's HOLD from the general list — the
+  // same split as above (see holdPickUp), taken by the worker, clock running.
+  // Answers whether anything moved: a HOLD resumed or handed on a moment ago on
+  // another device is no longer there to take.
+  const handlePickupHold=(logIds)=>{
+    const plan=holdPickUp(wRef.current||[],logIds,currentUser,nowISO());
+    if(!plan.before.length)return false;
+    setWorkLogs(prev=>{
+      const next=holdPickUp(prev,logIds,currentUser,plan.at,plan).next;
+      persist(null,null,null,next);return next;
+    });
+    // Not one of WORK_UNDO_ACTIONS — the journal screen matches those by substring.
+    UNDO.record({user:currentUser,action:"המשך HOLD של עובד אחר",target:plan.before.map(logUnitLabel).join(", "),
+      details:`${plan.before[0].userName||""} ← ${currentUser.name}`,
+      changes:[{coll:"workLogs",before:plan.before,after:[...plan.before.map(w=>w.id),...plan.segs.map(g=>g.id)]}]});
+    return true;
+  };
   // Custom tasks
   const handleAddTask=(task)=>{
     setCustomTasks(prev=>{const next=[...prev,task];persist(null,null,null,null,next);return next});
@@ -14153,9 +14507,50 @@ function App(){
     {id:"stdtimes",label:"⏱️ זמן תקן ובפועל"},
     {id:"orders",label:'📋 פק"ע'},
   ]:[
-    {id:"mywork",label:"🔨 העבודה שלי",badge:myPlanCount},
+    // A worker's tabs are the bottom navigation (WorkerNav), not this strip;
+    // the list is kept so every tab id a worker can reach is named in one place.
+    {id:"mywork",label:"📌 העבודה שלי",badge:myPlanCount},
+    {id:"queue",label:"🧰 תור עבודה"},
     {id:"orders",label:'📋 פק"ע'},
   ];
+  // ── What the worker's bottom navigation shows ──────────────────────────
+  // Open assignments and tasks on "mine"; on the queue, work somebody else left
+  // on HOLD that this worker may carry on with — the same rows the queue marks.
+  const myOpenTaskCount=useMemo(()=>isWorker?(customTasks||[]).filter(t=>t.userId===currentUser?.id&&!t.completed).length:0,
+    [isWorker,customTasks,currentUser]);
+  const heldForMe=useMemo(()=>{
+    if(!isWorker||!currentUser)return 0;
+    const acc=currentUser.stageAccess==="all"?null:new Set(Array.isArray(currentUser.stageAccess)?currentUser.stageAccess:[]);
+    const live=new Map(filteredOrders.map(o=>[o.id,o]));
+    // One per row, the way the queue lists them: a group counts once, and only
+    // when every stage in it is this worker's.
+    const rows=new Map();
+    filteredWorkLogs.forEach(w=>{
+      if(!isOnHold(w)||w.userId===currentUser.id)return;
+      const o=live.get(w.orderId);if(!o||isDataOnly(o))return;
+      const k=w.bulkGroupId?`g:${w.bulkGroupId}`:w.id;
+      rows.set(k,(rows.get(k)!==false)&&(!acc||acc.has(w.stageId)));
+    });
+    let n=0;rows.forEach(ok=>{if(ok)n++});
+    return n;
+  },[isWorker,currentUser,filteredOrders,filteredWorkLogs]);
+  // The job on this worker's clock right now — a running unit before a paused
+  // one, the same pick the "mine" card makes — or else an active task.
+  const myRunning=useMemo(()=>{
+    if(!isWorker||!currentUser)return null;
+    const open=(workLogs||[]).filter(w=>w.userId===currentUser.id&&!w.completed&&!isOnHold(w));
+    const w=open.find(x=>!x.paused)||open[0];
+    if(w)return{startTime:w.startTime,pauseMin:w.totalPauseMin||0,carryMin:holdCarryMin(w),paused:!!w.paused};
+    const t=(customTasks||[]).find(x=>x.userId===currentUser.id&&x.active&&!x.completed);
+    if(t&&t.startTime)return{startTime:t.startTime,pauseMin:t.totalPauseMin||0,carryMin:0,paused:!!t.paused};
+    return null;
+  },[isWorker,workLogs,customTasks,currentUser]);
+  // A tab change starts at the top of the new screen; tapping the tab already
+  // open goes back to its top — the way a phone app's bottom bar behaves.
+  const goTab=id=>{
+    if(id!==tab)setTab(id);
+    window.scrollTo({top:0,behavior:id===tab?"smooth":"auto"});
+  };
 
   // Push notification enable on login for admins and managers (they receive the
   // completion notifications of the workers they directly manage)
@@ -14476,19 +14871,23 @@ function App(){
       {isOffline&&<OfflineBanner lm={lm}/>}
       {!isOffline&&dbDown&&<DbDownBanner lm={lm} reason={dbDown} since={snapAge}/>}
       {showUpdate&&!isOffline&&!dbDown&&<UpdateBanner onUpdate={handleUpdate} onDismiss={()=>setShowUpdate(false)} lm={lm}/>}
-      <Navbar tab={tab} setTab={setTab} tabs={TABS} lightMode={lightMode} toggleLight={()=>setLightMode(p=>!p)} sync={sync} onAdmin={()=>setShowAdmin(true)} onLogout={handleLogout} alertCount={alertCount} onAlerts={()=>setShowAlerts(true)} onRefresh={()=>refreshFromDB(true)} onLiveBoard={()=>setShowLiveBoard(true)} onReport={()=>setShowReport(true)} onHistory={()=>setShowHistory(true)} isAdmin={isAdmin} isManager={isAdmin||isDeptMgr} onLoadDemo={loadDemoData} onDeleteDemo={deleteDemoData} onPilotReset={()=>setShowPilotReset(true)} onInstall={handleInstall} canInstall={!isStandalone}/>
+      <Navbar tab={tab} setTab={setTab} tabs={isWorker?[]:TABS} lightMode={lightMode} toggleLight={()=>setLightMode(p=>!p)} sync={sync} onAdmin={()=>setShowAdmin(true)} onLogout={handleLogout} alertCount={alertCount} onAlerts={()=>setShowAlerts(true)} onRefresh={()=>refreshFromDB(true)} onLiveBoard={()=>setShowLiveBoard(true)} onReport={()=>setShowReport(true)} onHistory={()=>setShowHistory(true)} isAdmin={isAdmin} isManager={isAdmin||isDeptMgr} onLoadDemo={loadDemoData} onDeleteDemo={deleteDemoData} onPilotReset={()=>setShowPilotReset(true)} onInstall={handleInstall} canInstall={!isStandalone}/>
       {currentUser?.isDemo&&(
         <div style={{background:lm?"#eff6ff":"#0c1e3a",borderBottom:`1px solid ${lm?"#bfdbfe":"#1e3a5f"}`,padding:"8px 16px",display:"flex",alignItems:"center",justifyContent:"center",gap:10,flexWrap:"wrap"}}>
           <span style={{fontSize:13,color:lm?"#1d4ed8":"#93c5fd"}}>🔍 מצב דמו — הנתונים לא נשמרים</span>
           <button onClick={()=>{handleLogout();}} style={{background:"var(--c-accent)",color:"#fff",border:"none",borderRadius:6,padding:"4px 14px",fontSize:12,fontWeight:700,fontFamily:"inherit"}}>הירשם עכשיו</button>
         </div>
       )}
-      <main className="main-content" style={{maxWidth:1440,margin:"0 auto",padding:"16px 14px",paddingBottom:showInstall?"100px":"calc(16px + env(safe-area-inset-bottom,0px))"}}>
+      <main className="main-content" style={{maxWidth:1440,margin:"0 auto",padding:"16px 14px",
+        // Clear of whatever is pinned to the bottom of the screen: the worker's
+        // navigation, the install banner, or both.
+        paddingBottom:isWorker?`calc(${showInstall?160:86}px + env(safe-area-inset-bottom,0px))`:showInstall?"100px":"calc(16px + env(safe-area-inset-bottom,0px))"}}>
         {tab==="dashboard"&&<Dashboard orders={filteredOrders} projects={filteredProjects} stages={stages} users={visibleUsers} workLogs={filteredWorkLogs} departments={visibleDepartments} customTasks={customTasks}/>}
         {tab==="team"&&isLead&&<TeamDashboard users={getUsers()} workLogs={filteredWorkLogs} orders={filteredOrders} stages={stages} customTasks={customTasks} departments={departments} onAddTask={handleAddTask} onDeleteTask={handleDeleteTask} onMarkPartialTask={handleMarkPartialTask} onMarkDoneTask={handleMarkDoneTask} dailyPlans={dailyPlans} onAddPlan={handleAddPlan} onAddPlans={handleAddPlans} onDeletePlan={handleDeletePlan} onTogglePlanDone={handleTogglePlanDone} onTransferHold={handleTransferHold}/>}
         {tab==="orders"&&<Orders orders={filteredOrders} projects={filteredProjects} stages={stages} stageBlocks={stageBlocks} departments={departments} updO={updO} workLogs={filteredWorkLogs} onWorkLog={handleStartWork} onDeleteLog={handleDeleteLog} workdayHours={workdayHours} setWorkdayHours={setWorkdayHoursPersist} pnStandards={pnStandards}/>}
         {tab==="shortages"&&<Shortages orders={filteredOrders} updO={updO} projects={filteredProjects}/>}
-        {tab==="mywork"&&<MyWork orders={filteredOrders} stages={stages} workLogs={filteredWorkLogs} onStartWork={handleStartWork} onEndWork={handleEndWork} onDeleteLog={handleDeleteLog} onPauseWork={handlePauseWork} onResumeWork={handleResumeWork} onHoldWork={handleHoldWork} customTasks={customTasks} onAddTask={handleAddTask} onStartTask={handleStartTask} onEndTask={handleEndTask} onPauseTask={handlePauseTask} onResumeTask={handleResumeTask} onDeleteTask={handleDeleteTask} onMarkPartialTask={handleMarkPartialTask} onMarkDoneTask={handleMarkDoneTask} users={getUsers()} dailyPlans={dailyPlans} onMarkPlanDone={handleMarkPlanDone}/>}
+        {(tab==="mywork"||(tab==="queue"&&isWorker))&&<MyWork key={tab} view={!isWorker?"all":tab==="queue"?"queue":"mine"} onGoTab={isWorker?goTab:null}
+          orders={filteredOrders} stages={stages} workLogs={filteredWorkLogs} onStartWork={handleStartWork} onEndWork={handleEndWork} onDeleteLog={handleDeleteLog} onPauseWork={handlePauseWork} onResumeWork={handleResumeWork} onHoldWork={handleHoldWork} onPickupHold={handlePickupHold} customTasks={customTasks} onAddTask={handleAddTask} onStartTask={handleStartTask} onEndTask={handleEndTask} onPauseTask={handlePauseTask} onResumeTask={handleResumeTask} onDeleteTask={handleDeleteTask} onMarkPartialTask={handleMarkPartialTask} onMarkDoneTask={handleMarkDoneTask} users={getUsers()} dailyPlans={dailyPlans} onMarkPlanDone={handleMarkPlanDone}/>}
         {tab==="workers"&&(isAdmin||isDeptMgr)&&<WorkersDashboard users={visibleUsers} workLogs={filteredWorkLogs} orders={filteredOrders} stages={stages} customTasks={customTasks} onAddTask={handleAddTask} onDeleteLog={handleDeleteLog} onDeleteTask={handleDeleteTask} onMarkPartialTask={handleMarkPartialTask} onMarkDoneTask={handleMarkDoneTask} dailyPlans={dailyPlans} onAddPlan={handleAddPlan} onAddPlans={handleAddPlans} onDeletePlan={handleDeletePlan} onTogglePlanDone={handleTogglePlanDone} onTransferHold={handleTransferHold}/>}
         {tab==="stdtimes"&&(isAdmin||isDeptMgr||isLead)&&<StandardTimes orders={filteredOrders} stages={stages} stageBlocks={stageBlocks} workLogs={filteredWorkLogs} users={visibleUsers} projects={filteredProjects} pnStandards={pnStandards} onSavePnStd={savePnStd} onDeletePnStd={deletePnStd}/>}
         {tab==="yield"&&<YieldDashboard orders={filteredOrders} projects={filteredProjects} stages={stages} workLogs={filteredWorkLogs}/>}
@@ -14498,7 +14897,8 @@ function App(){
         {tab==="excel"&&(isAdmin||isDeptMgr)&&<ExcelTab orders={filteredOrders} projects={filteredProjects} stages={stages} stageBlocks={stageBlocks} workLogs={filteredWorkLogs} users={visibleUsers} customTasks={visibleTasks} dailyPlans={visiblePlans} departments={visibleDepartments} pnStandards={pnStandards} updO={updO} updP={updP} updS={updS} importPnStds={importPnStds} importWorkLogs={importWorkLogs} mergeDuplicates={isAdmin?mergeDuplicateOrders:null} canImport={isAdmin} onAddPlans={handleAddPlans}/>}
       </main>
       <FastScroll/>
-      {showInstall&&<InstallBanner onInstall={handleInstall} onDismiss={()=>setShowInstall(false)} lm={lm}/>}
+      {isWorker&&<WorkerNav tab={tab} onTab={goTab} mineBadge={myPlanCount+myOpenTaskCount} heldBadge={heldForMe} running={myRunning}/>}
+      {showInstall&&<InstallBanner onInstall={handleInstall} onDismiss={()=>setShowInstall(false)} lm={lm} lift={isWorker}/>}
       {showPilotReset&&isAdmin&&<PilotResetModal users={allUsers} workLogs={workLogs} customTasks={customTasks} dailyPlans={dailyPlans} departments={departments} lightMode={lightMode} onClose={()=>setShowPilotReset(false)} onRun={runPilotReset}/>}
       {showAdmin&&canManageUsers(currentUser)&&<AdminPanel projects={projects} stages={stages} orders={orders} onClose={()=>setShowAdmin(false)} lightMode={lightMode} departments={departments} updD={updD} onPilotReset={isAdmin?()=>setShowPilotReset(true):null}/>}
       {showAlerts&&<AlertsPanel orders={filteredOrders} stages={stages} workLogs={filteredWorkLogs} users={visibleUsers} onClose={()=>setShowAlerts(false)} dismissedAlerts={dismissedAlerts} onDismissAll={ids=>setDismissedAlerts(prev=>[...new Set([...prev,...ids])])}/>}
