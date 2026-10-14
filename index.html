@@ -5212,19 +5212,23 @@ function MyWork({orders,stages,workLogs,onStartWork,onEndWork,onPauseWork,onResu
     });
   };
 
-  // ▶️ the whole פק"ע — every unit of it the list offers me, on one timer: the
+  // ▶️ the whole פק"ע — every unit of it waiting on one stage, on one timer: the
   // same group 📦 builds by ticking each box, for the job done to the whole batch
-  // at once. Each unit goes on its own next stage, as in 📦. `units` are the rows
-  // the card shows, so a שלב filter narrows it to that stage.
-  const startOrderAll=(o,units)=>{
+  // at once. One stage, never several: a worker does one stage at a time, so units
+  // that stand at different stages get a button per stage (see unitsByStage).
+  // `units` are the rows the card shows, so a שלב filter narrows it too.
+  const unitsByStage=units=>{
+    const m=new Map();
+    units.forEach(u=>{let g=m.get(u.next.id);if(!g){g={stage:u.next,units:[]};m.set(u.next.id,g)}g.units.push(u)});
+    return[...m.values()].sort((a,b)=>(a.stage.order||0)-(b.stage.order||0));
+  };
+  const startOrderAll=(o,stage,units,others)=>{
     if(myActiveLog&&!myActiveLog.paused){toast("יש לך עבודה פעילה. סיים או עצור לפני שמתחיל חדשה.","warning");return}
     if(!units.length)return;
-    const byStage=new Map();units.forEach(u=>byStage.set(u.next.name,(byStage.get(u.next.name)||0)+1));
-    const where=byStage.size>1?`בשלבים:\n${[...byStage].map(([n,c])=>`• ${n} — ${c}`).join("\n")}`:`· ${[...byStage.keys()][0]}`;
-    if(!confirm(`להתחיל את כל הפק"ע ${o.woNumber}?\n\n${units.length} יחידות ${where}\n\nכל היחידות ירוצו על טיימר אחד, ויסתיימו יחד בלחיצה על ✅ סיימתי.`))return;
+    if(!confirm(`להתחיל את כל הפק"ע ${o.woNumber} בשלב ${stage.name}?\n\n${units.length} יחידות ירוצו על טיימר אחד, ויסתיימו יחד בלחיצה על ✅ סיימתי.${others>0?`\n\n${others} יחידות שממתינות בשלבים אחרים לא נכללות.`:""}`))return;
     const groupId=uid(),at=nowISO();
-    units.forEach(u=>onStartWork({id:uid(),userId:currentUser.id,userName:currentUser.name,serialId:u.id,stageId:u.next.id,orderId:o.id,serialSn:u.sn||"",startTime:at,endTime:null,completed:false,durationMin:0,paused:false,pauseStart:null,totalPauseMin:0,pauseLog:[],bulk:true,bulkGroupId:groupId,bulkCount:units.length}));
-    toast(`התחלת עבודה על כל הפק"ע — ${units.length} יחידות`,"success");
+    units.forEach(u=>onStartWork({id:uid(),userId:currentUser.id,userName:currentUser.name,serialId:u.id,stageId:stage.id,orderId:o.id,serialSn:u.sn||"",startTime:at,endTime:null,completed:false,durationMin:0,paused:false,pauseStart:null,totalPauseMin:0,pauseLog:[],bulk:true,bulkGroupId:groupId,bulkCount:units.length}));
+    toast(`התחלת עבודה על ${units.length} יחידות · ${stage.name}`,"success");
   };
 
   // ── HOLD in the general list ────────────────────────────────────────────
@@ -5550,7 +5554,7 @@ function MyWork({orders,stages,workLogs,onStartWork,onEndWork,onPauseWork,onResu
               :<>{myActiveLog.serialSn}{myActiveLogs.length>1&&` + ${myActiveLogs.length-1}`}</>}
           </div>
           <div style={{fontSize:13,color:"var(--c-muted)"}}>
-            {/* A whole פק"ע started together can span stages — name each of them. */}
+            {/* A 📦 group picked by hand can span stages — name each of them. */}
             {[...new Set(cancelGroup.map(w=>stageMap.get(w.stageId)?.name).filter(Boolean))].join(" · ")}
             {isQtyRun(myActiveLog)&&<span style={{fontSize:11,color:"#10b981",marginRight:6}}>· דיווח לפי כמות (ללא סידוריים)</span>}
           </div>
@@ -5864,9 +5868,14 @@ function MyWork({orders,stages,workLogs,onStartWork,onEndWork,onPauseWork,onResu
         {units.length>0&&<span style={{fontSize:11,color:"var(--c-dim)"}}>({units.length} ממתינות)</span>}
         {planned>0&&<PlanTag label={`תוכנית העבודה שלי · ${planned} יח'`}/>}
         {bulkMode&&bulkSelected.length>0&&<Btn color="var(--c-accent)" small onClick={()=>startBulk(o.id)}>▶️ התחל {bulkSelected.length} יחידות</Btn>}
-        {!bulkMode&&units.length>1&&<Btn color="#10b981" small onClick={()=>startOrderAll(o,units)} disabled={busyNow}
-          title={runBlocked||`טיימר אחד לכל ${units.length} היחידות של הפק"ע שממתינות לך — מסתיימות יחד`}
-          style={{marginInlineStart:"auto"}}>▶️ התחל את כל הפק"ע ({units.length})</Btn>}
+        {!bulkMode&&units.length>1&&(()=>{
+          const groups=unitsByStage(units).filter(g=>g.units.length>1);
+          return groups.length>0&&<div style={{display:"flex",gap:6,flexWrap:"wrap",marginInlineStart:"auto"}}>
+            {groups.map(g=><Btn key={g.stage.id} color={g.stage.color} small onClick={()=>startOrderAll(o,g.stage,g.units,units.length-g.units.length)} disabled={busyNow}
+              title={runBlocked||`טיימר אחד לכל ${g.units.length} היחידות של הפק"ע שממתינות ל${g.stage.name} — מסתיימות יחד`}
+              style={{whiteSpace:"normal",textAlign:"right"}}>▶️ התחל את כל הפק"ע · {g.stage.name} ({g.units.length})</Btn>)}
+          </div>;
+        })()}
       </div>
       <div style={{display:"flex",flexDirection:"column",gap:6}}>
         {held.map(r=>heldRowView(r,{compact:true}))}
