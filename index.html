@@ -3,6 +3,13 @@
 <head>
 <meta charset="utf-8"/>
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"/>
+<!-- iPhone/iPad only. Safari zooms the page in whenever a field under 16px gets
+     focus — the login fields and the search boxes here are 14px — and does not
+     zoom back out afterwards, so from the login on the whole app slides from side
+     to side under the finger. maximum-scale=1 stops that automatic zoom; iOS still
+     lets someone pinch-zoom on purpose. It is not set anywhere else: Android does
+     not zoom on focus, and there the same flag would take pinch-zoom away. -->
+<script>(function(){try{var n=navigator;if(/iP(hone|od|ad)/.test(n.userAgent)||(n.platform==="MacIntel"&&n.maxTouchPoints>1)){var m=document.querySelector('meta[name="viewport"]');if(m&&!/maximum-scale/.test(m.content))m.content+=",maximum-scale=1"}}catch(e){}})()</script>
 <meta http-equiv="Content-Security-Policy" content="default-src 'self' 'unsafe-inline' 'unsafe-eval'; connect-src 'self' https://*.supabase.co wss://*.supabase.co https://cdnjs.cloudflare.com https://cdn.jsdelivr.net; script-src 'self' 'unsafe-inline' 'unsafe-eval' https://cdnjs.cloudflare.com https://cdn.jsdelivr.net; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; img-src 'self' data: blob:; font-src 'self' data: https://fonts.gstatic.com;"/>
 <meta name="theme-color" content="#0a0e1a" id="tcm"/>
 <meta name="apple-mobile-web-app-capable" content="yes"/>
@@ -74,6 +81,19 @@ body.light-mode{
   --shadow-md:0 4px 12px rgba(16,24,40,.08),0 12px 32px rgba(16,24,40,.08);
 }
 body{background:var(--c-bg);font-family:'Heebo','Segoe UI',Tahoma,Arial,sans-serif;color:var(--c-text);direction:rtl;transition:background .25s,color .25s;min-height:100vh;min-height:100dvh;overflow-x:hidden;-webkit-font-smoothing:antialiased}
+/* The screen must not slide sideways on a phone (see the viewport script in <head>
+   for the zoom half of it).
+   · manipulation: no double-tap zoom — a quick double tap leaves the page zoomed
+     and panning the same way a focused field does.
+   · text-size-adjust: iOS enlarges text on its own when the phone turns sideways,
+     which pushes rows wider than the screen.
+   · overscroll-behavior-x: no sideways rubber-band on the page itself.
+   · overflow-x:clip on both html and body, where supported: nothing wider than the
+     screen can be scrolled to. `hidden` on both would make body a scroll container
+     of its own and stop the sticky header from sticking; `clip` clips without
+     that. Older browsers keep the `hidden` on body above. */
+html{touch-action:manipulation;-webkit-text-size-adjust:100%;text-size-adjust:100%;overscroll-behavior-x:none}
+@supports (overflow:clip){html,body{overflow-x:clip}}
 h1,h2,h3,h4{letter-spacing:-.02em;font-weight:700}
 input,select,textarea{background:var(--c-input-bg);border:1px solid var(--c-input-border);border-radius:8px;padding:9px 12px;color:var(--c-text);font-size:14px;font-family:inherit;width:100%;outline:none;transition:background .25s,color .25s,border-color .2s;-webkit-appearance:none;appearance:none}
 input[type=checkbox]{width:auto!important;-webkit-appearance:checkbox!important;appearance:checkbox!important;accent-color:var(--c-accent);min-width:16px;min-height:16px}
@@ -5192,6 +5212,25 @@ function MyWork({orders,stages,workLogs,onStartWork,onEndWork,onPauseWork,onResu
     });
   };
 
+  // ▶️ the whole פק"ע — every unit of it waiting on one stage, on one timer: the
+  // same group 📦 builds by ticking each box, for the job done to the whole batch
+  // at once. One stage, never several: a worker does one stage at a time, so units
+  // that stand at different stages get a button per stage (see unitsByStage).
+  // `units` are the rows the card shows, so a שלב filter narrows it too.
+  const unitsByStage=units=>{
+    const m=new Map();
+    units.forEach(u=>{let g=m.get(u.next.id);if(!g){g={stage:u.next,units:[]};m.set(u.next.id,g)}g.units.push(u)});
+    return[...m.values()].sort((a,b)=>(a.stage.order||0)-(b.stage.order||0));
+  };
+  const startOrderAll=(o,stage,units,others)=>{
+    if(myActiveLog&&!myActiveLog.paused){toast("יש לך עבודה פעילה. סיים או עצור לפני שמתחיל חדשה.","warning");return}
+    if(!units.length)return;
+    if(!confirm(`להתחיל את כל הפק"ע ${o.woNumber} בשלב ${stage.name}?\n\n${units.length} יחידות ירוצו על טיימר אחד, ויסתיימו יחד בלחיצה על ✅ סיימתי.${others>0?`\n\n${others} יחידות שממתינות בשלבים אחרים לא נכללות.`:""}`))return;
+    const groupId=uid(),at=nowISO();
+    units.forEach(u=>onStartWork({id:uid(),userId:currentUser.id,userName:currentUser.name,serialId:u.id,stageId:stage.id,orderId:o.id,serialSn:u.sn||"",startTime:at,endTime:null,completed:false,durationMin:0,paused:false,pauseStart:null,totalPauseMin:0,pauseLog:[],bulk:true,bulkGroupId:groupId,bulkCount:units.length}));
+    toast(`התחלת עבודה על ${units.length} יחידות · ${stage.name}`,"success");
+  };
+
   // ── HOLD in the general list ────────────────────────────────────────────
   // Work somebody stopped in the middle is offered to everyone whose stage it is,
   // marked as already started, so a unit nobody reassigned does not sit waiting
@@ -5515,7 +5554,8 @@ function MyWork({orders,stages,workLogs,onStartWork,onEndWork,onPauseWork,onResu
               :<>{myActiveLog.serialSn}{myActiveLogs.length>1&&` + ${myActiveLogs.length-1}`}</>}
           </div>
           <div style={{fontSize:13,color:"var(--c-muted)"}}>
-            {stages.find(s=>s.id===myActiveLog.stageId)?.name}
+            {/* A 📦 group picked by hand can span stages — name each of them. */}
+            {[...new Set(cancelGroup.map(w=>stageMap.get(w.stageId)?.name).filter(Boolean))].join(" · ")}
             {isQtyRun(myActiveLog)&&<span style={{fontSize:11,color:"#10b981",marginRight:6}}>· דיווח לפי כמות (ללא סידוריים)</span>}
           </div>
           <div style={{fontSize:12,color:"var(--c-dim)",marginTop:4}}>התחלה: {new Date(myActiveLog.startTime).toLocaleTimeString("he-IL",{hour:"2-digit",minute:"2-digit"})}</div>
@@ -5828,6 +5868,14 @@ function MyWork({orders,stages,workLogs,onStartWork,onEndWork,onPauseWork,onResu
         {units.length>0&&<span style={{fontSize:11,color:"var(--c-dim)"}}>({units.length} ממתינות)</span>}
         {planned>0&&<PlanTag label={`תוכנית העבודה שלי · ${planned} יח'`}/>}
         {bulkMode&&bulkSelected.length>0&&<Btn color="var(--c-accent)" small onClick={()=>startBulk(o.id)}>▶️ התחל {bulkSelected.length} יחידות</Btn>}
+        {!bulkMode&&units.length>1&&(()=>{
+          const groups=unitsByStage(units).filter(g=>g.units.length>1);
+          return groups.length>0&&<div style={{display:"flex",gap:6,flexWrap:"wrap",marginInlineStart:"auto"}}>
+            {groups.map(g=><Btn key={g.stage.id} color={g.stage.color} small onClick={()=>startOrderAll(o,g.stage,g.units,units.length-g.units.length)} disabled={busyNow}
+              title={runBlocked||`טיימר אחד לכל ${g.units.length} היחידות של הפק"ע שממתינות ל${g.stage.name} — מסתיימות יחד`}
+              style={{whiteSpace:"normal",textAlign:"right"}}>▶️ התחל את כל הפק"ע · {g.stage.name} ({g.units.length})</Btn>)}
+          </div>;
+        })()}
       </div>
       <div style={{display:"flex",flexDirection:"column",gap:6}}>
         {held.map(r=>heldRowView(r,{compact:true}))}
@@ -12314,6 +12362,7 @@ function LiveFactoryBoard({orders,workLogs,stages,customTasks,users,departments,
   const [selWorker,setSelWorker]=useState(null);   // open worker (id)
   const [orgHorizontal,setOrgHorizontal]=useState(true); // org-chart orientation (true=לרוחב)
   const [stageOpen,setStageOpen]=useState(true); // "תפוקה לפי שלב" panel collapsed/expanded
+  const [selStatus,setSelStatus]=useState(null);  // open head-count list ("working"|"task"|"break"|"idle")
   const lm=lightMode;
   const bg=lm?"#f0f2f5":"#05080f";
   const cardBg=lm?"#ffffff":"#0d1120";
@@ -12441,6 +12490,27 @@ function LiveFactoryBoard({orders,workLogs,stages,customTasks,users,departments,
   const fmtElapsed=ms=>{const s=Math.floor(ms/1000),m=Math.floor(s/60),h=Math.floor(m/60);return h>0?`${h}:${String(m%60).padStart(2,"0")}:${String(s%60).padStart(2,"0")}`:`${m}:${String(s%60).padStart(2,"0")}`};
   const statusLabel={working:"🔄 עובד",task:"📌 במשימה",break:"⏸️ הפסקה",idle:"😴 לא פעיל"};
   const statusBg={working:"#f59e0b",task:"#a78bfa",break:"#8b95a8",idle:lm?"#aeb6c4":"#475569"};
+  // The same colours as text — idle's border grey is too faint to read as a label.
+  const statusText=s=>s==="idle"?(lm?"#5a6478":"#94a3b8"):statusBg[s];
+  // What the KPI tiles and the lists opened from them call each group of people.
+  const statusTitle={working:"🔄 עובדים פעילים",task:"📌 במשימות",break:"⏸️ בהפסקה",idle:"😴 לא פעילים"};
+  const statusHint={working:"הטיימר שלהם רץ עכשיו על יחידה או כמות",task:"מבצעים עכשיו משימה",
+    break:"העבודה שלהם פתוחה ומושהית (הפסקה)",idle:"אין להם כרגע עבודה או משימה פתוחה"};
+
+  // When each person last did anything — on the "לא פעילים" list the question
+  // after "who" is "since when". Keyed on the data, not on the clock tick.
+  const lastSeen=useMemo(()=>{
+    const m=new Map();
+    const bump=(id,iso)=>{if(!id||!iso)return;const t=Date.parse(iso);if(t>(m.get(id)||0))m.set(id,t)};
+    workLogs.forEach(w=>bump(w.userId,w.endTime||w.startTime));
+    (customTasks||[]).forEach(t=>bump(t.userId,t.endTime||t.startTime));
+    return m;
+  },[workLogs,customTasks]);
+  const lastSeenLabel=id=>{
+    const t=lastSeen.get(id);if(!t)return"לא נרשמה פעילות";
+    const d=new Date(t),today=d.toDateString()===new Date(now).toDateString();
+    return`פעילות אחרונה: ${today?"היום":d.toLocaleDateString("he-IL",{day:"2-digit",month:"2-digit"})} ${d.toLocaleTimeString("he-IL",{hour:"2-digit",minute:"2-digit"})}`;
+  };
 
   // Floor population: all active users (system admins excluded from the floor view)
   const floor=users.filter(u=>u.active!==false&&u.role!=="admin");
@@ -12469,7 +12539,7 @@ function LiveFactoryBoard({orders,workLogs,stages,customTasks,users,departments,
   };
 
   // Single live employee rectangle (used in the "who works now" strip)
-  const MemberBox=({u,onClick})=>{
+  const MemberBox=({u,onClick,note})=>{
     const st=userStatus(u.id);const sc=statusBg[st];const items=liveItems(u);
     return(
       <button onClick={onClick} style={{textAlign:"right",cursor:"pointer",fontFamily:"inherit",background:innerBg,borderRadius:10,padding:"9px 11px",border:`2px solid ${sc}`,minWidth:158,flex:"1 1 158px",maxWidth:230,boxShadow:st==="working"||st==="task"?`0 0 0 1px ${sc}55`:"none"}}>
@@ -12484,7 +12554,8 @@ function LiveFactoryBoard({orders,workLogs,stages,customTasks,users,departments,
             <div style={{color:dimC,display:"flex",justifyContent:"space-between"}}><span>{it.meta}</span><span style={{color:"#f59e0b",fontVariantNumeric:"tabular-nums",fontWeight:700}}>{it.time}</span></div>
           </div>
         ))}
-        {st==="idle"&&<div style={{marginTop:5,fontSize:10,color:dimC}}>אין פעילות כרגע</div>}
+        {st==="idle"&&!note&&<div style={{marginTop:5,fontSize:10,color:dimC}}>אין פעילות כרגע</div>}
+        {note&&<div style={{marginTop:4,fontSize:10,color:dimC}}>{note}</div>}
       </button>
     );
   };
@@ -12583,22 +12654,28 @@ function LiveFactoryBoard({orders,workLogs,stages,customTasks,users,departments,
         <button onClick={onClose} style={{background:cardBg,border:`1px solid ${borderC}`,color:mutedC,borderRadius:10,padding:"8px 16px",fontSize:14,fontFamily:"inherit"}}>✕ סגור</button>
       </div>
 
-      {/* KPI row */}
+      {/* KPI row — the four head counts open the list of who they are */}
       <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(120px,1fr))",gap:10,marginBottom:18}}>
         {[
-          {i:"🔄",v:liveCount("working"),l:"עובדים פעילים",c:"#f59e0b"},
-          {i:"📌",v:liveCount("task"),l:"במשימות",c:"#a78bfa"},
-          {i:"⏸️",v:liveCount("break"),l:"בהפסקה",c:"#8b95a8"},
-          {i:"😴",v:liveCount("idle"),l:"לא פעילים",c:mutedC},
+          {i:"🔄",v:liveCount("working"),l:"עובדים פעילים",c:"#f59e0b",st:"working"},
+          {i:"📌",v:liveCount("task"),l:"במשימות",c:"#a78bfa",st:"task"},
+          {i:"⏸️",v:liveCount("break"),l:"בהפסקה",c:"#8b95a8",st:"break"},
+          {i:"😴",v:liveCount("idle"),l:"לא פעילים",c:mutedC,st:"idle"},
           {i:"✅",v:doneToday,l:"הושלמו היום",c:"#10b981"},
           {i:"📋",v:pendingTotal,l:"יחידות ממתינות",c:"#3b82f6"},
-        ].map((k,i)=>(
-          <div key={i} style={{background:cardBg,borderRadius:12,padding:"12px 14px",border:`1px solid ${k.c}33`,textAlign:"center"}}>
+        ].map((k,i)=>{
+          const box={background:cardBg,borderRadius:12,padding:"12px 14px",border:`1px solid ${k.c}33`,textAlign:"center"};
+          const body=(<>
             <div style={{fontSize:22,marginBottom:2}}>{k.i}</div>
             <div style={{fontSize:26,fontWeight:800,color:k.c}}>{k.v}</div>
             <div style={{fontSize:11,color:dimC,marginTop:2}}>{k.l}</div>
-          </div>
-        ))}
+          </>);
+          return k.st
+            ?<button key={i} className="fd-box" onClick={()=>setSelStatus(k.st)} title={`מי ${k.l}`} style={{...box,width:"100%"}}>
+              {body}<div style={{fontSize:10,color:statusText(k.st),fontWeight:700,marginTop:4}}>הקש לרשימה ›</div>
+            </button>
+            :<div key={i} style={box}>{body}</div>;
+        })}
       </div>
 
       {/* Sales overview */}
@@ -12749,6 +12826,47 @@ function LiveFactoryBoard({orders,workLogs,stages,customTasks,users,departments,
             <OrgBranch node={buildDeptTree(d,members)} isRoot horizontal={orgHorizontal}/>
           </div>
         </>),()=>setSelDept(null),1120,600);
+      })()}
+
+      {/* ── Who is in one state — opened from the KPI row ── */}
+      {selStatus&&(()=>{
+        const list=floor.filter(u=>userStatus(u.id)===selStatus)
+          .sort((a,b)=>String(a.name||"").localeCompare(String(b.name||""),"he"));
+        // By department, in the diagram's order — "who is idle" is really "where".
+        const groups=deptData.map(({d,members})=>{const ids=new Set(members.map(m=>m.id));return{d,people:list.filter(u=>ids.has(u.id))}})
+          .filter(g=>g.people.length>0);
+        const tc=statusText(selStatus);
+        return overlay((<>
+          <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",gap:10,marginBottom:12}}>
+            <div style={{minWidth:0}}>
+              <div style={{fontSize:19,fontWeight:900,color:tc}}>{statusTitle[selStatus]} · {list.length}</div>
+              <div style={{fontSize:12,color:mutedC,marginTop:2}}>{statusHint[selStatus]} · הקש על עובד לכרטיס אישי</div>
+            </div>
+            <button onClick={()=>setSelStatus(null)} aria-label="סגור" style={{flexShrink:0,background:innerBg,border:`1px solid ${borderC}`,borderRadius:8,padding:"5px 11px",fontSize:13,color:mutedC,fontFamily:"inherit"}}>✕</button>
+          </div>
+          {/* Switch between the four lists without going back to the board. */}
+          <div style={{display:"flex",gap:6,flexWrap:"wrap",marginBottom:16}}>
+            {["working","task","break","idle"].map(s=>{const on=s===selStatus,c=statusText(s);return(
+              <button key={s} onClick={()=>setSelStatus(s)} aria-pressed={on}
+                style={{background:on?c+"22":innerBg,border:`1px solid ${on?c:borderC}`,color:on?c:mutedC,borderRadius:20,padding:"6px 12px",fontSize:12.5,fontWeight:700,fontFamily:"inherit",cursor:"pointer",whiteSpace:"nowrap"}}>
+                {statusTitle[s]} · {liveCount(s)}
+              </button>
+            )})}
+          </div>
+          {list.length===0?(
+            <div style={{background:innerBg,borderRadius:10,padding:16,fontSize:12.5,color:dimC,textAlign:"center"}}>אין כרגע עובדים במצב הזה</div>
+          ):groups.map(({d,people})=>(
+            <div key={d.id} style={{marginBottom:16}}>
+              <div style={{display:"flex",alignItems:"center",gap:7,marginBottom:8,fontSize:13,fontWeight:700,color:textC}}>
+                <span style={{width:10,height:10,borderRadius:3,background:d.color,flexShrink:0}}/>{d.name}
+                <span style={{fontSize:11.5,color:dimC,fontWeight:600}}>· {people.length}</span>
+              </div>
+              <div style={{display:"flex",flexWrap:"wrap",gap:8}}>
+                {people.map(u=><MemberBox key={u.id} u={u} onClick={()=>setSelWorker(u.id)} note={selStatus==="idle"?lastSeenLabel(u.id):null}/>)}
+              </div>
+            </div>
+          ))}
+        </>),()=>setSelStatus(null),900,600);
       })()}
 
       {/* ── Worker detail card ── */}
