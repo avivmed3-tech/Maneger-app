@@ -97,6 +97,7 @@ html{touch-action:manipulation;-webkit-text-size-adjust:100%;text-size-adjust:10
 h1,h2,h3,h4{letter-spacing:-.02em;font-weight:700}
 input,select,textarea{background:var(--c-input-bg);border:1px solid var(--c-input-border);border-radius:8px;padding:9px 12px;color:var(--c-text);font-size:14px;font-family:inherit;width:100%;outline:none;transition:background .25s,color .25s,border-color .2s;-webkit-appearance:none;appearance:none}
 input[type=checkbox]{width:auto!important;-webkit-appearance:checkbox!important;appearance:checkbox!important;accent-color:var(--c-accent);min-width:16px;min-height:16px}
+input[type=radio]{width:auto!important;padding:0;margin:0;-webkit-appearance:radio!important;appearance:radio!important;accent-color:var(--c-accent);min-width:16px;min-height:16px}
 input[type=color]{-webkit-appearance:auto!important;appearance:auto!important;padding:2px}
 input:focus,select:focus,textarea:focus{border-color:var(--c-accent)}
 select{background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='11' height='7' viewBox='0 0 11 7'%3E%3Cpath fill='%238b95a8' d='M5.5 7L0 0h11z'/%3E%3C/svg%3E");background-repeat:no-repeat;background-position:right 10px center;padding-right:30px !important;padding-left:8px}
@@ -828,10 +829,10 @@ const COLS={
   orders:"id,wo_number,pn,description,qty,unit_price,project_id,branch,received_date,target_date,stage_ids,block_id,serials,shortages,defects,delivered_serials,status,erp_status,erp_note,updated_at",
   work_logs:"id,user_id,user_name,serial_id,serial_sn,stage_id,order_id,start_time,end_time,completed,duration_min,paused,pause_start,total_pause_min,pause_log,bulk,bulk_group_id,bulk_count,hold_info,updated_at",
   projects:"id,name,updated_at",
-  stages:"id,name,stage_order,color,price,hourly_rate,role_id,minutes,updated_at",
+  stages:"id,name,stage_order,color,price,hourly_rate,role_id,minutes,inspection,updated_at",
   stage_blocks:"id,name,stages,updated_at",
   custom_tasks:"id,user_id,user_name,name,description,price,active,completed,partial,start_time,end_time,duration_min,paused,pause_start,total_pause_min,pause_log,created_at,updated_at",
-  departments:"id,name,color,manager_id,branch_codes,updated_at",
+  departments:"id,name,color,manager_id,branch_codes,break_schedules,updated_at",
   daily_plans:"id,user_id,user_name,plan_date,order_id,stage_id,target_qty,serial_ids,note,done,created_by,created_by_name,created_at,updated_at",
   pn_standards:"id,pn,stage_minutes,total_min,note,updated_by,updated_at",
   app_users:"id,username,password_hash,password_plain,role,name,project_access,stage_access,branch_access,branch_none,can_edit,can_view,active,hourly_rate,sale_rate,department_id,manager_id,login_attempts,locked_until,last_login,updated_at"
@@ -1063,17 +1064,18 @@ const taskToDb=t=>({id:t.id,user_id:t.userId,user_name:t.userName,name:t.name,
   end_time:t.endTime||null,duration_min:Number(t.durationMin||0),paused:t.paused||false,
   pause_start:t.pauseStart||null,total_pause_min:Number(t.totalPauseMin||0),
   pause_log:t.pauseLog||[],company_id:rowCid(t),updated_at:new Date().toISOString()});
-const dbToStage=r=>({id:r.id,name:r.name,order:r.stage_order,color:r.color,price:r.price,hourlyRate:r.hourly_rate||0,roleId:r.role_id||"",minutes:Number(r.minutes||0),companyId:r.company_id||_companyId||DEFAULT_COMPANY_ID});
-const stageToDb=s=>({id:s.id,name:s.name,stage_order:s.order||0,color:s.color||"#3b82f6",price:Number(s.price||0),hourly_rate:Number(s.hourlyRate||0),role_id:s.roleId||null,minutes:Number(s.minutes||0),company_id:rowCid(s)});
+const dbToStage=r=>({id:r.id,name:r.name,order:r.stage_order,color:r.color,price:r.price,hourlyRate:r.hourly_rate||0,roleId:r.role_id||"",minutes:Number(r.minutes||0),inspection:r.inspection===true,companyId:r.company_id||_companyId||DEFAULT_COMPANY_ID});
+const stageToDb=s=>({id:s.id,name:s.name,stage_order:s.order||0,color:s.color||"#3b82f6",price:Number(s.price||0),hourly_rate:Number(s.hourlyRate||0),role_id:s.roleId||null,minutes:Number(s.minutes||0),inspection:!!s.inspection,company_id:rowCid(s)});
 const dbToBlock=r=>({id:r.id,name:r.name,stages:r.stages,companyId:r.company_id||_companyId||DEFAULT_COMPANY_ID});
 const blockToDb=b=>({id:b.id,name:b.name,stages:b.stages||[],company_id:rowCid(b)});
 const dbToProject=r=>({id:r.id,name:r.name,companyId:r.company_id||_companyId||DEFAULT_COMPANY_ID});
 const projectToDb=p=>({id:p.id,name:p.name,company_id:rowCid(p)});
 const dbToDept=r=>({id:r.id,name:r.name,color:r.color||"#3b82f6",managerId:r.manager_id||"",
   branches:Array.isArray(r.branch_codes)?r.branch_codes.map(branchCode).filter(Boolean):[],
+  breakSchedules:Array.isArray(r.break_schedules)?r.break_schedules:[],
   companyId:r.company_id||_companyId||DEFAULT_COMPANY_ID});
 const deptToDb=d=>({id:d.id,name:d.name,color:d.color||"#3b82f6",manager_id:d.managerId||null,
-  branch_codes:deptBranches(d),company_id:rowCid(d)});
+  branch_codes:deptBranches(d),break_schedules:Array.isArray(d.breakSchedules)?d.breakSchedules:[],company_id:rowCid(d)});
 // Daily work plans — a manager assigns a worker an order+stage to work on for a given day.
 const dbToPlan=r=>({id:r.id,userId:r.user_id,userName:r.user_name,date:r.plan_date,orderId:r.order_id||"",stageId:r.stage_id||"",targetQty:Number(r.target_qty||0),serialIds:Array.isArray(r.serial_ids)?r.serial_ids:[],note:r.note||"",done:r.done||false,createdBy:r.created_by||"",createdByName:r.created_by_name||"",createdAt:r.created_at,companyId:r.company_id||_companyId||DEFAULT_COMPANY_ID});
 const planToDb=p=>({id:p.id,user_id:p.userId,user_name:p.userName||null,plan_date:p.date,order_id:p.orderId||null,stage_id:p.stageId||null,target_qty:Number(p.targetQty||0),serial_ids:Array.isArray(p.serialIds)?p.serialIds:[],note:p.note||null,done:p.done||false,created_by:p.createdBy||null,created_by_name:p.createdByName||null,company_id:rowCid(p),updated_at:new Date().toISOString()});
@@ -1682,14 +1684,17 @@ const holdCarryMin=w=>Number((w&&w.holdInfo&&w.holdInfo.carryMin)||0);
 // workers: that worker's minutes over the unit's total. Every ordinary log is 1.
 // A segment whose unit is still open has no total yet and stands for 0 — its
 // minutes count toward the worker, the unit is counted once it is signed.
+// A return from inspection and the fix that answers it (see reworkOf) are time on
+// a unit that was already counted, so they stand for none.
 function holdShares(workLogs){
   const tot=new Map();
   (workLogs||[]).forEach(w=>{
-    if(!w.completed||isHoldSegment(w))return;
+    if(!w.completed||isHoldSegment(w)||reworkOf(w))return;
     const c=holdCarryMin(w);if(!(c>0))return;
     tot.set(`${w.serialId||w.orderId}|${w.stageId}`,Number(w.durationMin||0)+c);
   });
   return w=>{
+    if(reworkOf(w))return 0;
     if(isHoldSegment(w)){
       const t=tot.get(`${w.holdInfo.serialId||w.orderId}|${w.stageId}`);
       return t>0?Math.min(1,Number(w.durationMin||0)/t):0;
@@ -1727,7 +1732,9 @@ function holdHandOff(logs,logIds,to,by,at,reuse){
     paused:false,pauseStart:null,totalPauseMin:Number(w.totalPauseMin||0),pauseLog:w.pauseLog||[],
     bulk:!!w.bulk,bulkGroupId:null,bulkCount:null,
     holdInfo:{seg:true,fromLogId:w.id,holdMin:Number((w.holdInfo&&w.holdInfo.holdMin)||0),serialId:w.serialId||null,count:Number(w.bulkCount)||null,toUserId:to.id,toUserName:to.name,
-      byUserId:by&&by.id||"",byUserName:by&&by.name||"",at}}));
+      byUserId:by&&by.id||"",byUserName:by&&by.name||"",at,
+      // A fix handed on mid-way is still a fix — this share of it included.
+      ...(reworkOf(w)?{rework:reworkOf(w)}:{})}}));
   // One group handed on stays one group, under a new id of its own.
   const groups=reuse?reuse.groups:new Map();
   const next=(logs||[]).map(w=>{
@@ -1741,7 +1748,8 @@ function holdHandOff(logs,logIds,to,by,at,reuse){
       holdInfo:{held:true,heldAt:hi.heldAt||at,heldBy:hi.heldBy||"",heldByName:hi.heldByName||"",
         carryMin:holdCarryMin(w)+mine,
         prev:[...(Array.isArray(hi.prev)?hi.prev:[]),...(mine>0?[{userId:w.userId,userName:w.userName,min:mine}]:[])],
-        assignedBy:by&&by.id||"",assignedByName:by&&by.name||"",assignedAt:at}};
+        assignedBy:by&&by.id||"",assignedByName:by&&by.name||"",assignedAt:at,
+        ...(hi.rework?{rework:hi.rework}:{})}};
   });
   // Only the segments of logs actually handed on in *this* list, and never twice.
   const handed=new Set(before.map(w=>w.id)),have=new Set((logs||[]).map(w=>w.id));
@@ -1786,6 +1794,252 @@ const isQtyOrder=order=>!((order&&order.serials||[]).length)&&Number(order&&orde
 // The units an order's progress is measured against — its serials, or its quantity
 // when it has none.
 const orderUnits=order=>{const n=((order&&order.serials)||[]).length;return n||(Number(order&&order.qty)||0)};
+// ── תיקון לאחר ביקורת ─────────────────────────────────────────────────────
+// An inspection that finds a problem sends the unit back to an earlier stage of
+// its route. That stage stays signed — nobody signs it again — and the time the
+// fix takes is added to the time the stage took. Nothing here needs a table of
+// its own: both halves are work logs, told apart by holdInfo.rework (hold_info is
+// where a log keeps what happened to it beyond start and finish).
+//
+//   The return — the inspector's record of the inspection that failed, closed
+//   with the minutes it ran and no serial, so it is the inspector's time and never
+//   marks the inspection as passed. A unit sent back without a timer gets one with
+//   no minutes. It carries the request:
+//     rework.req          true
+//     rework.id           the request's own id
+//     rework.serialId     the unit
+//     rework.toStageId    the stage it goes back to
+//     rework.fromStageId  the inspection that sent it
+//     rework.note · at · byId · byName
+//   The fix — an ordinary start on the unit at that stage, marked with
+//     rework.reqId        the request it answers
+//   While it runs it is an open log on the unit like any other, so the unit is off
+//   everybody else's queue. Signing it closes the request, and the log gives up
+//   its serial the way a HOLD segment has none: its minutes are time on a stage
+//   that was already counted, not a second unit. rework.serialId keeps which unit,
+//   rework.count how many were fixed together on one timer.
+// The unit is then back in line for the inspection, which still has to pass it.
+const reworkOf=w=>(w&&w.holdInfo&&w.holdInfo.rework)||null;
+const isReworkReq=w=>!!(reworkOf(w)&&reworkOf(w).req);
+const isReworkFix=w=>!!reworkOf(w)&&!reworkOf(w).req;
+// Time with no unit of its own: a HOLD segment, a return, a fix. Never priced and
+// never counted as a unit — a stage is paid and counted once, to whoever signs it.
+const isTimeOnly=w=>isHoldSegment(w)||!!reworkOf(w);
+// serialId → the request still open on it. A request closes when a fix that
+// answers it is signed — or, should one have slipped in twice, when any fix on the
+// unit is signed after it, or the inspection is signed after it after all.
+function buildReworkIndex(workLogs){
+  const reqs=[],closed=new Set(),fixedAt=new Map(),passedAt=new Map();
+  const later=(m,k,t)=>{if(t&&!(m.get(k)>=t))m.set(k,t)};
+  (workLogs||[]).forEach(w=>{
+    if(!w.completed)return;
+    const r=reworkOf(w);
+    if(r&&r.req){if(!r.cancelled&&r.id&&r.serialId&&r.toStageId)reqs.push(r);return}
+    // A HOLD segment of a fix is part of it, not its end.
+    if(isHoldSegment(w))return;
+    const t=w.endTime||w.startTime||"";
+    if(r){if(r.reqId)closed.add(r.reqId);if(r.serialId)later(fixedAt,r.serialId,t);return}
+    if(w.serialId&&w.stageId)later(passedAt,logKey(w.serialId,w.stageId),t);
+  });
+  const open=new Map();
+  reqs.forEach(r=>{
+    if(closed.has(r.id)||fixedAt.get(r.serialId)>=r.at||passedAt.get(logKey(r.serialId,r.fromStageId))>=r.at)return;
+    const cur=open.get(r.serialId);
+    if(!cur||String(r.at||"")>String(cur.at||""))open.set(r.serialId,r);
+  });
+  return open;
+}
+const useReworkIndex=workLogs=>useMemo(()=>buildReworkIndex(workLogs),[workLogs]);
+// A start on a unit that is waiting for a fix at that very stage *is* the fix —
+// whichever ▶️ it came from: the unit, a group, the whole פק"ע.
+const reworkAttach=(log,idx)=>{
+  if(!log||log.completed||!log.serialId||!idx)return log;
+  const r=idx.get(log.serialId);
+  if(!r||r.toStageId!==log.stageId)return log;
+  return{...log,holdInfo:{...(log.holdInfo||{}),rework:{reqId:r.id,serialId:log.serialId,
+    fromStageId:r.fromStageId||"",note:r.note||"",byName:r.byName||"",at:r.at||""}}};
+};
+// What a fix becomes once it is signed: the same record without a serial (and so
+// without a count, or it would read as a quantity signature), the unit kept on
+// the rework note.
+const reworkFinish=w=>{
+  const r=reworkOf(w);
+  if(!r||r.req||!w||!w.completed||!w.serialId)return w;
+  return{...w,serialId:null,bulkCount:null,
+    holdInfo:{...w.holdInfo,rework:{...r,serialId:w.serialId,count:Number(w.bulkCount)||1}}};
+};
+// serial|stage → minutes of fixes on that unit at that stage. A fix done on one
+// timer for several units is shared between them, the way a group's time is.
+function reworkMinutes(workLogs){
+  const m=new Map();
+  (workLogs||[]).forEach(w=>{
+    if(!w.completed||!isReworkFix(w)||isHoldSegment(w))return;
+    const r=reworkOf(w);if(!r.serialId)return;
+    const min=(Number(w.durationMin||0)+holdCarryMin(w))/(Number(r.count)||1);
+    if(!(min>0))return;
+    const k=logKey(r.serialId,w.stageId);m.set(k,(m.get(k)||0)+min);
+  });
+  return m;
+}
+// The inspector sends units back. A unit inspected on a timer turns that very log
+// into the return — closed at `at` with the minutes it ran, no serial, out of the
+// group it ran in; a unit sent back without a timer gets a return of its own.
+// Pure, like holdHandOff: `reuse` replays the ids the journal recorded.
+//   units  [{serialId, serialSn, logId?}]
+//   opt    {orderId, fromStageId, toStageId, note}
+function reworkReturn(logs,units,opt,by,at,reuse){
+  const list=logs||[];
+  const byId=new Map(list.map(w=>[w.id,w]));
+  const ids=reuse?reuse.ids:(units||[]).map(()=>uid());
+  const before=[],turned=new Map(),made=[];
+  const atMs0=Date.parse(at);
+  (units||[]).forEach((u,i)=>{
+    const req={req:true,id:ids[i],serialId:u.serialId,toStageId:opt.toStageId,fromStageId:opt.fromStageId,
+      note:opt.note||"",at,byId:by&&by.id||"",byName:by&&by.name||""};
+    const w=u.logId&&byId.get(u.logId);
+    if(w&&!w.completed&&w.serialId===u.serialId){
+      before.push(w);
+      const pl=(w.pauseLog||[]).map((p,k,a)=>(w.paused&&k===a.length-1&&p&&!p.end)?{...p,end:at}:p);
+      const stopped=w.paused&&w.pauseStart?Math.max(0,Math.round((atMs0-Date.parse(w.pauseStart))/60000)):0;
+      turned.set(w.id,{...w,serialId:null,completed:true,endTime:at,durationMin:logWorkedMin(w,atMs0),
+        paused:false,pauseStart:null,totalPauseMin:Number(w.totalPauseMin||0)+stopped,pauseLog:pl,
+        bulkGroupId:null,bulkCount:null,holdInfo:{...(w.holdInfo||{}),held:false,rework:req}});
+      return;
+    }
+    // The return's log takes the request's id — two namespaces, one id each.
+    made.push({id:req.id,userId:by&&by.id||"",userName:by&&by.name||"",serialId:null,serialSn:u.serialSn||"",
+      stageId:opt.fromStageId,orderId:opt.orderId,startTime:at,endTime:at,completed:true,durationMin:0,
+      paused:false,pauseStart:null,totalPauseMin:0,pauseLog:[],bulk:false,bulkGroupId:null,bulkCount:null,
+      holdInfo:{rework:req}});
+  });
+  const have=new Set(list.map(w=>w.id));
+  const next=list.map(w=>turned.get(w.id)||w).concat(made.filter(w=>!have.has(w.id)));
+  return{next:(turned.size||made.length)?next:list,before,made,ids,at};
+}
+// What the history and the reports call these records.
+const reworkKind=w=>isReworkReq(w)?"החזרה לתיקון (ביקורת)":isReworkFix(w)?"תיקון לאחר ביקורת":"";
+// The stages a unit may be sent back to from an inspection: the ones its route
+// runs before it, nearest first — every one of them already signed, or the unit
+// would not be standing at the inspection.
+const reworkTargets=(route,fromStageId)=>{
+  const i=(route||[]).findIndex(st=>st.id===fromStageId);
+  return i>0?route.slice(0,i).reverse():[];
+};
+// ── הפסקות קבועות ─────────────────────────────────────────────────────────
+// A manager can set fixed breaks — for the whole department, or for chosen
+// workers — and at those hours whatever those people are working on stops by
+// itself, and at the end of them starts again by itself. Where none is set,
+// nothing changes: ⏸️ הפסקה by hand, as always.
+//
+// The schedules live on the department row (departments.break_schedules):
+//   {id, name, start:"10:00", end:"10:15", days:[0..6], userIds:[], active, by, byName}
+// No userIds is the whole department. An end before the start runs past midnight.
+//
+// Nothing on a server wakes up at 10:00. Whichever device is open does it — the
+// worker's own at once, a manager's a couple of minutes later in case the worker's
+// phone is in a pocket — and it writes the break at the hours the schedule names,
+// not at the moment it happened to notice. So it comes out the same whichever
+// device writes it and however late, and a break that nobody's screen was on for
+// is still taken off the clock: catching up writes the same pause, already closed.
+// A pause made this way carries `auto` — "<schedule id>@<day>" — so it is written
+// once, and `until`, so the screen can say when work starts again.
+// A job that was already stopped when the break began (a break of its own, HOLD)
+// is left alone, and so is one started during the break: somebody chose to work.
+const BREAK_DAYS=[0,1,2,3,4];
+const BREAK_GRACE_MS=2*60*1000;
+const BREAK_LOOKBACK_MS=7*24*3600*1000;
+const hhmmMin=s=>{const m=/^(\d{1,2}):(\d{2})$/.exec(String(s||"").trim());if(!m)return null;const h=+m[1],mi=+m[2];return(h<24&&mi<60)?h*60+mi:null};
+const breakDaysOf=s=>Array.isArray(s&&s.days)&&s.days.length?s.days.map(Number):BREAK_DAYS;
+// The schedules that apply to one person, from every department's list.
+function breakSchedulesFor(user,departments){
+  if(!user)return[];
+  const home=userDeptId(user,departments);
+  const out=[];
+  (departments||[]).forEach(d=>((d&&d.breakSchedules)||[]).forEach(s=>{
+    if(!s||s.active===false)return;
+    const ids=Array.isArray(s.userIds)?s.userIds:[];
+    if(ids.length?ids.includes(user.id):(!!home&&d.id===home))out.push(s);
+  }));
+  return out;
+}
+// The breaks those schedules make between two moments, as [start, end) in ms,
+// in the order they come.
+function breakWindows(scheds,fromMs,toMs){
+  const out=[];
+  if(!(scheds||[]).length||!(toMs>=fromMs))return out;
+  const day=new Date(fromMs);day.setHours(0,0,0,0);day.setDate(day.getDate()-1);
+  for(let n=0;n<40&&day.getTime()<=toMs;n++,day.setDate(day.getDate()+1)){
+    const dk=`${day.getFullYear()}-${String(day.getMonth()+1).padStart(2,"0")}-${String(day.getDate()).padStart(2,"0")}`;
+    const dow=day.getDay();
+    scheds.forEach(s=>{
+      const a=hhmmMin(s.start),b=hhmmMin(s.end);
+      if(a==null||b==null||a===b||!breakDaysOf(s).includes(dow))return;
+      const st=new Date(day);st.setHours(0,a,0,0);
+      const en=new Date(day);en.setHours(0,b<a?b+1440:b,0,0);
+      if(en.getTime()<=fromMs||st.getTime()>toMs)return;
+      out.push({key:`${s.id}@${dk}`,start:st.getTime(),end:en.getTime(),name:s.name||""});
+    });
+  }
+  return out.sort((x,y)=>x.start-y.start);
+}
+const atMs=v=>{const t=Date.parse(v);return isFinite(t)?t:NaN};
+// Was the clock of this job stopped at `t` — on a break, or on HOLD?
+const pausedAt=(rec,t)=>(!!rec.paused&&atMs(rec.pauseStart)<=t)||(rec.pauseLog||[]).some(p=>p&&atMs(p.start)<=t&&atMs(p.end)>t);
+// The first time after `t` the clock was stopped by someone.
+const stopAfter=(rec,t)=>{
+  let m=Infinity;
+  (rec.pauseLog||[]).forEach(p=>{const s=atMs(p&&p.start);if(s>t&&s<m)m=s});
+  if(rec.paused){const s=atMs(rec.pauseStart);if(s>t&&s<m)m=s}
+  return m;
+};
+// One open job — a work log or a משימה, they keep their clock the same way — with
+// the given breaks applied as of `now`. Pure; hands back the very same object
+// when there is nothing to do, so the caller can tell.
+// `keep`: the worker went on to something else during the break, so this job
+// waits for them at its end, as it would after a break taken by hand — two
+// clocks running at once for one person is not a state the screen expects.
+function applyBreaks(rec,wins,now,keep){
+  if(!rec||rec.completed||rec.active===false||!rec.startTime||isOnHold(rec))return rec;
+  const t0=atMs(rec.startTime);if(!isFinite(t0))return rec;
+  const iso=ms=>new Date(ms).toISOString();
+  let r=rec;
+  for(const win of wins||[]){
+    if(win.start>now)break;
+    if(win.start<=t0)continue;
+    const pl=r.pauseLog||[];
+    const mine=pl.find(p=>p&&p.auto===win.key);
+    if(mine){
+      // Written already. Over now, and still the pause holding the clock: back to work.
+      if(!keep&&now>=win.end&&r.paused&&!mine.end&&pl[pl.length-1]===mine){
+        r={...r,paused:false,pauseStart:null,
+          totalPauseMin:Number(r.totalPauseMin||0)+Math.max(0,Math.round((win.end-atMs(mine.start))/60000)),
+          pauseLog:pl.map(p=>p===mine?{...p,end:iso(win.end)}:p)};
+      }
+      continue;
+    }
+    if(pausedAt(r,win.start))continue;
+    const stop=stopAfter(r,win.start);
+    if(now<win.end&&stop===Infinity){
+      r={...r,paused:true,pauseStart:iso(win.start),
+        pauseLog:[...pl,{start:iso(win.start),auto:win.key,until:iso(win.end),name:win.name}]};
+      continue;
+    }
+    // Caught up after the fact: the break ran until it ended, or until the job
+    // was stopped some other way, whichever came first.
+    const end=Math.min(win.end,stop,now);
+    if(!(end>win.start))continue;
+    r={...r,totalPauseMin:Number(r.totalPauseMin||0)+Math.round((end-win.start)/60000),
+      pauseLog:[...pl,{start:iso(win.start),end:iso(end),auto:win.key,until:iso(win.end),name:win.name}]
+        .sort((a,b)=>(atMs(a&&a.start)||0)-(atMs(b&&b.start)||0))};
+  }
+  return r;
+}
+// The scheduled break holding this job's clock right now, if one is.
+const autoBreakOf=rec=>{
+  if(!rec||!rec.paused)return null;
+  const pl=rec.pauseLog||[],p=pl[pl.length-1];
+  return p&&p.auto&&!p.end?p:null;
+};
 // ── מחיר ליחידה ───────────────────────────────────────────────────────────
 // Money is read through here rather than off the order, so one unreadable row
 // cannot decide a headline figure. A price above this ceiling is not a price —
@@ -1936,23 +2190,28 @@ const fmtSigned=m=>(m==null||isNaN(m))?"—":(m>0?"+":m<0?"−":"")+fmtMinP(Math
 function timeSamples(workLogs,orders,stages,stageBlocks,pnStdIdx){
   const oMap=new Map((orders||[]).map(o=>[o.id,o]));
   const sMap=new Map((stages||[]).map(s=>[s.id,s]));
+  // A fix after inspection is more time on a stage the unit already passed, so it
+  // lands on that stage's sample rather than standing as one of its own.
+  const fixes=reworkMinutes(workLogs);
   const out=[];
   (workLogs||[]).forEach(w=>{
     if(!w.completed)return;
     // A unit handed on from HOLD is measured once, whole: its segments are skipped
-    // and the log that signed it carries the minutes the others put in.
-    if(isHoldSegment(w))return;
+    // and the log that signed it carries the minutes the others put in. A failed
+    // inspection is measured by the one that passes the unit.
+    if(isTimeOnly(w))return;
     const min=Number(w.durationMin||0)+holdCarryMin(w);
     if(!(min>0))return;                       // sign-offs and zero-length logs carry no timing information
     const o=oMap.get(w.orderId),st=sMap.get(w.stageId);
     if(!o||!st)return;
     const units=w.bulk&&Number(w.bulkCount)>1?Number(w.bulkCount):1;
+    const fix=w.serialId?(fixes.get(logKey(w.serialId,w.stageId))||0):0;
     const pn=(o.pn||"").trim()||o.woNumber||"—";
     out.push({
       pn,orderId:o.id,projectId:o.projectId||"",
       stageId:st.id,stageName:st.name,stageColor:st.color,stageOrder:Number(st.order||0),
       userId:w.userId||"",userName:w.userName||"—",
-      min:min/units,sale:stageMinutesFor(o,st,stageBlocks),
+      min:min/units+fix,fix,sale:stageMinutesFor(o,st,stageBlocks),
       std:stdStageMin(pnStdIdx?.get(pnKey(pn)),st.id),
       date:(w.endTime||w.startTime||"").slice(0,10)
     });
@@ -3246,6 +3505,7 @@ function Dashboard({orders,projects,stages,users,workLogs,departments,customTask
 
   // Helper: is serial done
   const doneIdx=useDoneIndex(workLogs);
+  const reworkIdx=useReworkIndex(workLogs);
   const qtyIdx=useQtyIndex(workLogs);
   const isSerDone=(o,s)=>{const st=o.stageIds||[];return st.length>0&&st.every(sid=>doneIdx.has(logKey(s.id,sid)))};
 
@@ -3377,7 +3637,7 @@ function Dashboard({orders,projects,stages,users,workLogs,departments,customTask
     const totalMin=logs.reduce((s,w)=>s+w.durationMin,0);
     const cost=totalMin*(Number(u.hourlyRate||0)/60);
     // Revenue: sum stage prices for each completed log
-    const rev=logs.reduce((s,w)=>{if(isHoldSegment(w))return s;const st=stages.find(s2=>s2.id===w.stageId);return s+Number(st?.price||0)},0);
+    const rev=logs.reduce((s,w)=>{if(isTimeOnly(w))return s;const st=stages.find(s2=>s2.id===w.stageId);return s+Number(st?.price||0)},0);
     // Units: count serials where this worker completed ALL stages assigned to them
     const workerStageAccess=u.stageAccess==="all"?stages.map(s2=>s2.id):(Array.isArray(u.stageAccess)?u.stageAccess:[]);
     const serialsDone=new Set();
@@ -3427,12 +3687,14 @@ function Dashboard({orders,projects,stages,users,workLogs,departments,customTask
     return{label:st.name,value:logs.length?tot/logs.length:0,color:st.color,sub:`${logs.length} פעולות`};
   }).filter(d=>d.value>0).sort((a,b)=>b.value-a.value);
 
-  // WIP: where unfinished units are currently waiting (their next stage)
+  // WIP: where unfinished units are currently waiting (their next stage — or the
+  // stage an inspection sent them back to)
   const wipByStage={};
   fOrders.forEach(o=>{
     const ost=orderRoute(o,stages);
     (o.serials||[]).forEach(sr=>{
-      const next=ost.find(st=>!doneIdx.has(logKey(sr.id,st.id)));
+      const rw=reworkIdx.get(sr.id);
+      const next=(rw&&ost.find(st=>st.id===rw.toStageId))||ost.find(st=>!doneIdx.has(logKey(sr.id,st.id)));
       if(next)wipByStage[next.id]=(wipByStage[next.id]||0)+1;
     });
   });
@@ -4124,6 +4386,9 @@ function SerialsManager({order,stages,onUpdate,workLogs,onSignOff}){
     });
     return{done,active};
   },[workLogs]);
+  // A unit an inspection sent back: its stage is still signed, the unit is waiting
+  // for a fix there.
+  const reworkIdx=useReworkIndex(workLogs);
   const getStageStatus=(serialId,stageId)=>{
     const k=logKey(serialId,stageId);
     const log=cellLogs.done.get(k);
@@ -4202,11 +4467,16 @@ function SerialsManager({order,stages,onUpdate,workLogs,onSignOff}){
                     <td style={{fontWeight:700,fontSize:12,color:"#7eb8ff"}}>{s.sn}</td>
                     {oStages.map(st=>{
                       const status=getStageStatus(s.id,st.id);
+                      // Signed, and back for a fix after inspection: being fixed, or waiting for it.
+                      const rw=reworkIdx.get(s.id),fixing=status.done&&cellLogs.active.get(logKey(s.id,st.id));
+                      if(fixing)return<td key={st.id} style={{textAlign:"center"}}><span title="תיקון לאחר ביקורת — בעבודה" style={{animation:"pulse 1.5s infinite",color:"#e11d48",fontSize:13}}>🔧 {fixing.userName}</span></td>;
+                      if(status.done&&rw&&rw.toStageId===st.id)
+                        return<td key={st.id} style={{textAlign:"center"}}><span title={`נחתם ע״י ${status.user}. הוחזר לתיקון${rw.byName?` ע״י ${rw.byName}`:""}${rw.note?`: ${rw.note}`:""}`} style={{color:"#e11d48",fontSize:13,fontWeight:700}}>✅🔧</span></td>;
                       if(status.done)return<td key={st.id} style={{textAlign:"center"}}><span title={`${status.user} — ${fmtTime(status.duration)}`} style={{color:"#10b981",fontSize:16}}>✅</span></td>;
                       if(status.active)return<td key={st.id} style={{textAlign:"center"}}><span style={{animation:"pulse 1.5s infinite",color:"#f59e0b",fontSize:13}}>🔄 {status.user}</span></td>;
                       return<td key={st.id} style={{textAlign:"center"}}>{isAdmin?<button onClick={()=>adminSignOff(s.id,st.id)} style={{background:"none",border:"1px dashed var(--c-border2)",borderRadius:6,padding:"2px 8px",fontSize:11,color:"var(--c-dim)",cursor:"pointer",fontFamily:"inherit"}} title="חתום כמנהל">✍️</button>:<span style={{color:"var(--c-dim)"}}>—</span>}</td>;
                     })}
-                    <td style={{textAlign:"center"}}>{allDone?<span style={{color:"#10b981",fontWeight:700,fontSize:12}}>📦 סופק</span>:anyActive?<span style={{color:"#f59e0b",fontSize:12}}>🔄 בתהליך</span>:<span style={{color:"var(--c-dim)",fontSize:12}}>ממתין</span>}</td>
+                    <td style={{textAlign:"center"}}>{reworkIdx.has(s.id)?<span title={reworkIdx.get(s.id).note||""} style={{color:"#e11d48",fontWeight:700,fontSize:12}}>🔧 בתיקון · {stages.find(x=>x.id===reworkIdx.get(s.id).toStageId)?.name||""}</span>:allDone?<span style={{color:"#10b981",fontWeight:700,fontSize:12}}>📦 סופק</span>:anyActive?<span style={{color:"#f59e0b",fontSize:12}}>🔄 בתהליך</span>:<span style={{color:"var(--c-dim)",fontSize:12}}>ממתין</span>}</td>
                     {canEdit&&<td><IBtn onClick={()=>removeSn(s.id)}>🗑️</IBtn></td>}
                   </tr>
                 );
@@ -4389,11 +4659,15 @@ function OrderDetail({order,projects,stages,stageBlocks,departments=[],onClose,o
   const stdPerUnit=stdTotalFor(pnStdIndex(pnStandards),order.pn,order.stageIds||[]);
   const actPerUnit=useMemo(()=>{
     const byStage=new Map();
-    (workLogs||[]).forEach(w=>{
-      if(w.orderId!==order.id||!w.completed)return;
+    // A fix after inspection adds to the unit's time on its stage (see timeSamples).
+    const mine=(workLogs||[]).filter(w=>w.orderId===order.id);
+    const fixes=reworkMinutes(mine);
+    mine.forEach(w=>{
+      if(!w.completed||reworkOf(w))return;
       const m=Number(w.durationMin||0);if(!(m>0))return;
       const units=w.bulk&&Number(w.bulkCount)>1?Number(w.bulkCount):1;
-      const a=byStage.get(w.stageId)||{sum:0,n:0};a.sum+=m/units;a.n++;byStage.set(w.stageId,a);
+      const fix=w.serialId?(fixes.get(logKey(w.serialId,w.stageId))||0):0;
+      const a=byStage.get(w.stageId)||{sum:0,n:0};a.sum+=m/units+fix;a.n++;byStage.set(w.stageId,a);
     });
     let t=0;byStage.forEach(a=>{t+=a.sum/a.n});
     return t;
@@ -5070,7 +5344,7 @@ const PlanTag=({small,label="תוכנית העבודה שלי"})=>(
 // and "queue" is everything in the plant waiting on their stages. They used to be
 // one long page, with the assignment buried above a list of every פק"ע. Leads and
 // department managers keep both on one tab ("all"), next to their other tabs.
-function MyWork({orders,stages,workLogs,onStartWork,onEndWork,onPauseWork,onResumeWork,onHoldWork,onPickupHold,onDeleteLog,customTasks,onAddTask,onStartTask,onEndTask,onPauseTask,onResumeTask,onDeleteTask,onMarkPartialTask,onMarkDoneTask,users,dailyPlans,onMarkPlanDone,view="all",onGoTab}){
+function MyWork({orders,stages,workLogs,onStartWork,onEndWork,onPauseWork,onResumeWork,onHoldWork,onPickupHold,onReturnRework,onDeleteLog,customTasks,onAddTask,onStartTask,onEndTask,onPauseTask,onResumeTask,onDeleteTask,onMarkPartialTask,onMarkDoneTask,users,dailyPlans,onMarkPlanDone,view="all",onGoTab}){
   const showMine=view!=="queue",showQueue=view!=="mine";
   const {toast}=useToast();
   const {currentUser}=useAuth();
@@ -5128,6 +5402,9 @@ function MyWork({orders,stages,workLogs,onStartWork,onEndWork,onPauseWork,onResu
   const [taskDesc,setTaskDesc]=useState("");
 
   const {done:doneIdx,running:runIdx,busy:busyIdx}=useLogIndex(workLogs);
+  // Units an inspection sent back for a fix: they wait at that stage, not at the
+  // inspection — see buildReworkIndex.
+  const reworkIdx=useReworkIndex(workLogs);
   const myQtyIdx=useQtyIndex(workLogs);
   const myQtyRunIdx=useQtyRunIndex(workLogs);
   // A "נתונים בלבד" פק"ע is not work anybody picks up — see isDataOnly.
@@ -5299,8 +5576,9 @@ function MyWork({orders,stages,workLogs,onStartWork,onEndWork,onPauseWork,onResu
     const groupId=uid();
     bulkSelected.forEach(sId=>{
       const serial=(order?.serials||[]).find(s=>s.id===sId);
-      // Find THIS serial's correct next stage
-      const nextSt=allStagesOrdered.find(st=>!doneIdx.has(logKey(sId,st.id)));
+      // Find THIS serial's correct next stage — or the stage it was sent back to
+      const rw=reworkIdx.get(sId);
+      const nextSt=(rw&&allStagesOrdered.find(st=>st.id===rw.toStageId))||allStagesOrdered.find(st=>!doneIdx.has(logKey(sId,st.id)));
       if(!nextSt||!myAccess.includes(nextSt.id))return;
       onStartWork({id:uid(),userId:currentUser.id,userName:currentUser.name,serialId:sId,stageId:nextSt.id,orderId:oId,serialSn:serial?.sn||"",startTime:nowISO(),endTime:null,completed:false,durationMin:0,paused:false,pauseStart:null,totalPauseMin:0,pauseLog:[],bulk:true,bulkGroupId:groupId,bulkCount:bulkSelected.length});
     });
@@ -5378,6 +5656,24 @@ function MyWork({orders,stages,workLogs,onStartWork,onEndWork,onPauseWork,onResu
     row.logs.forEach(w=>onResumeWork(w.id));
   };
 
+  // ↩️ back for a fix — from the inspection running now, or straight from the
+  // list. Only units of the inspection the job is on, and only ones with a serial.
+  const [rwDlg,setRwDlg]=useState(null);
+  const activeStage=myActiveLog?stageMap.get(myActiveLog.stageId):null;
+  const inspectLogs=(onReturnRework&&activeStage&&activeStage.inspection)
+    ?cancelGroup.filter(w=>w.serialId&&w.stageId===myActiveLog.stageId):[];
+  const openReturn=(order,stage,units)=>{if(order&&stage&&units.length)setRwDlg({order,stage,units})};
+  const sendBack=(units,toStageId,note)=>{
+    if(!rwDlg||!onReturnRework)return;
+    const ok=onReturnRework(units,{orderId:rwDlg.order.id,fromStageId:rwDlg.stage.id,toStageId,note});
+    const what=units.length===1?units[0].serialSn||"היחידה":`${units.length} יחידות`;
+    if(ok)toast(`↩️ ${what} — הוחזר לתיקון ב${stageMap.get(toStageId)?.name||"שלב קודם"}. אחרי התיקון היחידה תחזור לביקורת`,"success",6000);
+    else toast("היחידה כבר לא בביקורת — אולי מישהו אחר כבר טיפל בה","warning");
+    setRwDlg(null);
+  };
+  // A scheduled break holding the clock right now — see applyBreaks.
+  const activeBreak=autoBreakOf(myActiveLog);
+
   const togglePause=()=>{
     if(!myActiveLog)return;
     // Pause/resume ALL logs in bulk group
@@ -5405,17 +5701,20 @@ function MyWork({orders,stages,workLogs,onStartWork,onEndWork,onPauseWork,onResu
     // orderRoute() — same result, without a fresh Map per פק"ע.
     const allStagesOrdered=(o.stageIds||[]).map(id=>stageMap.get(id)).filter(Boolean);
     const units=(o.serials||[]).map(s=>{
-      // The unit's true next stage (stages must run in order)
-      const next=allStagesOrdered.find(st=>!doneIdx.has(logKey(s.id,st.id)));
+      // The unit's true next stage (stages must run in order) — unless an
+      // inspection sent it back, in which case it waits for its fix there.
+      const rw=reworkIdx.get(s.id);
+      const back=rw&&allStagesOrdered.find(st=>st.id===rw.toStageId);
+      const next=back||allStagesOrdered.find(st=>!doneIdx.has(logKey(s.id,st.id)));
       if(!next||!myAccessSet.has(next.id))return null;                                    // done, or not mine to do
       if(runIdx.has(logKey(s.id,next.id)))return null;                                    // already running (or on HOLD — see `held`)
-      return{...s,next,planned:isPlanned(o.id,next.id,s.id)};
-    }).filter(Boolean).sort((a,b)=>(b.planned?1:0)-(a.planned?1:0));
+      return{...s,next,planned:isPlanned(o.id,next.id,s.id),rework:back?rw:null};
+    }).filter(Boolean).sort((a,b)=>(b.rework?2:0)+(b.planned?1:0)-(a.rework?2:0)-(a.planned?1:0));
     // id carried on the queue itself so the virtual list keys rows by פק"ע rather
     // than by position — the list re-sorts as plan units are worked off.
     return{id:o.id,kind:"serial",order:o,units,held:heldByOrder.get(o.id)||[],planned:units.filter(u=>u.planned).length};
   }).filter(q=>q&&(q.units.length>0||q.held.length>0)),
-    [showQueue,accessible,stageMap,doneIdx,runIdx,myAccessSet,myPlans,heldByOrder]);
+    [showQueue,accessible,stageMap,doneIdx,runIdx,reworkIdx,myAccessSet,myPlans,heldByOrder]);
   // ── פק"ע שאינן מנוהלות סיריאלית ───────────────────────────────────────
   // These never reach the queue above and never could: that queue is built from
   // units, and a פק"ע with no serial numbers has none. It is still work, and it is
@@ -5547,7 +5846,7 @@ function MyWork({orders,stages,workLogs,onStartWork,onEndWork,onPauseWork,onResu
     <Card style={{marginBottom:14,border:`2px solid ${myActiveLog.paused?"#8b95a8":"#f59e0b"}`,background:myActiveLog.paused?"var(--c-card)":"linear-gradient(135deg,var(--c-card),#f59e0b14)"}}>
       <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",flexWrap:"wrap",gap:10}}>
         <div>
-          <div style={{fontSize:12,color:myActiveLog.paused?"#8b95a8":"#f59e0b",fontWeight:700,marginBottom:4}}>{myActiveLog.paused?"⏸️ בהפסקה":"⏱️ עובד כרגע:"}{myActiveLogs.length>1&&<span style={{marginRight:6,fontSize:11,background:"#3b82f622",color:"#60a5fa",padding:"2px 8px",borderRadius:12}}>×{myActiveLogs.length} יחידות</span>}</div>
+          <div style={{fontSize:12,color:myActiveLog.paused?"#8b95a8":"#f59e0b",fontWeight:700,marginBottom:4}}>{activeBreak?`☕ ${activeBreak.name||"הפסקה קבועה"}`:myActiveLog.paused?"⏸️ בהפסקה":"⏱️ עובד כרגע:"}{myActiveLogs.length>1&&<span style={{marginRight:6,fontSize:11,background:"#3b82f622",color:"#60a5fa",padding:"2px 8px",borderRadius:12}}>×{myActiveLogs.length} יחידות</span>}</div>
           <div style={{fontWeight:700,fontSize:16}}>
             {isQtyRun(myActiveLog)
               ?<>{myActiveLog.bulkCount} יחידות · {orders.find(o=>o.id===myActiveLog.orderId)?.woNumber||'פק"ע'}</>
@@ -5566,6 +5865,12 @@ function MyWork({orders,stages,workLogs,onStartWork,onEndWork,onPauseWork,onResu
           </div>}
           {isStaleWork(myActiveLog.startTime,myActiveLog.totalPauseMin)&&<div style={{fontSize:12,color:"#ef4444",fontWeight:700,marginTop:4}}>⚠️ העבודה פתוחה מעל 12 שעות — אם סיימת, לחץ "סיימתי"</div>}
           {myActiveLog.paused&&<div style={{fontSize:22,fontWeight:800,color:"#8b95a8",marginTop:6}}>⏸️ מושהה</div>}
+          {activeBreak&&<div style={{fontSize:12,color:"#8b95a8",marginTop:2}}>הפסקה קבועה שהמנהל הגדיר{activeBreak.until?` — העבודה תחזור לבד ב-${fmtClock(activeBreak.until)}`:""}. צריך לחזור קודם? לחץ ▶️ חזור לעבודה.</div>}
+          {isReworkFix(myActiveLog)&&(()=>{const r=reworkOf(myActiveLog);return(
+            <div style={{fontSize:12,color:"#e11d48",background:"#e11d4810",border:"1px solid #e11d4844",borderRadius:8,padding:"6px 9px",marginTop:7,lineHeight:1.5,maxWidth:420}}>
+              🔧 <b>תיקון לאחר ביקורת</b>{r.fromStageId&&stageMap.get(r.fromStageId)?` — הוחזר מ${stageMap.get(r.fromStageId).name}`:""}{r.byName?` ע״י ${r.byName}`:""}{r.note?<>: <b>{r.note}</b></>:""}
+              <div style={{color:"var(--c-dim)",fontSize:11}}>השלב לא נחתם שוב — הזמן של התיקון נוסף לזמן העבודה על השלב, והיחידה חוזרת לביקורת.</div>
+            </div>)})()}
           {/* A batch does not always come out whole. What gets signed is what was
               really finished — the started count unless it is corrected here. */}
           {isQtyRun(myActiveLog)&&(
@@ -5585,6 +5890,9 @@ function MyWork({orders,stages,workLogs,onStartWork,onEndWork,onPauseWork,onResu
           <Btn color="#10b981" onClick={endWork} style={{fontSize:16,padding:"12px 24px"}}>✅ סיימתי</Btn>
           {onHoldWork&&<Btn color="#f97316" small onClick={holdWork} title="עצירת העבודה באמצע השלב (סוף יום, עבודה דחופה אחרת). הזמן נשמר, ואפשר להמשיך אחר כך — או שעובד אחר ימשיך אותה מתור העבודה, וכל אחד יקבל את הזמן שעבד"
             style={{background:"transparent",border:"1px solid #f9731688",color:"#f97316"}}>🟧 HOLD — עצור והמשך אחר כך</Btn>}
+          {inspectLogs.length>0&&<Btn color="#e11d48" small onClick={()=>openReturn(orders.find(o=>o.id===myActiveLog.orderId),stageMap.get(myActiveLog.stageId),inspectLogs.map(w=>({serialId:w.serialId,serialSn:w.serialSn,logId:w.id})))}
+            title="נמצאה בעיה בביקורת? בחר לאיזה שלב להחזיר את היחידה. השלב לא ייחתם שוב — זמן התיקון יתווסף לזמן של השלב, והיחידה תחזור לביקורת"
+            style={{background:"transparent",border:"1px solid #e11d4888",color:"#e11d48"}}>↩️ נמצאה בעיה — החזר לתיקון</Btn>}
           {canCancelStart&&<button onClick={cancelStart} title="התחלת בטעות? ביטול מחזיר את העבודה לרשימה — בלי דיווח ובלי זמן"
             style={{background:"none",border:"none",color:"#ef4444",fontSize:12,cursor:"pointer",fontFamily:"inherit"}}>🗑️ בטל התחלה (התחלתי בטעות)</button>}
         </div>
@@ -5625,7 +5933,7 @@ function MyWork({orders,stages,workLogs,onStartWork,onEndWork,onPauseWork,onResu
     <Card style={{marginBottom:14,border:`2px solid ${activeTask.paused?"#8b95a8":"#a78bfa"}`}}>
       <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",flexWrap:"wrap",gap:10}}>
         <div>
-          <div style={{fontSize:12,color:activeTask.paused?"#8b95a8":"#a78bfa",fontWeight:700,marginBottom:4}}>{activeTask.paused?"⏸️ משימה בהפסקה":"📌 משימה פעילה:"}</div>
+          <div style={{fontSize:12,color:activeTask.paused?"#8b95a8":"#a78bfa",fontWeight:700,marginBottom:4}}>{autoBreakOf(activeTask)?`☕ ${autoBreakOf(activeTask).name||"הפסקה קבועה"}${autoBreakOf(activeTask).until?` · חוזרים לבד ב-${fmtClock(autoBreakOf(activeTask).until)}`:""}`:activeTask.paused?"⏸️ משימה בהפסקה":"📌 משימה פעילה:"}</div>
           <div style={{fontWeight:700,fontSize:16}}>{activeTask.name}</div>
           {activeTask.description&&<div style={{fontSize:12,color:"var(--c-muted)"}}>{activeTask.description}</div>}
           {(activeTask.totalPauseMin>0||(activeTask.pauseLog||[]).length>0)&&<div style={{fontSize:11,color:"#8b95a8",marginTop:2}}>הפסקות: {fmtTime(activeTask.totalPauseMin||0)} ({(activeTask.pauseLog||[]).length})</div>}
@@ -5889,8 +6197,16 @@ function MyWork({orders,stages,workLogs,onStartWork,onEndWork,onPauseWork,onResu
                 <span style={{fontWeight:600,fontSize:13}}>{s.sn}</span>
                 <span style={{fontSize:11,color:nextStage.color}}>← {nextStage.name}</span>
                 {s.planned&&<PlanTag small/>}
+                {s.rework&&<span title={`הוחזר מ${stageMap.get(s.rework.fromStageId)?.name||"ביקורת"}${s.rework.byName?` ע״י ${s.rework.byName}`:""}. השלב לא נחתם שוב — זמן התיקון נוסף לזמן השלב`}
+                  style={{fontSize:10.5,background:"#e11d481a",color:"#e11d48",border:"1px solid #e11d4855",borderRadius:10,padding:"1px 8px",fontWeight:700,whiteSpace:"nowrap"}}>🔧 תיקון לאחר ביקורת</span>}
               </div>
-              {!bulkMode&&<Btn color={nextStage.color} small onClick={()=>startWork(s.id,nextStage.id,o.id)} disabled={busyNow}>▶️ התחל</Btn>}
+              {!bulkMode&&<div style={{display:"flex",gap:6,alignItems:"center"}}>
+                {nextStage.inspection&&!s.rework&&onReturnRework&&<button onClick={()=>openReturn(o,nextStage,[{serialId:s.id,serialSn:s.sn}])}
+                  title="נמצאה בעיה? החזר את היחידה לשלב קודם לתיקון, בלי להתחיל טיימר"
+                  style={{background:"none",border:"1px solid #e11d4866",borderRadius:7,color:"#e11d48",fontSize:12,padding:"4px 8px",cursor:"pointer",fontFamily:"inherit"}}>↩️ החזר</button>}
+                <Btn color={nextStage.color} small onClick={()=>startWork(s.id,nextStage.id,o.id)} disabled={busyNow}>{s.rework?"▶️ התחל תיקון":"▶️ התחל"}</Btn>
+              </div>}
+              {s.rework&&s.rework.note&&<div style={{flexBasis:"100%",fontSize:11.5,color:"#e11d48"}}>📝 {s.rework.note}</div>}
             </div>
           );
         })}
@@ -6033,7 +6349,61 @@ function MyWork({orders,stages,workLogs,onStartWork,onEndWork,onPauseWork,onResu
       </>}
     </div>
       )}
+      {rwDlg&&<ReworkReturnModal order={rwDlg.order} stage={rwDlg.stage} units={rwDlg.units} stages={stages}
+        onClose={()=>setRwDlg(null)} onConfirm={sendBack}/>}
     </div>
+  );
+}
+
+// ↩️ What the inspector fills in when a unit fails: which units (when the
+// inspection ran on a group), which earlier stage they go back to — the one just
+// before by default — and what was found. The stage that gets them is not signed
+// again; the fix is timed on it and the unit comes back here.
+function ReworkReturnModal({order,stage,units,stages,onClose,onConfirm}){
+  const targets=useMemo(()=>reworkTargets(orderRoute(order,stages),stage.id),[order,stages,stage]);
+  const [picked,setPicked]=useState(()=>units.length===1?[units[0].serialId]:[]);
+  const [to,setTo]=useState(targets[0]?.id||"");
+  const [note,setNote]=useState("");
+  const sel=units.filter(u=>picked.includes(u.serialId));
+  const ok=sel.length>0&&!!to;
+  return(
+    <Modal onClose={onClose}>
+      <h3 style={{margin:"0 0 4px",color:"#e11d48"}}>↩️ החזרה לתיקון</h3>
+      <div style={{fontSize:12.5,color:"var(--c-muted)",marginBottom:12,lineHeight:1.6}}>
+        פק"ע <b style={{color:"#60a5fa"}}>{order.woNumber}</b> · ביקורת: <b style={{color:stage.color}}>{stage.name}</b>
+        <div style={{fontSize:11.5,color:"var(--c-dim)"}}>השלב שתבחר לא ייחתם שוב. הזמן של התיקון יתווסף לזמן העבודה על אותו שלב, ואחרי התיקון היחידה תחזור לביקורת.</div>
+      </div>
+      {units.length>1&&(
+        <div style={{marginBottom:12}}>
+          <div style={{fontSize:12,fontWeight:700,marginBottom:6}}>אילו יחידות נכשלו? <span style={{fontWeight:400,color:"var(--c-dim)"}}>(השאר ממשיכות בביקורת)</span></div>
+          <div style={{display:"flex",flexWrap:"wrap",gap:6}}>
+            {units.map(u=>{const on=picked.includes(u.serialId);return(
+              <button key={u.serialId} onClick={()=>setPicked(p=>on?p.filter(x=>x!==u.serialId):[...p,u.serialId])}
+                style={{background:on?"#e11d4822":"var(--c-deep)",border:`1px solid ${on?"#e11d48":"var(--c-border)"}`,color:on?"#e11d48":"var(--c-text)",borderRadius:8,padding:"5px 10px",fontSize:12.5,cursor:"pointer",fontFamily:"inherit",fontWeight:on?700:400}}>{on?"✓ ":""}{u.serialSn||"—"}</button>);})}
+          </div>
+        </div>
+      )}
+      {units.length===1&&<div style={{fontSize:13,marginBottom:12}}>יחידה: <b>{units[0].serialSn||"—"}</b></div>}
+      <div style={{fontSize:12,fontWeight:700,marginBottom:6}}>לאיזה שלב להחזיר?</div>
+      {targets.length===0
+        ?<div style={{fontSize:12.5,color:"#f59e0b",marginBottom:12}}>אין שלב לפני הביקורת במסלול של הפק"ע — אין לאן להחזיר.</div>
+        :<div style={{display:"flex",flexDirection:"column",gap:5,marginBottom:12,maxHeight:220,overflowY:"auto"}}>
+          {targets.map((st,i)=>(
+            <label key={st.id} style={{display:"flex",alignItems:"center",gap:8,cursor:"pointer",padding:"6px 9px",borderRadius:8,border:`1px solid ${to===st.id?st.color:"var(--c-border)"}`,background:to===st.id?st.color+"14":"transparent"}}>
+              <input type="radio" name="rw-to" checked={to===st.id} onChange={()=>setTo(st.id)}/>
+              <span style={{fontWeight:600,color:st.color}}>{st.name}</span>
+              {i===0&&<span style={{fontSize:10.5,color:"var(--c-dim)"}}>השלב הקודם</span>}
+            </label>
+          ))}
+        </div>}
+      <div style={{fontSize:12,fontWeight:700,marginBottom:6}}>מה נמצא? <span style={{fontWeight:400,color:"var(--c-dim)"}}>(יוצג לעובד שמתקן)</span></div>
+      <textarea value={note} onChange={e=>setNote(e.target.value)} rows={2} placeholder="לדוגמה: הלחמה קרה בפין 4"
+        style={{width:"100%",boxSizing:"border-box",padding:"7px 9px",fontSize:13,fontFamily:"inherit",marginBottom:14}}/>
+      <div style={{display:"flex",gap:8,justifyContent:"flex-end",flexWrap:"wrap"}}>
+        <Btn onClick={onClose}>ביטול</Btn>
+        <Btn color="#e11d48" disabled={!ok} onClick={()=>onConfirm(sel,to,note.trim())}>↩️ החזר {sel.length>1?`${sel.length} יחידות `:""}לתיקון</Btn>
+      </div>
+    </Modal>
   );
 }
 
@@ -6051,6 +6421,163 @@ function ActiveTimer({startTime,pauseMin=0,carryMin=0}){
 // Everything on HOLD among the people this manager oversees, one row per unit
 // (a group started together is one row), oldest first. The manager can hand any
 // row to another worker; see handleTransferHold for how the minutes are split.
+// The badge a return from inspection, or a fix, wears wherever a log is listed.
+function ReworkTag({log,stages}){
+  const r=reworkOf(log);if(!r)return null;
+  const nm=id=>(stages||[]).find(s=>s.id===id)?.name||"";
+  const title=r.req
+    ?`הוחזר לתיקון ב${nm(r.toStageId)||"שלב קודם"}${r.note?` — ${r.note}`:""}`
+    :`תיקון אחרי ${nm(r.fromStageId)||"ביקורת"}${r.byName?` (${r.byName})`:""}${r.note?` — ${r.note}`:""}. לא נחתם שוב — הזמן נוסף לזמן השלב`;
+  return<span title={title} style={{fontSize:10,color:"#e11d48",marginInlineStart:5,whiteSpace:"nowrap"}}>{r.req?`↩️ הוחזר ל${nm(r.toStageId)||"תיקון"}`:"🔧 תיקון לאחר ביקורת"}</span>;
+}
+// ── ☕ הפסקות קבועות — where a manager sets them ──────────────────────────
+// For the whole department, or for chosen people. A department manager sets them
+// for their department, the system admin for any; a team lead for people on their
+// own team, and may change only the ones they made. The clock that runs them is
+// in App (see applyBreaks).
+const DAY_LETTERS=["א","ב","ג","ד","ה","ו","ש"];
+const breakDaysLabel=days=>{
+  const d=[...new Set((days||[]).map(Number))].sort((a,b)=>a-b);
+  if(d.length===7)return"כל יום";
+  // A run of consecutive days reads as a range: א–ה.
+  if(d.length>2&&d.every((x,i)=>i===0||x===d[i-1]+1))return`${DAY_LETTERS[d[0]]}–${DAY_LETTERS[d[d.length-1]]}`;
+  return d.map(x=>DAY_LETTERS[x]).join(" ");
+};
+function BreakSchedulesBoard({departments,users,onSave}){
+  const {currentUser}=useAuth();
+  const {toast}=useToast();
+  const role=currentUser.role;
+  const isLeadOnly=role==="team_lead";
+  // The departments this person may set breaks in.
+  const myDepts=useMemo(()=>{
+    if(role==="admin")return departments||[];
+    if(role==="dept_manager"){const d=managerDept(currentUser,departments);return d?[d]:[]}
+    if(isLeadOnly){const id=userDeptId(currentUser,departments);return(departments||[]).filter(d=>d.id===id)}
+    return[];
+  },[role,departments,currentUser,isLeadOnly]);
+  const [deptId,setDeptId]=useState("");
+  const dept=myDepts.find(d=>d.id===deptId)||myDepts[0]||null;
+  const list=(dept&&dept.breakSchedules)||[];
+  // Who can be picked: the department's people — a team lead's own team only.
+  const people=useMemo(()=>{
+    if(!dept)return[];
+    const act=(users||[]).filter(u=>u.active!==false&&u.role!=="admin"&&u.role!=="viewer");
+    if(isLeadOnly)return act.filter(u=>u.id===currentUser.id||u.managerId===currentUser.id);
+    return act.filter(u=>userDeptId(u,departments)===dept.id);
+  },[dept,users,departments,isLeadOnly,currentUser]);
+  const nameOf=id=>(users||[]).find(u=>u.id===id)?.name||"—";
+  const mayEdit=s=>!isLeadOnly||s.by===currentUser.id;
+  const blank={id:"",name:"",start:"10:00",end:"10:15",days:BREAK_DAYS,whole:!isLeadOnly,userIds:[]};
+  const [form,setForm]=useState(null);
+  const [q,setQ]=useState("");
+  const [,setTick]=useState(0);
+  useEffect(()=>{const t=setInterval(()=>setTick(x=>x+1),30000);return()=>clearInterval(t)},[]);
+  if(!myDepts.length)return null;
+  const now=Date.now();
+  const liveNow=s=>s.active!==false&&breakWindows([s],now-86400000,now).some(w=>w.start<=now&&now<w.end);
+  const save=(next,what)=>{onSave(dept.id,next,what)};
+  const submit=()=>{
+    const f=form;
+    const a=hhmmMin(f.start),b=hhmmMin(f.end);
+    if(a==null||b==null){toast("יש להזין שעת התחלה ושעת סיום","warning");return}
+    if(a===b){toast("שעת הסיום זהה לשעת ההתחלה","warning");return}
+    if(!f.days.length){toast("בחר לפחות יום אחד","warning");return}
+    const ids=f.whole?[]:f.userIds.filter(id=>people.some(p=>p.id===id)||(f.id&&list.find(s=>s.id===f.id)?.userIds?.includes(id)));
+    if(!f.whole&&!ids.length){toast("בחר לפחות עובד אחד — או ״כל המחלקה״","warning");return}
+    const rec={id:f.id||uid(),name:f.name.trim(),start:f.start,end:f.end,days:[...f.days].sort((x,y)=>x-y),userIds:ids,
+      active:f.id?(list.find(s=>s.id===f.id)?.active!==false):true,
+      by:f.by||currentUser.id,byName:f.byName||currentUser.name,at:nowISO()};
+    const next=f.id?list.map(s=>s.id===f.id?rec:s):[...list,rec];
+    save(next,`${rec.name||"הפסקה"} ${rec.start}–${rec.end}`);
+    toast(f.id?"ההפסקה עודכנה":"ההפסקה נשמרה — מעכשיו העבודה תעבור להפסקה ותחזור ממנה לבד","success",5000);
+    setForm(null);setQ("");
+  };
+  const toggle=s=>save(list.map(x=>x.id===s.id?{...x,active:x.active===false}:x),`${s.active===false?"הפעלת":"השבתת"} ${s.name||"הפסקה"} ${s.start}–${s.end}`);
+  const remove=s=>{if(!confirm(`למחוק את ההפסקה ${s.name||""} ${s.start}–${s.end}?`))return;save(list.filter(x=>x.id!==s.id),`מחיקת ${s.name||"הפסקה"} ${s.start}–${s.end}`)};
+  const shownPeople=people.filter(p=>!q.trim()||String(p.name||"").includes(q.trim()));
+  const chip=(on,c="#0ea5e9")=>({background:on?c+"22":"var(--c-deep)",border:`1px solid ${on?c:"var(--c-border)"}`,color:on?c:"var(--c-muted)",borderRadius:8,padding:"4px 9px",fontSize:12.5,cursor:"pointer",fontFamily:"inherit",fontWeight:on?700:400});
+  return(
+    <Card style={{marginBottom:14,border:"1px solid #0ea5e933"}}>
+      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",gap:8,flexWrap:"wrap",marginBottom:6}}>
+        <h3 style={{margin:0,fontSize:15,color:"#0ea5e9"}}>☕ הפסקות קבועות{dept&&myDepts.length===1?` · ${dept.name}`:""}</h3>
+        <div style={{display:"flex",gap:6,alignItems:"center",flexWrap:"wrap"}}>
+          {myDepts.length>1&&<select value={dept?.id||""} onChange={e=>{setDeptId(e.target.value);setForm(null)}} style={{padding:"6px 8px",fontSize:12.5}}>
+            {myDepts.map(d=><option key={d.id} value={d.id}>{d.name}{(d.breakSchedules||[]).length?` (${d.breakSchedules.length})`:""}</option>)}
+          </select>}
+          {!form&&<Btn color="#0ea5e9" small onClick={()=>setForm({...blank})}>+ הפסקה קבועה</Btn>}
+        </div>
+      </div>
+      <div style={{fontSize:11.5,color:"var(--c-dim)",marginBottom:10,lineHeight:1.6}}>
+        בשעות שמוגדרות כאן העבודה של העובדים עוברת להפסקה לבד, וחוזרת לעבודה לבד בסוף ההפסקה. מי שלא הוגדרה לו הפסקה קבועה ממשיך לסמן ⏸️ הפסקה בעצמו, כמו תמיד.
+      </div>
+      {form&&(
+        <div style={{background:"var(--c-deep)",borderRadius:10,padding:12,marginBottom:10,border:"1px solid #0ea5e944"}}>
+          <div style={{display:"flex",gap:10,flexWrap:"wrap",alignItems:"flex-end",marginBottom:10}}>
+            <Field label="שם (לא חובה)" value={form.name} onChange={v=>setForm(f=>({...f,name:v}))} placeholder="הפסקת בוקר" style={{minWidth:140,flex:"1 1 140px"}}/>
+            <Field label="משעה" type="time" value={form.start} onChange={v=>setForm(f=>({...f,start:v}))} style={{width:110}}/>
+            <Field label="עד שעה" type="time" value={form.end} onChange={v=>setForm(f=>({...f,end:v}))} style={{width:110}}/>
+          </div>
+          <div style={{fontSize:11,color:"var(--c-dim)",fontWeight:600,marginBottom:5}}>ימים</div>
+          <div style={{display:"flex",gap:5,flexWrap:"wrap",marginBottom:10}}>
+            {DAY_LETTERS.map((l,i)=>{const on=form.days.includes(i);return<button key={i} onClick={()=>setForm(f=>({...f,days:on?f.days.filter(x=>x!==i):[...f.days,i]}))} style={{...chip(on),minWidth:34}}>{l}</button>})}
+          </div>
+          <div style={{fontSize:11,color:"var(--c-dim)",fontWeight:600,marginBottom:5}}>למי</div>
+          <div style={{display:"flex",gap:6,flexWrap:"wrap",marginBottom:8}}>
+            {!isLeadOnly&&<button onClick={()=>setForm(f=>({...f,whole:true}))} style={chip(form.whole)}>🏢 כל המחלקה{dept?` (${people.length})`:""}</button>}
+            <button onClick={()=>setForm(f=>({...f,whole:false}))} style={chip(!form.whole)}>👥 עובדים נבחרים{!form.whole&&form.userIds.length?` (${form.userIds.length})`:""}</button>
+          </div>
+          {!form.whole&&(
+            <div style={{border:"1px solid var(--c-border)",borderRadius:8,padding:8,marginBottom:10}}>
+              <div style={{display:"flex",gap:8,alignItems:"center",flexWrap:"wrap",marginBottom:6}}>
+                <input value={q} onChange={e=>setQ(e.target.value)} placeholder="חיפוש עובד..." style={{padding:"5px 8px",fontSize:12,flex:"1 1 140px"}}/>
+                <button onClick={()=>setForm(f=>({...f,userIds:[...new Set([...f.userIds,...shownPeople.map(p=>p.id)])]}))} style={{...chip(false),padding:"3px 8px"}}>בחר הכל</button>
+                {form.userIds.length>0&&<button onClick={()=>setForm(f=>({...f,userIds:[]}))} style={{...chip(false),padding:"3px 8px"}}>נקה</button>}
+              </div>
+              <div style={{display:"flex",gap:5,flexWrap:"wrap",maxHeight:170,overflowY:"auto"}}>
+                {shownPeople.map(p=>{const on=form.userIds.includes(p.id);return(
+                  <button key={p.id} onClick={()=>setForm(f=>({...f,userIds:on?f.userIds.filter(x=>x!==p.id):[...f.userIds,p.id]}))} style={chip(on)}>{on?"✓ ":""}{p.name}</button>)})}
+                {!shownPeople.length&&<span style={{fontSize:12,color:"var(--c-dim)"}}>אין עובדים להצגה</span>}
+              </div>
+            </div>
+          )}
+          <div style={{display:"flex",gap:8}}>
+            <Btn color="#0ea5e9" small onClick={submit}>✅ {form.id?"שמור שינויים":"שמור הפסקה"}</Btn>
+            <Btn small onClick={()=>{setForm(null);setQ("")}}>ביטול</Btn>
+          </div>
+        </div>
+      )}
+      {list.length===0&&!form
+        ?<div style={{fontSize:12.5,color:"var(--c-dim)",padding:"4px 0"}}>אין הפסקות קבועות{dept?` ב${dept.name}`:""} — העובדים מסמנים הפסקה בעצמם.</div>
+        :<div style={{display:"flex",flexDirection:"column",gap:6}}>
+          {list.slice().sort((a,b)=>(hhmmMin(a.start)||0)-(hhmmMin(b.start)||0)).map(s=>{
+            const off=s.active===false,live=liveNow(s),ids=s.userIds||[];
+            return(
+              <div key={s.id} style={{display:"flex",justifyContent:"space-between",alignItems:"center",gap:8,flexWrap:"wrap",background:live?"#0ea5e912":"var(--c-deep)",border:`1px solid ${live?"#0ea5e9":"var(--c-border)"}`,borderRadius:8,padding:"8px 11px",opacity:off?.55:1}}>
+                <div style={{minWidth:0,flex:"1 1 220px"}}>
+                  <div style={{display:"flex",gap:7,alignItems:"center",flexWrap:"wrap"}}>
+                    <span style={{fontWeight:800,fontSize:14,direction:"ltr"}}>{s.start}–{s.end}</span>
+                    {s.name&&<span style={{fontWeight:600,fontSize:13}}>{s.name}</span>}
+                    <span style={{fontSize:11,color:"var(--c-dim)"}}>{breakDaysLabel(breakDaysOf(s))}</span>
+                    {live&&<span style={{fontSize:10.5,background:"#0ea5e922",color:"#0ea5e9",borderRadius:10,padding:"1px 8px",fontWeight:700}}>☕ עכשיו בהפסקה</span>}
+                    {off&&<span style={{fontSize:10.5,color:"var(--c-dim)"}}>(מושבתת)</span>}
+                  </div>
+                  <div style={{fontSize:11.5,color:"var(--c-muted)",marginTop:3}}>
+                    {ids.length?`👥 ${ids.length===1?nameOf(ids[0]):`${ids.length} עובדים: ${ids.slice(0,4).map(nameOf).join(", ")}${ids.length>4?"…":""}`}`:`🏢 כל המחלקה${dept?` (${people.length})`:""}`}
+                    {s.byName&&<span style={{color:"var(--c-dim)"}}> · הוגדר ע״י {s.byName}</span>}
+                  </div>
+                </div>
+                {mayEdit(s)&&<div style={{display:"flex",gap:4,alignItems:"center"}}>
+                  <button onClick={()=>toggle(s)} title={off?"הפעל":"השבת זמנית בלי למחוק"} style={{...chip(!off,"#10b981"),padding:"3px 9px",fontSize:11.5}}>{off?"מושבתת":"פעילה"}</button>
+                  <IBtn onClick={()=>setForm({id:s.id,name:s.name||"",start:s.start,end:s.end,days:breakDaysOf(s),whole:!ids.length,userIds:ids,by:s.by,byName:s.byName})} title="עריכה">✏️</IBtn>
+                  <IBtn onClick={()=>remove(s)} title="מחיקה">🗑️</IBtn>
+                </div>}
+              </div>
+            );
+          })}
+        </div>}
+    </Card>
+  );
+}
 function HoldBoard({workLogs,orders,stages,workers,onTransfer}){
   const {toast}=useToast();
   const [pick,setPick]=useState({});   // row key → chosen worker id
@@ -6124,7 +6651,7 @@ function HoldBoard({workLogs,orders,stages,workers,onTransfer}){
 // ══════════════════════════════════════════════════════════════════════════
 // ═══ WORKERS DASHBOARD ══════════════════════════════════════════════════
 // ══════════════════════════════════════════════════════════════════════════
-function WorkersDashboard({users,workLogs,orders,stages,customTasks,onAddTask,onDeleteLog,onUpdateTask,onDeleteTask,onMarkPartialTask,onMarkDoneTask,dailyPlans,onAddPlan,onAddPlans,onDeletePlan,onTogglePlanDone,onTransferHold}){
+function WorkersDashboard({users,workLogs,orders,stages,customTasks,onAddTask,onDeleteLog,onUpdateTask,onDeleteTask,onMarkPartialTask,onMarkDoneTask,dailyPlans,onAddPlan,onAddPlans,onDeletePlan,onTogglePlanDone,onTransferHold,departments,onSaveBreaks}){
   const {toast}=useToast();
   const [search,setSearch]=useState("");
   const [period,setPeriod]=useState("all");
@@ -6191,7 +6718,7 @@ function WorkersDashboard({users,workLogs,orders,stages,customTasks,onAddTask,on
     const cost=totalMin*(rate/60);
     // Revenue: sum stage prices per completed log. A HOLD segment is part of a
     // unit, not a unit — the stage is paid once, to whoever signs it.
-    const revenue=logs.reduce((s2,w)=>s2+(isHoldSegment(w)?0:Number(sMap.get(w.stageId)?.price||0)),0);
+    const revenue=logs.reduce((s2,w)=>s2+(isTimeOnly(w)?0:Number(sMap.get(w.stageId)?.price||0)),0);
     // Units: serials where worker completed ALL their assigned stages
     const workerStageAccess=new Set(u.stageAccess==="all"?allStageIds:(Array.isArray(u.stageAccess)?u.stageAccess:[]));
     const serialsDone=new Set();
@@ -6231,6 +6758,8 @@ function WorkersDashboard({users,workLogs,orders,stages,customTasks,onAddTask,on
       <DailyPlanBoard dailyPlans={dailyPlans} workers={workers} orders={orders} stages={stages} workLogs={workLogs} onAddPlan={onAddPlan} onAddPlans={onAddPlans} onDeletePlan={onDeletePlan} onTogglePlanDone={onTogglePlanDone}/>
 
       <HoldBoard workLogs={workLogs} orders={orders} stages={stages} workers={workers} onTransfer={onTransferHold}/>
+
+      {onSaveBreaks&&<BreakSchedulesBoard departments={departments} users={users} onSave={onSaveBreaks}/>}
 
       {/* Tasks Board */}
       <AdminTasksBoard workers={workers} customTasks={customTasks||[]} onAddTask={onAddTask} onUpdateTask={onUpdateTask} onDeleteTask={onDeleteTask} filterByPeriod={filterByPeriod}/>
@@ -6278,15 +6807,16 @@ function WorkersDashboard({users,workLogs,orders,stages,customTasks,onAddTask,on
             return rows.slice(0,50).map(w=>{
               const stage=stages.find(s=>s.id===w.stageId);
               // A HOLD segment is time on a unit someone else went on to sign — not a
-              // finished stage, so it is not priced.
-              const seg=isHoldSegment(w);
-              const stagePrice=seg?0:Number(stage?.price||0);
+              // finished stage, so it is not priced. Nor is a return from inspection,
+              // or the fix that answers it: the stage was paid when it was signed.
+              const seg=isHoldSegment(w),rw=reworkOf(w);
+              const stagePrice=isTimeOnly(w)?0:Number(stage?.price||0);
               const perUnit=w._count>1?Math.round(w.durationMin/w._count):w.durationMin;
               return(
                 <tr key={w.id}>
                   <td style={{fontWeight:600}}>{w.userName}</td>
                   <td style={{color:"#7eb8ff",fontSize:12}}>{w._count>1?<span>{w._count} יחידות<div style={{fontSize:10,color:"var(--c-dim)",maxWidth:200,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{w._sns}</div></span>:w._sns}</td>
-                  <td><span style={{color:stage?.color||"var(--c-muted)"}}>{stage?.name||"—"}</span>{seg&&<span title={`חלק מיחידה שהועברה מ-HOLD ל-${w.holdInfo?.toUserName||"עובד אחר"}`} style={{fontSize:10,color:"#f97316",marginInlineStart:5}}>🟧 HOLD</span>}</td>
+                  <td><span style={{color:stage?.color||"var(--c-muted)"}}>{stage?.name||"—"}</span>{seg&&<span title={`חלק מיחידה שהועברה מ-HOLD ל-${w.holdInfo?.toUserName||"עובד אחר"}`} style={{fontSize:10,color:"#f97316",marginInlineStart:5}}>🟧 HOLD</span>}{rw&&<ReworkTag log={w} stages={stages}/>}</td>
                   <td style={{fontWeight:w._count>1?700:400}}>{fmtTime(w.durationMin)}</td>
                   <td style={{color:w._count>1?"#06b6d4":"var(--c-dim)"}}>{w._count>1?fmtTime(perUnit):"—"}</td>
                   <td style={{color:stagePrice?"#a78bfa":"var(--c-dim)"}}>{stagePrice?`₪${stagePrice}${w._count>1?` × ${w._count} = ₪${stagePrice*w._count}`:""}`:"—"}</td>
@@ -6569,7 +7099,7 @@ function DailyPlanBoard({dailyPlans,workers,orders,stages,workLogs,onAddPlan,onA
 // ══════════════════════════════════════════════════════════════════════════
 // ═══ TEAM DASHBOARD (ראש צוות / מנהל מחלקה) ══════════════════════════════
 // ══════════════════════════════════════════════════════════════════════════
-function TeamDashboard({users,workLogs,orders,stages,customTasks,departments,onAddTask,onDeleteTask,onMarkPartialTask,onMarkDoneTask,dailyPlans,onAddPlan,onAddPlans,onDeletePlan,onTogglePlanDone,onTransferHold}){
+function TeamDashboard({users,workLogs,orders,stages,customTasks,departments,onAddTask,onDeleteTask,onMarkPartialTask,onMarkDoneTask,dailyPlans,onAddPlan,onAddPlans,onDeletePlan,onTogglePlanDone,onTransferHold,onSaveBreaks}){
   const {currentUser}=useAuth();
   const isDeptMgr=currentUser.role==="dept_manager";
   const myDept=(departments||[]).find(d=>d.id===currentUser.departmentId||d.managerId===currentUser.id);
@@ -6605,12 +7135,14 @@ function TeamDashboard({users,workLogs,orders,stages,customTasks,departments,onA
         <KpiBox i="👥" v={team.length} label="חברי צוות" c="#3b82f6"/>
         <KpiBox i="🔄" v={workingNow} label="עובדים כעת" c="#10b981"/>
         <KpiBox i="⏸️" v={onBreak} label="בהפסקה" c="#f59e0b"/>
-        <KpiBox i="✅" v={todayLogs.filter(w=>!isHoldSegment(w)).length} label="פעולות שהושלמו היום" c="#a78bfa"/>
+        <KpiBox i="✅" v={todayLogs.filter(w=>!isTimeOnly(w)).length} label="פעולות שהושלמו היום" c="#a78bfa"/>
         <KpiBox i="⏱️" v={fmtTime(todayMin)} label="שעות עבודה היום" c="#06b6d4"/>
         <KpiBox i="📌" v={openTeamTasks} label="משימות פתוחות" c="#ec4899"/>
         {heldCount>0&&<KpiBox i="🟧" v={heldCount} label="ב-HOLD" c="#f97316"/>}
       </div>
       <HoldBoard workLogs={workLogs} orders={orders} stages={stages} workers={team} onTransfer={onTransferHold}/>
+      {/* A department manager sets breaks from 👥 עובדים; here, a team lead for their team. */}
+      {!isDeptMgr&&onSaveBreaks&&<BreakSchedulesBoard departments={departments} users={users} onSave={onSaveBreaks}/>}
 
       {team.length===0?(
         <Card><EmptyState icon="👥" title="עדיין לא שויכו אליך עובדים" subtitle="מנהל המערכת יכול לשייך עובדים אליך במסך ניהול המערכת (מנהל ישיר / מחלקה)"/></Card>
@@ -6686,7 +7218,7 @@ function TeamDashboard({users,workLogs,orders,stages,customTasks,departments,onA
                   <tr key={w.id}>
                     <td style={{fontWeight:600}}>{w.userName}</td>
                     <td style={{color:"#7eb8ff",fontSize:12}}>{logUnitLabel(w)}</td>
-                    <td><span style={{color:stage?.color||"var(--c-muted)"}}>{stage?.name||"—"}</span></td>
+                    <td><span style={{color:stage?.color||"var(--c-muted)"}}>{stage?.name||"—"}</span><ReworkTag log={w} stages={stages}/></td>
                     <td>{fmtTime(w.durationMin)}</td>
                     <td style={{fontSize:11,color:"var(--c-dim)"}}>{w.endTime?new Date(w.endTime).toLocaleString("he-IL",{day:"2-digit",month:"2-digit",hour:"2-digit",minute:"2-digit"}):""}</td>
                   </tr>
@@ -6713,11 +7245,13 @@ function StagesManagement({stages,setStages,stageBlocks,setStageBlocks,persist})
   const [hourly,setHourly]=useState(0);
   const [roleId,setRoleId]=useState("");
   const [minutes,setMinutes]=useState(0);
+  const [inspection,setInspection]=useState(false);
   const [editId,setEditId]=useState(null);
   const [editPrice,setEditPrice]=useState(0);
   const [editHourly,setEditHourly]=useState(0);
   const [editRoleId,setEditRoleId]=useState("");
   const [editMinutes,setEditMinutes]=useState(0);
+  const [editInspection,setEditInspection]=useState(false);
   const [editStageName,setEditStageName]=useState("");
   const [editStageColor,setEditStageColor]=useState("#3b82f6");
   // Block management
@@ -6729,9 +7263,9 @@ function StagesManagement({stages,setStages,stageBlocks,setStageBlocks,persist})
   const add=()=>{
     if(!name.trim())return;
     const maxOrder=stages.reduce((m,s)=>Math.max(m,s.order||0),0);
-    const created={id:uid(),name:name.trim(),order:maxOrder+1,color,price:Number(price)||0,hourlyRate:Number(hourly)||0,roleId:roleId||"",minutes:Number(minutes)||0};
+    const created={id:uid(),name:name.trim(),order:maxOrder+1,color,price:Number(price)||0,hourlyRate:Number(hourly)||0,roleId:roleId||"",minutes:Number(minutes)||0,inspection};
     const ns=[...stages,created];
-    setStages(ns);persist(null,null,ns);setName("");setPrice(0);setHourly(0);setRoleId("");setMinutes(0);setShowForm(false);
+    setStages(ns);persist(null,null,ns);setName("");setPrice(0);setHourly(0);setRoleId("");setMinutes(0);setInspection(false);setShowForm(false);
     UNDO.record({user:currentUser,action:"הוספת שלב",target:created.name,
       changes:[{coll:"stages",before:[],after:[created.id]}]});
   };
@@ -6743,7 +7277,29 @@ function StagesManagement({stages,setStages,stageBlocks,setStageBlocks,persist})
       changes:[{coll:"stages",before:[victim],after:[]}]});
   };
   const move=(id,dir)=>{const idx=stages.findIndex(s=>s.id===id);if((dir===-1&&idx===0)||(dir===1&&idx===stages.length-1))return;const before=stages.map(s=>({...s}));const arr=[...stages];[arr[idx],arr[idx+dir]]=[arr[idx+dir],arr[idx]];arr.forEach((s,i)=>s.order=i+1);setStages(arr);persist(null,null,arr);UNDO.record({user:currentUser,action:"שינוי סדר שלבים",target:stages[idx]?.name||"",changes:[{coll:"stages",before,after:arr.map(s=>s.id)}]})};
-  const saveStage=(id)=>{const before=stages.find(s=>s.id===id);const ns=stages.map(s=>s.id===id?{...s,name:editStageName.trim()||s.name,color:editStageColor,price:Number(editPrice)||0,hourlyRate:Number(editHourly)||0,roleId:editRoleId||"",minutes:Number(editMinutes)||0}:s);setStages(ns);persist(null,null,ns);setEditId(null);if(before)UNDO.record({user:currentUser,action:"עריכת שלב",target:before.name,changes:[{coll:"stages",before:[before],after:[id]}]})};
+  const saveStage=(id)=>{const before=stages.find(s=>s.id===id);const ns=stages.map(s=>s.id===id?{...s,name:editStageName.trim()||s.name,color:editStageColor,price:Number(editPrice)||0,hourlyRate:Number(editHourly)||0,roleId:editRoleId||"",minutes:Number(editMinutes)||0,inspection:editInspection}:s);setStages(ns);persist(null,null,ns);setEditId(null);if(before)UNDO.record({user:currentUser,action:"עריכת שלב",target:before.name,changes:[{coll:"stages",before:[before],after:[id]}]})};
+
+  // 🔍 שלב ביקורת — a stage an inspector may send a unit back from, to any stage
+  // before it, for a fix (see reworkOf). One tap on the row turns it on or off.
+  const setInspect=(ids,on,label)=>{
+    const want=new Set(ids);
+    const before=stages.filter(s=>want.has(s.id)&&!!s.inspection!==on);
+    if(!before.length)return;
+    const ns=stages.map(s=>want.has(s.id)?{...s,inspection:on}:s);
+    setStages(ns);persist(null,null,ns);
+    UNDO.record({user:currentUser,action:on?"סימון שלב ביקורת":"ביטול שלב ביקורת",target:label||before.map(s=>s.name).join(", "),
+      changes:[{coll:"stages",before,after:before.map(s=>s.id)}]});
+  };
+  // Most plants already name their inspections as such. Offered, never assumed:
+  // "דיווח סיום … לפני ביקורת" has the word in it and is not one.
+  const inspectGuess=useMemo(()=>stages.filter(s=>!s.inspection&&/ביקורת|בקורת|\bQC\b/i.test(s.name||"")&&!/^\s*דיווח/.test(s.name||"")),[stages]);
+  const markGuessed=()=>{
+    if(!inspectGuess.length)return;
+    const names=inspectGuess.map(s=>"• "+s.name);
+    if(!confirm(`לסמן ${inspectGuess.length} שלבים כשלבי ביקורת?\n\n${names.slice(0,25).join("\n")}${names.length>25?`\nועוד ${names.length-25}…`:""}\n\nאפשר לבטל כל אחד מהם אחר כך בלחיצה על 🔍 בשורה שלו.`))return;
+    setInspect(inspectGuess.map(s=>s.id),true,`${inspectGuess.length} שלבים לפי השם`);
+    toast(`${inspectGuess.length} שלבים סומנו כשלבי ביקורת`,"success");
+  };
 
   // Block functions
   const addBlock=()=>{
@@ -6857,7 +7413,13 @@ function StagesManagement({stages,setStages,stageBlocks,setStageBlocks,persist})
       <Card>
         <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:14}}>
           <h3 style={{margin:0,fontSize:15}}>🔧 שלבים בודדים</h3>
-          <Btn color="var(--c-accent)" small onClick={()=>setShowForm(p=>!p)}>+ שלב</Btn>
+          <div style={{display:"flex",gap:6,flexWrap:"wrap"}}>
+            {inspectGuess.length>0&&<Btn color="#e11d48" small onClick={markGuessed} title="שלבים שבשם שלהם מופיע ״ביקורת״ או QC — תוצג רשימה לאישור לפני הסימון">🔍 סמן שלבי ביקורת לפי השם ({inspectGuess.length})</Btn>}
+            <Btn color="var(--c-accent)" small onClick={()=>setShowForm(p=>!p)}>+ שלב</Btn>
+          </div>
+        </div>
+        <div style={{fontSize:11.5,color:"var(--c-dim)",marginBottom:10,lineHeight:1.6}}>
+          🔍 <b>שלב ביקורת</b>: מבקר שמוצא בעיה יכול להחזיר את היחידה לאחד השלבים שלפניו לתיקון. השלב לא נחתם שוב — זמן התיקון נוסף לזמן העבודה עליו, והיחידה חוזרת לביקורת. לחיצה על 🔍 בשורה מסמנת או מבטלת.
         </div>
         {showForm&&(
           <div style={{display:"flex",gap:10,alignItems:"flex-end",marginBottom:12,flexWrap:"wrap"}}>
@@ -6873,6 +7435,7 @@ function StagesManagement({stages,setStages,stageBlocks,setStageBlocks,persist})
             <Field label="₪ ליחידה" type="number" value={price} onChange={setPrice} style={{minWidth:80}}/>
             <Field label="תעריף ₪/שעה" type="number" value={hourly} onChange={setHourly} style={{minWidth:90}}/>
             <div style={{display:"flex",flexDirection:"column",gap:4}}><label style={{fontSize:11,color:"var(--c-dim)",fontWeight:600}}>צבע</label><input type="color" value={color} onChange={e=>setColor(e.target.value)} style={{width:36,height:34,padding:2,border:"1px solid var(--c-border)",borderRadius:6}}/></div>
+            <label style={{display:"flex",alignItems:"center",gap:5,fontSize:12,color:"#e11d48",fontWeight:600,paddingBottom:8,cursor:"pointer"}}><input type="checkbox" checked={inspection} onChange={e=>setInspection(e.target.checked)}/>🔍 שלב ביקורת</label>
             <Btn color="#10b981" onClick={add} small>הוסף</Btn>
             <Btn onClick={()=>setShowForm(false)} small>ביטול</Btn>
           </div>
@@ -6910,6 +7473,7 @@ function StagesManagement({stages,setStages,stageBlocks,setStageBlocks,persist})
                       <label style={{fontSize:11,color:"var(--c-dim)",display:"block",marginBottom:2}}>זמן (דק'/יח')</label>
                       <input type="number" value={editMinutes} onChange={e=>setEditMinutes(e.target.value)} style={{width:80,padding:"5px 8px",fontSize:13,borderRadius:6,border:"1px solid var(--c-border)",background:"var(--c-deep)",color:"var(--c-text)",fontFamily:"inherit"}}/>
                     </div>
+                    <label style={{display:"flex",alignItems:"center",gap:5,fontSize:12,color:"#e11d48",fontWeight:600,paddingBottom:8,cursor:"pointer"}}><input type="checkbox" checked={editInspection} onChange={e=>setEditInspection(e.target.checked)}/>🔍 שלב ביקורת</label>
                   </div>
                   <div style={{display:"flex",gap:8}}>
                     <Btn color="#10b981" onClick={()=>saveStage(s.id)} small>✅ שמור שינויים</Btn>
@@ -6923,11 +7487,13 @@ function StagesManagement({stages,setStages,stageBlocks,setStageBlocks,persist})
                     <div style={{width:10,height:10,borderRadius:3,background:s.color}}/>
                     <span style={{fontWeight:600}}>{s.name}</span>
                     {s.roleId&&ROLES[s.roleId]&&<span style={{fontSize:11,color:ROLES[s.roleId].color,padding:"2px 7px",borderRadius:6,background:ROLES[s.roleId].color+"1a",border:`1px solid ${ROLES[s.roleId].color}33`}}>{ROLES[s.roleId].icon} {ROLES[s.roleId].label}</span>}
+                    {s.inspection&&<span title="מבקר יכול להחזיר מכאן יחידה לשלב קודם לתיקון" style={{fontSize:11,color:"#e11d48",padding:"2px 7px",borderRadius:6,background:"#e11d481a",border:"1px solid #e11d4833"}}>🔍 ביקורת</span>}
                     {s.minutes>0&&<span style={{fontSize:11,color:"#06b6d4",padding:"2px 6px",borderRadius:6,background:"var(--c-deep)"}}>⏱️ {s.minutes} דק'/יח'</span>}
                     <span style={{fontSize:11,color:(s.price||s.hourlyRate)?"#a78bfa":"var(--c-dim)",padding:"2px 6px",borderRadius:6,background:"var(--c-deep)"}}>{s.price?`₪${s.price}/יח'`:""}{s.hourlyRate?`${s.price?" · ":""}₪${s.hourlyRate}/שע'`:""}{!s.price&&!s.hourlyRate?"ללא תמחור":""}</span>
                   </div>
                   <div style={{display:"flex",gap:3}}>
-                    <IBtn onClick={()=>{setEditId(s.id);setEditStageName(s.name);setEditStageColor(s.color);setEditPrice(s.price||0);setEditHourly(s.hourlyRate||0);setEditRoleId(s.roleId||"");setEditMinutes(s.minutes||0)}} title="ערוך שלב">✏️</IBtn>
+                    <IBtn onClick={()=>setInspect([s.id],!s.inspection,s.name)} title={s.inspection?"בטל סימון שלב ביקורת":"סמן כשלב ביקורת — אפשר יהיה להחזיר ממנו יחידה לתיקון"} style={{opacity:s.inspection?1:.45}}>🔍</IBtn>
+                    <IBtn onClick={()=>{setEditId(s.id);setEditStageName(s.name);setEditStageColor(s.color);setEditPrice(s.price||0);setEditHourly(s.hourlyRate||0);setEditRoleId(s.roleId||"");setEditMinutes(s.minutes||0);setEditInspection(!!s.inspection)}} title="ערוך שלב">✏️</IBtn>
                     <IBtn onClick={()=>move(s.id,-1)}>⬆️</IBtn>
                     <IBtn onClick={()=>move(s.id,1)}>⬇️</IBtn>
                     <IBtn onClick={()=>del(s.id)}>🗑️</IBtn>
@@ -8817,7 +9383,9 @@ function buildTeamReport(opt){
       perUnit:units>0?actual/units:actual,salePer,saleTot,stdPer,stdTot,
       gap:comparable?actual-saleTot:null,eff:comparable?saleTot/actual*100:null,
       stdGap:stdCmp?actual-stdTot:null,adh:stdCmp?stdTot/actual*100:null,
-      signOff:!(actual>0),kind:split?"HOLD (חלק מיחידה)":w.bulk?"קבוצתי":(actual>0?"עבודה":"חתימה")
+      // A return from inspection or a fix is time on a unit already counted — no
+      // unit, no signature, and not held against the stage's sold time.
+      signOff:!(actual>0)&&!reworkOf(w),kind:reworkKind(w)||(split?"HOLD (חלק מיחידה)":w.bulk?"קבוצתי":(actual>0?"עבודה":"חתימה"))
     });
   });
   rows.sort((a,b)=>a.day.localeCompare(b.day)||String(a.start||"").localeCompare(String(b.start||"")));
@@ -9828,7 +10396,7 @@ function doExport(ctx){
     const std=act>0?stdStageMin(stdIdx.get(pnKey(o?.pn)),w.stageId)*n:0;
     return[day,day?HEB_DAYS[new Date(day+"T00:00:00").getDay()]:"",w.userName||"",ROLES[u?.role]?.label||"",dMap.get(u?.departmentId)||"",
       o?.woNumber||"",o?.pn||"",isQtyLog(w)?`לפי כמות ×${n}`:(w.serialSn||""),st?.name||"",pMap.get(o?.projectId)||"",
-      isHoldSegment(w)||holdCarryMin(w)>0?"HOLD (חלק מיחידה)":isQtyLog(w)?(act>0?"עבודה לפי כמות":"חתימה לפי כמות"):w.bulk?"קבוצתי":act>0?"עבודה":"חתימה",
+      reworkKind(w)||(isHoldSegment(w)||holdCarryMin(w)>0?"HOLD (חלק מיחידה)":isQtyLog(w)?(act>0?"עבודה לפי כמות":"חתימה לפי כמות"):w.bulk?"קבוצתי":act>0?"עבודה":"חתימה"),
       w.startTime?w.startTime.slice(0,16).replace("T"," "):"",w.endTime?w.endTime.slice(0,16).replace("T"," "):"",
       xlRound(act),xlRound(breakMinOf(w)),n,xlRound(n>0?act/n:act),
       std>0?xlRound(std):"",std>0?xlRound(act-std):"",effOf(act,std),
@@ -14335,7 +14903,17 @@ function App(){
     }
   };
 
-  const handleStartWork=(log)=>{
+  // Which units wait for a fix after inspection — read off the newest log list
+  // when a start needs it, and kept until that list changes.
+  const reworkIdxCache=useRef({logs:null,idx:null});
+  const reworkIdxNow=()=>{
+    const l=wRef.current||[],c=reworkIdxCache.current;
+    if(c.logs!==l){c.logs=l;c.idx=buildReworkIndex(l)}
+    return c.idx;
+  };
+  const handleStartWork=(start)=>{
+    // Starting a unit that an inspection sent back to this stage is starting its fix.
+    const log=reworkAttach(start,reworkIdxNow());
     // The same unit, the same stage, the same person, already open: a second tap on
     // ▶️ while the first one is still landing, or a queue tapped again after a
     // reload. Two open logs for one unit is not a state anything downstream expects
@@ -14377,7 +14955,12 @@ function App(){
     setWorkLogs(prev=>{
       const cur=prev.find(w=>w.id===logId);
       if(!cur||cur.completed)return prev;
-      const next=prev.map(w=>w.id===logId?{...w,...(patch||{}),completed:true,endTime:nowISO(),durationMin:duration}:w);
+      // A scheduled break no screen was on for is still not work: taken off here
+      // if the clock that runs them has not got to it yet.
+      const now=Date.now(),fixed=withBreaks(cur,now);
+      const dur=fixed===cur?duration:logWorkedMin(fixed,now);
+      // A fix after inspection is signed as time on its stage, not as a unit.
+      const next=prev.map(w=>w.id===logId?reworkFinish({...fixed,...(patch||{}),completed:true,endTime:new Date(now).toISOString(),durationMin:dur}):w);
       persist(null,null,null,next);
       const log=next.find(w=>w.id===logId);
       if(log?.orderId)setTimeout(()=>checkAutoDelivery(log.orderId,next),100);
@@ -14459,13 +15042,94 @@ function App(){
       changes:[{coll:"workLogs",before:plan.before,after:[...plan.before.map(w=>w.id),...plan.segs.map(g=>g.id)]}]});
     return true;
   };
+  // ☕ A manager saves the fixed breaks of one department (see BreakSchedulesBoard).
+  const handleSaveBreaks=(deptId,list,what)=>{
+    const before=(dpRef.current||[]).find(d=>d.id===deptId);if(!before)return;
+    updD(prev=>prev.map(d=>d.id===deptId?{...d,breakSchedules:list}:d));
+    UNDO.record({user:currentUser,action:"הפסקות קבועות",target:before.name||"",details:what||"",
+      changes:[{coll:"departments",before:[before],after:[deptId]}]});
+  };
+  // ↩️ An inspection found a problem: the units go back to an earlier stage for a
+  // fix (see reworkReturn). Answers whether anything was sent back.
+  const handleReturnRework=(units,opt)=>{
+    const plan=reworkReturn(wRef.current||[],units,opt,currentUser,nowISO());
+    if(!plan.before.length&&!plan.made.length)return false;
+    setWorkLogs(prev=>{
+      const next=reworkReturn(prev,units,opt,currentUser,plan.at,plan).next;
+      persist(null,null,null,next);return next;
+    });
+    const nm=id=>stages.find(s=>s.id===id)?.name||"";
+    // Not one of WORK_UNDO_ACTIONS — the journal screen matches those by substring.
+    UNDO.record({user:currentUser,action:"החזרה לתיקון אחרי ביקורת",target:units.map(u=>u.serialSn).filter(Boolean).join(", "),
+      details:`${nm(opt.fromStageId)} ← ${nm(opt.toStageId)}${opt.note?` · ${opt.note}`:""}`,
+      changes:[{coll:"workLogs",before:plan.before,after:[...plan.before.map(w=>w.id),...plan.made.map(w=>w.id)]}]});
+    return true;
+  };
+  // ── הפסקות קבועות — the clock that runs them ─────────────────────────────
+  // See applyBreaks. This device moves its own user's work on the minute, and
+  // the work of everyone it oversees once the worker's own device has had a
+  // moment to do it — so a phone in a pocket does not keep a department working
+  // through its break, and two devices doing it write the very same thing.
+  const withBreaks=(rec,now,users,keep)=>{
+    const u=(users||getUsers()).find(x=>x.id===rec.userId);
+    const sch=breakSchedulesFor(u,dpRef.current);
+    if(!sch.length)return rec;
+    const t0=atMs(rec.startTime);
+    return applyBreaks(rec,breakWindows(sch,Math.max(isFinite(t0)?t0:now,now-BREAK_LOOKBACK_MS),now),now,keep);
+  };
+  useEffect(()=>{
+    if(!currentUser)return;
+    const me=currentUser.id;
+    const said=new Set();
+    const tick=()=>{
+      const deps=dpRef.current||[];
+      if(!deps.some(d=>((d&&d.breakSchedules)||[]).some(s=>s&&s.active!==false)))return;
+      const now=Date.now(),users=getUsers();
+      const scope=overseeingUserIds(currentUser,users,deps);
+      const inScope=scope?new Set(scope):null;
+      // What each person has running right now, by job (a group is one job) —
+      // during a break that is only what they started, or resumed, themselves.
+      const busy=new Map();
+      const isOpen=r=>!r.completed&&!!r.startTime&&r.active!==false;
+      [...(wRef.current||[]),...(ctRef.current||[])].forEach(r=>{
+        if(!isOpen(r)||r.paused||isOnHold(r))return;
+        let b=busy.get(r.userId);if(!b){b=new Set();busy.set(r.userId,b)}
+        b.add(r.bulkGroupId||r.id);
+      });
+      const elsewhere=r=>{const b=busy.get(r.userId);if(!b)return false;for(const k of b)if(k!==(r.bulkGroupId||r.id))return true;return false};
+      const fix=r=>{
+        if(!isOpen(r))return r;
+        if(inScope&&!inScope.has(r.userId))return r;
+        return withBreaks(r,r.userId===me?now:now-BREAK_GRACE_MS,users,elsewhere(r));
+      };
+      const moved=list=>{const m=new Map();(list||[]).forEach(r=>{if(r.completed)return;const f=fix(r);if(f!==r)m.set(r.id,{was:r,now:f})});return m};
+      const apply=prev=>{let hit=false;const next=prev.map(r=>{if(r.completed)return r;const f=fix(r);if(f!==r)hit=true;return f});return hit?next:prev};
+      const logs=moved(wRef.current),tasks=moved(ctRef.current);
+      if(logs.size)setWorkLogs(prev=>{const next=apply(prev);if(next!==prev)persist(null,null,null,next);return next});
+      if(tasks.size)setCustomTasks(prev=>{const next=apply(prev);if(next!==prev)persist(null,null,null,null,next);return next});
+      // Tell the worker — once per break, not once per unit of a group.
+      [...logs.values(),...tasks.values()].forEach(({was,now:f})=>{
+        if(f.userId!==me)return;
+        const on=autoBreakOf(f),off=autoBreakOf(was)&&!f.paused;
+        const k=on?`on:${on.auto}`:off?`off:${autoBreakOf(was).auto}`:"";
+        if(!k||said.has(k))return;said.add(k);
+        if(on)toast(`⏸️ ${on.name||"הפסקה קבועה"} — העבודה עברה להפסקה${on.until?` עד ${fmtClock(on.until)}`:""}, ותחזור לבד בסוף ההפסקה`,"info",8000);
+        else toast("▶️ ההפסקה הקבועה הסתיימה — חזרת לעבודה, הטיימר רץ","success",6000);
+      });
+    };
+    const first=setTimeout(tick,3000);
+    const t=setInterval(tick,20000);
+    const onVisible=()=>{if(document.visibilityState==="visible")tick()};
+    document.addEventListener("visibilitychange",onVisible);
+    return()=>{clearTimeout(first);clearInterval(t);document.removeEventListener("visibilitychange",onVisible)};
+  },[currentUser?.id]);
   // Custom tasks
   const handleAddTask=(task)=>{
     setCustomTasks(prev=>{const next=[...prev,task];persist(null,null,null,null,next);return next});
     if(task.userName)PushNotify.send(`משימה חדשה: ${task.name}`,`${task.userName}, הוקצתה לך משימה${task.price?` (₪${task.price})`:""}`,`task_${task.id}`);
   };
   const handleStartTask=(taskId)=>{setCustomTasks(prev=>{const next=prev.map(t=>t.id===taskId?{...t,active:true,startTime:nowISO()}:t);persist(null,null,null,null,next);return next})};
-  const handleEndTask=(taskId)=>{setCustomTasks(prev=>{const next=prev.map(t=>{if(t.id!==taskId)return t;const dur=t.startTime?Math.round((Date.now()-new Date(t.startTime).getTime())/60000)-(t.totalPauseMin||0):0;return{...t,active:false,completed:true,endTime:nowISO(),durationMin:Math.max(0,dur)}});persist(null,null,null,null,next);return next})};
+  const handleEndTask=(taskId)=>{setCustomTasks(prev=>{const next=prev.map(t0=>{if(t0.id!==taskId)return t0;const now=Date.now(),t=t0.completed?t0:withBreaks(t0,now);const dur=t!==t0?logWorkedMin(t,now):t.startTime?Math.round((Date.now()-new Date(t.startTime).getTime())/60000)-(t.totalPauseMin||0):0;return{...t,active:false,completed:true,endTime:nowISO(),durationMin:Math.max(0,dur)}});persist(null,null,null,null,next);return next})};
   const handlePauseTask=(taskId)=>{setCustomTasks(prev=>{const next=prev.map(t=>t.id===taskId?{...t,paused:true,pauseStart:nowISO(),pauseLog:[...(t.pauseLog||[]),{start:nowISO()}]}:t);persist(null,null,null,null,next);return next})};
   const handleResumeTask=(taskId)=>{setCustomTasks(prev=>{const next=prev.map(t=>{if(t.id!==taskId)return t;const pMin=t.pauseStart?Math.round((Date.now()-new Date(t.pauseStart).getTime())/60000):0;const pl=[...(t.pauseLog||[])];if(pl.length>0&&!pl[pl.length-1].end)pl[pl.length-1].end=nowISO();return{...t,paused:false,pauseStart:null,totalPauseMin:(t.totalPauseMin||0)+pMin,pauseLog:pl}});persist(null,null,null,null,next);return next})};
   const handleDeleteTask=(taskId)=>{setCustomTasks(prev=>{
@@ -14564,7 +15228,9 @@ function App(){
       if(!w.completed||prev.logs.has(w.id)||w.userId===currentUser.id)return;
       if(directManagerId(w.userId)!==currentUser.id||!isRecent(w.endTime))return;
       const stage=stages.find(s=>s.id===w.stageId);
-      PushNotify.send("✅ שלב הושלם",`${w.userName} סיים ${stage?.name||""}${w.serialSn?` — ${w.serialSn}`:""}`,`done_${w.id}`);
+      if(isReworkReq(w)){const to=stages.find(s=>s.id===reworkOf(w).toStageId);
+        PushNotify.send("↩️ הוחזר לתיקון",`${w.userName}: ${w.serialSn||"יחידה"} נכשלה ב${stage?.name||"ביקורת"} — חוזרת ל${to?.name||"שלב קודם"}${reworkOf(w).note?` (${reworkOf(w).note})`:""}`,`done_${w.id}`);return}
+      PushNotify.send(isReworkFix(w)?"🔧 תיקון הושלם":"✅ שלב הושלם",`${w.userName} סיים ${isReworkFix(w)?"תיקון ב":""}${stage?.name||""}${w.serialSn?` — ${w.serialSn}`:""}`,`done_${w.id}`);
     });
     customTasks.forEach(t=>{
       if(!t.completed||prev.tasks.has(t.id)||t.userId===currentUser.id)return;
@@ -15001,12 +15667,12 @@ function App(){
         // navigation, the install banner, or both.
         paddingBottom:isWorker?`calc(${showInstall?160:86}px + env(safe-area-inset-bottom,0px))`:showInstall?"100px":"calc(16px + env(safe-area-inset-bottom,0px))"}}>
         {tab==="dashboard"&&<Dashboard orders={filteredOrders} projects={filteredProjects} stages={stages} users={visibleUsers} workLogs={filteredWorkLogs} departments={visibleDepartments} customTasks={customTasks}/>}
-        {tab==="team"&&isLead&&<TeamDashboard users={getUsers()} workLogs={filteredWorkLogs} orders={filteredOrders} stages={stages} customTasks={customTasks} departments={departments} onAddTask={handleAddTask} onDeleteTask={handleDeleteTask} onMarkPartialTask={handleMarkPartialTask} onMarkDoneTask={handleMarkDoneTask} dailyPlans={dailyPlans} onAddPlan={handleAddPlan} onAddPlans={handleAddPlans} onDeletePlan={handleDeletePlan} onTogglePlanDone={handleTogglePlanDone} onTransferHold={handleTransferHold}/>}
+        {tab==="team"&&isLead&&<TeamDashboard users={getUsers()} workLogs={filteredWorkLogs} orders={filteredOrders} stages={stages} customTasks={customTasks} departments={departments} onAddTask={handleAddTask} onDeleteTask={handleDeleteTask} onMarkPartialTask={handleMarkPartialTask} onMarkDoneTask={handleMarkDoneTask} dailyPlans={dailyPlans} onAddPlan={handleAddPlan} onAddPlans={handleAddPlans} onDeletePlan={handleDeletePlan} onTogglePlanDone={handleTogglePlanDone} onTransferHold={handleTransferHold} onSaveBreaks={handleSaveBreaks}/>}
         {tab==="orders"&&<Orders orders={filteredOrders} projects={filteredProjects} stages={stages} stageBlocks={stageBlocks} departments={departments} updO={updO} workLogs={filteredWorkLogs} onWorkLog={handleStartWork} onDeleteLog={handleDeleteLog} workdayHours={workdayHours} setWorkdayHours={setWorkdayHoursPersist} pnStandards={pnStandards}/>}
         {tab==="shortages"&&<Shortages orders={filteredOrders} updO={updO} projects={filteredProjects}/>}
         {(tab==="mywork"||(tab==="queue"&&isWorker))&&<MyWork key={tab} view={!isWorker?"all":tab==="queue"?"queue":"mine"} onGoTab={isWorker?goTab:null}
-          orders={filteredOrders} stages={stages} workLogs={filteredWorkLogs} onStartWork={handleStartWork} onEndWork={handleEndWork} onDeleteLog={handleDeleteLog} onPauseWork={handlePauseWork} onResumeWork={handleResumeWork} onHoldWork={handleHoldWork} onPickupHold={handlePickupHold} customTasks={customTasks} onAddTask={handleAddTask} onStartTask={handleStartTask} onEndTask={handleEndTask} onPauseTask={handlePauseTask} onResumeTask={handleResumeTask} onDeleteTask={handleDeleteTask} onMarkPartialTask={handleMarkPartialTask} onMarkDoneTask={handleMarkDoneTask} users={getUsers()} dailyPlans={dailyPlans} onMarkPlanDone={handleMarkPlanDone}/>}
-        {tab==="workers"&&(isAdmin||isDeptMgr)&&<WorkersDashboard users={visibleUsers} workLogs={filteredWorkLogs} orders={filteredOrders} stages={stages} customTasks={customTasks} onAddTask={handleAddTask} onDeleteLog={handleDeleteLog} onDeleteTask={handleDeleteTask} onMarkPartialTask={handleMarkPartialTask} onMarkDoneTask={handleMarkDoneTask} dailyPlans={dailyPlans} onAddPlan={handleAddPlan} onAddPlans={handleAddPlans} onDeletePlan={handleDeletePlan} onTogglePlanDone={handleTogglePlanDone} onTransferHold={handleTransferHold}/>}
+          orders={filteredOrders} stages={stages} workLogs={filteredWorkLogs} onStartWork={handleStartWork} onEndWork={handleEndWork} onDeleteLog={handleDeleteLog} onPauseWork={handlePauseWork} onResumeWork={handleResumeWork} onHoldWork={handleHoldWork} onPickupHold={handlePickupHold} onReturnRework={handleReturnRework} customTasks={customTasks} onAddTask={handleAddTask} onStartTask={handleStartTask} onEndTask={handleEndTask} onPauseTask={handlePauseTask} onResumeTask={handleResumeTask} onDeleteTask={handleDeleteTask} onMarkPartialTask={handleMarkPartialTask} onMarkDoneTask={handleMarkDoneTask} users={getUsers()} dailyPlans={dailyPlans} onMarkPlanDone={handleMarkPlanDone}/>}
+        {tab==="workers"&&(isAdmin||isDeptMgr)&&<WorkersDashboard users={visibleUsers} workLogs={filteredWorkLogs} orders={filteredOrders} stages={stages} customTasks={customTasks} onAddTask={handleAddTask} onDeleteLog={handleDeleteLog} onDeleteTask={handleDeleteTask} onMarkPartialTask={handleMarkPartialTask} onMarkDoneTask={handleMarkDoneTask} dailyPlans={dailyPlans} onAddPlan={handleAddPlan} onAddPlans={handleAddPlans} onDeletePlan={handleDeletePlan} onTogglePlanDone={handleTogglePlanDone} onTransferHold={handleTransferHold} departments={departments} onSaveBreaks={handleSaveBreaks}/>}
         {tab==="stdtimes"&&(isAdmin||isDeptMgr||isLead)&&<StandardTimes orders={filteredOrders} stages={stages} stageBlocks={stageBlocks} workLogs={filteredWorkLogs} users={visibleUsers} projects={filteredProjects} pnStandards={pnStandards} onSavePnStd={savePnStd} onDeletePnStd={deletePnStd}/>}
         {tab==="yield"&&<YieldDashboard orders={filteredOrders} projects={filteredProjects} stages={stages} workLogs={filteredWorkLogs}/>}
         {tab==="stages"&&isAdmin&&<StagesManagement stages={stages} setStages={setStages} stageBlocks={stageBlocks} setStageBlocks={setStageBlocks} persist={persist}/>}

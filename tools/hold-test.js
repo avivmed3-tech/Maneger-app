@@ -41,6 +41,8 @@ vm.runInContext([
   slice("const isQtyLog=","\n","isQtyLog"),
   slice("const isQtyRun=","\n","isQtyRun"),
   slice("const isOnHold=","// ── ","the HOLD helpers"),
+  // holdShares and holdHandOff read the rework note (see rework-test.js).
+  slice("const reworkOf=","\n","reworkOf"),
   "module.exports={buildLogIndex,isQtyLog,isOnHold,isHoldSegment,holdCarryMin,holdShares,logWorkedMin,holdHandOff,holdPickUp};"
 ].join("\n"),ctx);
 const H=ctx.module.exports;
