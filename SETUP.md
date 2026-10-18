@@ -1563,6 +1563,9 @@ ALTER TABLE public.work_logs ADD COLUMN IF NOT EXISTS hold_info jsonb;
 
 ### עדכון סכימה — להריץ ב-Supabase ← SQL Editor
 
+> ✅ **כבר הורץ** בפרויקט `production-line-manager` (`lwiurzkiojctwzllpnmr`) —
+> אין צורך לעשות דבר. ה-SQL כאן הוא לתיעוד ולהקמת פרויקט חדש.
+
 ```sql
 -- 🔍 שלב ביקורת: מבקר יכול להחזיר ממנו יחידה לתיקון בשלב קודם.
 ALTER TABLE public.stages ADD COLUMN IF NOT EXISTS inspection boolean NOT NULL DEFAULT false;
