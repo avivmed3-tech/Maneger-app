@@ -1678,6 +1678,12 @@ const useQtyRunIndex=workLogs=>useMemo(()=>buildQtyRunIndex(workLogs),[workLogs]
 const isOnHold=w=>!!w&&!w.completed&&!!(w.holdInfo&&w.holdInfo.held);
 const isHoldSegment=w=>!!(w&&w.holdInfo&&w.holdInfo.seg);
 const holdCarryMin=w=>Number((w&&w.holdInfo&&w.holdInfo.carryMin)||0);
+// Working together (see jointClose): a log started on a unit somebody else was
+// already working on carries holdInfo.joint. Whoever leaves before the stage is
+// signed closes it as their *share* — their minutes, no serial, the unit kept on
+// the note — so the stage is still signed once, by one log.
+const jointOf=w=>(w&&w.holdInfo&&w.holdInfo.joint)||null;
+const isJointShare=w=>!!(w&&w.completed&&jointOf(w)&&jointOf(w).share);
 // Minutes this log's own worker has put in so far. A log on HOLD (or on a break)
 // is stopped at pauseStart, so the gap since then is not counted.
 // The share of one unit a log stands for, once HOLD has split the unit between
@@ -1686,21 +1692,30 @@ const holdCarryMin=w=>Number((w&&w.holdInfo&&w.holdInfo.carryMin)||0);
 // minutes count toward the worker, the unit is counted once it is signed.
 // A return from inspection and the fix that answers it (see reworkOf) are time on
 // a unit that was already counted, so they stand for none.
+// Worked on together, the unit is shared the same way: the share each person
+// left with (see isJointShare) and the log that signed it, by their minutes.
 function holdShares(workLogs){
+  const joint=new Map();
+  (workLogs||[]).forEach(w=>{
+    if(!isJointShare(w)||reworkOf(w))return;
+    const k=`${jointOf(w).serialId}|${w.stageId}`;
+    joint.set(k,(joint.get(k)||0)+Number(w.durationMin||0)+holdCarryMin(w));
+  });
   const tot=new Map();
   (workLogs||[]).forEach(w=>{
-    if(!w.completed||isHoldSegment(w)||reworkOf(w))return;
-    const c=holdCarryMin(w);if(!(c>0))return;
-    tot.set(`${w.serialId||w.orderId}|${w.stageId}`,Number(w.durationMin||0)+c);
+    if(!w.completed||isHoldSegment(w)||isJointShare(w)||reworkOf(w))return;
+    const k=`${w.serialId||w.orderId}|${w.stageId}`;
+    const c=holdCarryMin(w),j=w.serialId?(joint.get(k)||0):0;if(!(c>0)&&!(j>0))return;
+    tot.set(k,Number(w.durationMin||0)+c+j);
   });
+  const part=(w,k)=>{const t=tot.get(k);return t>0?Math.min(1,Number(w.durationMin||0)/t):0};
   return w=>{
     if(reworkOf(w))return 0;
-    if(isHoldSegment(w)){
-      const t=tot.get(`${w.holdInfo.serialId||w.orderId}|${w.stageId}`);
-      return t>0?Math.min(1,Number(w.durationMin||0)/t):0;
-    }
-    const c=holdCarryMin(w);if(!(c>0))return 1;
-    const d=Number(w.durationMin||0);return d+c>0?d/(d+c):1;
+    if(isHoldSegment(w))return part(w,`${w.holdInfo.serialId||w.orderId}|${w.stageId}`);
+    if(isJointShare(w))return part(w,`${jointOf(w).serialId}|${w.stageId}`);
+    const c=holdCarryMin(w),j=w.serialId?(joint.get(`${w.serialId}|${w.stageId}`)||0):0;
+    if(!(c>0)&&!(j>0))return 1;
+    const d=Number(w.durationMin||0);return d/(d+c+j);
   };
 }
 // Time on HOLD is stopped time, so it rides in totalPauseMin with the breaks —
@@ -1822,9 +1837,10 @@ const orderUnits=order=>{const n=((order&&order.serials)||[]).length;return n||(
 const reworkOf=w=>(w&&w.holdInfo&&w.holdInfo.rework)||null;
 const isReworkReq=w=>!!(reworkOf(w)&&reworkOf(w).req);
 const isReworkFix=w=>!!reworkOf(w)&&!reworkOf(w).req;
-// Time with no unit of its own: a HOLD segment, a return, a fix. Never priced and
-// never counted as a unit — a stage is paid and counted once, to whoever signs it.
-const isTimeOnly=w=>isHoldSegment(w)||!!reworkOf(w);
+// Time with no unit of its own: a HOLD segment, a return, a fix, a share of work
+// done together. Never priced and never counted as a unit — a stage is paid and
+// counted once, to whoever signs it.
+const isTimeOnly=w=>isHoldSegment(w)||isJointShare(w)||!!reworkOf(w);
 // serialId → the request still open on it. A request closes when a fix that
 // answers it is signed — or, should one have slipped in twice, when any fix on the
 // unit is signed after it, or the inspection is signed after it after all.
@@ -1835,8 +1851,9 @@ function buildReworkIndex(workLogs){
     if(!w.completed)return;
     const r=reworkOf(w);
     if(r&&r.req){if(!r.cancelled&&r.id&&r.serialId&&r.toStageId)reqs.push(r);return}
-    // A HOLD segment of a fix is part of it, not its end.
-    if(isHoldSegment(w))return;
+    // A HOLD segment of a fix is part of it, not its end — and so is the share of
+    // somebody who worked on it alongside and left before it was signed.
+    if(isHoldSegment(w)||isJointShare(w))return;
     const t=w.endTime||w.startTime||"";
     if(r){if(r.reqId)closed.add(r.reqId);if(r.serialId)later(fixedAt,r.serialId,t);return}
     if(w.serialId&&w.stageId)later(passedAt,logKey(w.serialId,w.stageId),t);
@@ -1925,6 +1942,124 @@ const reworkTargets=(route,fromStageId)=>{
   const i=(route||[]).findIndex(st=>st.id===fromStageId);
   return i>0?route.slice(0,i).reverse():[];
 };
+// ── עבודה משותפת ──────────────────────────────────────────────────────────
+// Now and then one unit takes two people or more at once, on the same stage. The
+// second one starts it from the queue on purpose — the row says who is already on
+// it, and 🤝 asks before it joins — and from there each of them has a log of their
+// own on that unit and stage: every clock is its own worker's minutes, and the
+// stage's time is all of them together. It is still signed once.
+//
+// ✅ asks which it is. "The stage is done" signs it with the log of whoever said
+// so and closes everybody else's at that moment, each as their share. "Only my
+// part" closes just that log as a share; the others carry on, and the last one
+// left signs the stage the ordinary way.
+//
+//   holdInfo.joint.at · with[]     started on a unit somebody was already on
+//   holdInfo.joint.share           this completed log is one person's share
+//   holdInfo.joint.serialId        the unit — the share itself has no serial
+//   holdInfo.joint.closedById/Name who closed it, when that was not its worker
+// Only a unit on a timer of its own can be joined; a group moves as one, and a
+// share taken out of the middle of it would not be the group's time any more.
+const canJoin=w=>!!w&&!w.completed&&!!w.serialId&&!!w.stageId&&!w.bulkGroupId&&!isOnHold(w);
+// Everybody else on this unit at this stage right now — on HOLD too: they are
+// still on it, and a signature must not leave their log open on a signed stage.
+const jointPartners=(workLogs,serialId,stageId,meId)=>(workLogs||[]).filter(w=>
+  !w.completed&&!w.bulkGroupId&&w.serialId===serialId&&w.stageId===stageId&&w.userId!==meId);
+// One log closed at `at` as its worker's share: the minutes they put in, no serial,
+// and the break or HOLD it was stopped on closed at the same moment.
+function jointShareOf(w,at,by){
+  const t=Date.parse(at),hi=w.holdInfo||{},r=reworkOf(w);
+  const stopped=w.paused&&w.pauseStart?Math.max(0,Math.round((t-Date.parse(w.pauseStart))/60000)):0;
+  const pl=(w.pauseLog||[]).map((p,k,a)=>(w.paused&&k===a.length-1&&p&&!p.end)?{...p,end:at}:p);
+  return{...w,serialId:null,bulkCount:null,completed:true,endTime:at,durationMin:logWorkedMin(w,t),
+    paused:false,pauseStart:null,totalPauseMin:Number(w.totalPauseMin||0)+stopped,pauseLog:pl,
+    holdInfo:{...hi,held:false,...(isOnHold(w)?{holdMin:Number(hi.holdMin||0)+stopped}:{}),
+      joint:{...(hi.joint||{}),share:true,serialId:w.serialId,closedAt:at,
+        ...(by&&by.id&&by.id!==w.userId?{closedById:by.id,closedByName:by.name||""}:{})},
+      // A fix worked on together is still a fix — this share of it included.
+      ...(r&&!r.req?{rework:{...r,serialId:w.serialId,count:1}}:{})}};
+}
+// ✅ on a unit worked on together. "all": the stage is done — every partner's log
+// closes as a share, and `logId` is left for the caller to sign. "part": `logId`
+// alone closes, as a share. `fix` is applied to each log before it closes (the
+// scheduled breaks no screen has written yet). Pure, like holdHandOff.
+function jointClose(logs,logId,mode,by,at,fix){
+  const list=logs||[],f=fix||(w=>w);
+  const me=list.find(w=>w.id===logId);
+  if(!me||me.completed||!me.serialId)return{next:list,before:[],partners:[]};
+  const partners=jointPartners(list,me.serialId,me.stageId,me.userId);
+  const closing=new Set(mode==="part"?[me.id]:partners.map(w=>w.id));
+  if(!partners.length)return{next:list,before:[],partners};
+  return{next:list.map(w=>closing.has(w.id)?jointShareOf(f(w),at,by):w),
+    before:list.filter(w=>closing.has(w.id)),partners};
+}
+// serial|stage → the minutes of everybody who worked on the unit alongside the one
+// who signed it. A fix shared this way is already in reworkMinutes.
+function jointMinutes(workLogs){
+  const m=new Map();
+  (workLogs||[]).forEach(w=>{
+    if(!isJointShare(w)||reworkOf(w))return;
+    const k=logKey(jointOf(w).serialId,w.stageId);
+    m.set(k,(m.get(k)||0)+Number(w.durationMin||0)+holdCarryMin(w));
+  });
+  return m;
+}
+// ── מה המנהל שומע ─────────────────────────────────────────────────────────
+// Every change in a worker's job reaches their direct manager: started, joined
+// somebody, out on a break, back, HOLD, carried on from HOLD, finished. It is read
+// off the record itself, so whichever device made the change, the manager's sees
+// it the moment the change arrives. A scheduled break (see applyBreaks) is not
+// news — it stops the whole department at once, by design.
+const jobState=w=>!w?"":w.completed?"done":(w.active===false&&!w.startTime)?"idle":isOnHold(w)?"hold":w.paused?(autoBreakOf(w)?"auto":"pause"):(w.active===false?"idle":"run");
+// What happened to one job between two looks at it — or null. `was` is jobState
+// as last seen ("" for a job not seen before).
+function jobChange(was,w){
+  const now=jobState(w);
+  if(!now||now===was||now==="idle"||now==="auto")return null;
+  const pl=(w&&w.pauseLog)||[],last=pl[pl.length-1],hi=(w&&w.holdInfo)||{};
+  if(now==="done")return{kind:isJointShare(w)?"part":"done",at:w.endTime};
+  if(now==="hold")return{kind:"hold",at:hi.heldAt||w.pauseStart};
+  if(now==="pause")return was==="run"?{kind:"pause",at:w.pauseStart}:null;
+  // now === "run"
+  if(!was||was==="idle")return{kind:jointOf(w)?"join":"start",at:w.startTime};
+  if(was==="pause")return{kind:"resume",at:last&&last.end};
+  if(was==="hold")return{kind:"unhold",at:hi.pickedUpAt||(last&&last.end)||w.startTime};
+  return null;   // back from a scheduled break, or a signature taken back
+}
+// The same changes read back off the records, newest first — the list in the 🔔
+// panel, so a notification missed with the screen off is still there to read. A
+// group started together is one line. `userIds` null means everybody.
+function activityFeed(workLogs,customTasks,userIds,sinceMs,meId){
+  const ids=userIds?new Set(userIds):null,m=new Map();
+  const add=(rec,kind,at,task)=>{
+    const t=Date.parse(at);if(!(t>=sinceMs))return;
+    const k=`${task?"t":"w"}:${(!task&&rec.bulkGroupId)||rec.id}:${kind}:${t}`;
+    const e=m.get(k);if(e){e.count++;return}
+    m.set(k,{key:k,kind,at:t,rec,task:!!task,count:1});
+  };
+  const walk=(rec,task)=>{
+    if(!rec||!rec.userId||rec.userId===meId||(ids&&!ids.has(rec.userId)))return;
+    if(!rec.startTime)return;
+    const hi=rec.holdInfo||{},end=rec.completed?rec.endTime:null;
+    // A signature without a timer is only its signature.
+    if(!(end&&end===rec.startTime)){
+      const how=hi.pickedUpAt===rec.startTime?"unhold":hi.assignedAt===rec.startTime?"":(jointOf(rec)&&jointOf(rec).at===rec.startTime)?"join":"start";
+      if(how)add(rec,task?"task":how,rec.startTime,task);
+    }
+    (rec.pauseLog||[]).forEach(p=>{
+      if(!p||p.auto||!p.start)return;
+      // Handed over on HOLD (see holdHandOff): the HOLD is the one who stopped it,
+      // not the one it was handed to.
+      if(!(p.hold&&p.start===hi.assignedAt&&p.start===rec.startTime))add(rec,p.hold?"hold":"pause",p.start,task);
+      if(p.end&&p.end!==end)add(rec,p.hold?"unhold":"resume",p.end,task);
+    });
+    // A HOLD segment ends where its worker stopped — that was the HOLD, not a finish.
+    if(end&&!isHoldSegment(rec))add(rec,task?"taskdone":isJointShare(rec)?"part":"done",end,task);
+  };
+  (workLogs||[]).forEach(w=>walk(w,false));
+  (customTasks||[]).forEach(t=>walk(t,true));
+  return[...m.values()].sort((a,b)=>b.at-a.at);
+}
 // ── הפסקות קבועות ─────────────────────────────────────────────────────────
 // A manager can set fixed breaks — for the whole department, or for chosen
 // workers — and at those hours whatever those people are working on stops by
@@ -2040,6 +2175,124 @@ const autoBreakOf=rec=>{
   const pl=rec.pauseLog||[],p=pl[pl.length-1];
   return p&&p.auto&&!p.end?p:null;
 };
+// ── סוף יום בלי HOLD ──────────────────────────────────────────────────────
+// Work still on the clock at 18:00 was almost always left running by mistake:
+// whoever went home did not put it on HOLD, and the timer counts the night as
+// work. Nothing stops it by itself — only the worker knows when they really
+// stopped, and a guess would pollute זמן בפועל. Instead it goes to the manager:
+// a notification, and the job is listed under 🔍 עבודות לבדיקה, where the manager
+// puts in the real hours and gives the job back in the state it is really in —
+// on HOLD from the moment work stopped, finished then, or genuinely still running.
+//
+// It is read off the record, not flagged on it: a log (open, or closed since)
+// whose clock was running at an 18:00 — not on HOLD at that moment — and that no
+// manager has reviewed since. A review lives on the log (holdInfo.review), with
+// what the log said before it, so the journal can put it back:
+//   review.at · upTo     when, and up to which moment it covers
+//   review.byId · byName who
+//   review.action        "hold" | "done" | "run"
+//   review.was           startTime · endTime · totalPauseMin · durationMin · state
+// The day ends at 18:00 every day; a job started after it is checked at the next.
+const DAY_END_HHMM="18:00";
+const DAY_END_LOOKBACK_MS=7*24*3600*1000;
+// Which of them a manager's device has already rung for (see App).
+const DAY_END_LS_KEY="dayEndTold";
+const DAY_END_ACTIONS={hold:"הועברה ל-HOLD מהשעה שבה העבודה נעצרה",done:"סומנה כהושלמה בשעה שבה הסתיימה",run:"אושרה — העבודה באמת נמשכת"};
+// 18:00 of the (local) day `ms` falls on.
+const dayEndOf=ms=>{const d=new Date(ms);d.setHours(0,hhmmMin(DAY_END_HHMM),0,0);return d.getTime()};
+const nextDayEnd=c=>{const d=new Date(c);d.setDate(d.getDate()+1);return dayEndOf(d.getTime())};
+// The latest end of day at or before `ms`.
+const lastDayEnd=ms=>{const c=dayEndOf(ms);if(c<=ms)return c;const d=new Date(ms);d.setDate(d.getDate()-1);return dayEndOf(d.getTime())};
+// Was this log on HOLD at `t`? A HOLD entry in its pauses that covers `t` (one
+// still open runs on), or the HOLD it is on now, if that began by then.
+const heldAtTime=(w,t)=>(isOnHold(w)&&atMs((w.holdInfo&&w.holdInfo.heldAt)||w.pauseStart)<=t)||
+  (w.pauseLog||[]).some(p=>p&&p.hold&&atMs(p.start)<=t&&(!p.end||atMs(p.end)>t));
+// The first end of day this log ran through without HOLD that nobody has
+// reviewed — as ms — or null. Only the last week is looked at.
+function dayEndMissed(w,now){
+  if(!w||!w.startTime)return null;
+  const s=atMs(w.startTime);if(!isFinite(s))return null;
+  const e=w.completed?atMs(w.endTime):now;
+  if(!isFinite(e)||!(e>s))return null;
+  const rv=w.holdInfo&&w.holdInfo.review;
+  const seen=rv?(atMs(rv.upTo||rv.at)||0):0;
+  const from=Math.max(s,now-DAY_END_LOOKBACK_MS,seen);
+  for(let c=dayEndOf(from),n=0;n<10&&c<=now;c=nextDayEnd(c),n++){
+    if(c<=from)continue;
+    // A closed log must still have been open at that moment.
+    if(w.completed&&!(c<e))break;
+    if(!heldAtTime(w,c))return c;
+  }
+  return null;
+}
+// Everything waiting for a manager's look, among the given people's logs: one row
+// per job (a group started together is one), oldest first.
+function dayEndRows(workLogs,userIds,now){
+  const ids=userIds?new Set(userIds):null,m=new Map(),old=now-DAY_END_LOOKBACK_MS;
+  (workLogs||[]).forEach(w=>{
+    if(!w||(ids&&!ids.has(w.userId)))return;
+    if(w.completed&&!(atMs(w.endTime)>=old))return;
+    const c=dayEndMissed(w,now);if(c==null)return;
+    const k=w.bulkGroupId?`g:${w.bulkGroupId}`:w.id;
+    const r=m.get(k);if(r){r.logs.push(w);if(c<r.at)r.at=c}else m.set(k,{key:k,at:c,logs:[w]});
+  });
+  return[...m.values()].sort((a,b)=>a.at-b.at);
+}
+// The pauses of a log inside [S, E]: cut to it, and every one of them closed.
+function clipPauses(pauseLog,S,E){
+  const iso=ms=>new Date(ms).toISOString();
+  return(pauseLog||[]).map(p=>{
+    if(!p||!p.start)return null;
+    const a=Math.max(atMs(p.start),S),b=Math.min(p.end?atMs(p.end):E,E);
+    return(isFinite(a)&&isFinite(b)&&b>a)?{...p,start:iso(a),end:iso(b)}:null;
+  }).filter(Boolean);
+}
+const pauseMinOf=(pl,hold)=>(pl||[]).reduce((n,p)=>(hold&&!p.hold)?n:n+Math.round((atMs(p.end)-atMs(p.start))/60000),0);
+// What the manager's form opens with: the start as recorded, and work stopping at
+// the end of the day it ran past — or when it was stopped (HOLD, ✅), if that came
+// soon after, which is then most likely the real moment — with the stops recorded
+// in between.
+const DAY_END_STOP_NEAR_MS=2*3600*1000;
+function dayEndGuess(w,c){
+  const S=atMs(w.startTime);
+  const stop=w.completed?atMs(w.endTime):isOnHold(w)?atMs((w.holdInfo&&w.holdInfo.heldAt)||w.pauseStart):NaN;
+  const E=Math.max(S,(isFinite(stop)&&stop-c<=DAY_END_STOP_NEAR_MS)?stop:c);
+  return{S,E,pauseMin:pauseMinOf(clipPauses(w.pauseLog,S,E))};
+}
+// The manager's correction, applied to every log of one job. Pure; returns the
+// new log list and the logs as they were.
+//   fix {startTime, endTime, pauseMin, action}
+//   "hold"  stopped at endTime, not finished: on HOLD from then, the worker
+//           carries on from where it really stopped
+//   "done"  finished at endTime (a closed log keeps its state, with these times)
+//   "run"   really still working — only the start may move
+function dayEndFix(logs,ids,fix,by,at){
+  const want=new Set(ids||[]),list=logs||[];
+  const before=list.filter(w=>want.has(w.id));
+  if(!before.length)return{next:list,before};
+  const iso=ms=>new Date(ms).toISOString();
+  const S=atMs(fix.startTime),E=atMs(fix.endTime);
+  const P=Math.max(0,Math.round(Number(fix.pauseMin)||0));
+  const next=list.map(w=>{
+    if(!want.has(w.id))return w;
+    const hi=w.holdInfo||{};
+    const review={at,upTo:at,byId:by&&by.id||"",byName:by&&by.name||"",action:fix.action,
+      was:{startTime:w.startTime,endTime:w.endTime||null,totalPauseMin:Number(w.totalPauseMin||0),durationMin:Number(w.durationMin||0),state:jobState(w)}};
+    const start=isFinite(S)?iso(S):w.startTime;
+    if(fix.action==="run")return{...w,startTime:start,holdInfo:{...hi,review}};
+    const pl=clipPauses(w.pauseLog,isFinite(S)?S:atMs(w.startTime),E);
+    // The HOLD minutes inside stay HOLD (see breakMinOf) — the rest of P is breaks.
+    const holdMin=Math.min(P,pauseMinOf(pl,true));
+    const base={...w,startTime:start,totalPauseMin:P,pauseLog:pl};
+    if(fix.action==="hold"&&!w.completed)return{...base,completed:false,endTime:null,durationMin:0,
+      paused:true,pauseStart:iso(E),pauseLog:[...pl,{start:iso(E),hold:true}],
+      holdInfo:{...hi,held:true,heldAt:iso(E),heldBy:by&&by.id||"",heldByName:by&&by.name||"",holdMin,review}};
+    const dur=Math.max(0,Math.round((E-atMs(start))/60000)-P);
+    return reworkFinish({...base,completed:true,endTime:iso(E),durationMin:dur,paused:false,pauseStart:null,
+      holdInfo:{...hi,held:false,holdMin,review}});
+  });
+  return{next,before};
+}
 // ── מחיר ליחידה ───────────────────────────────────────────────────────────
 // Money is read through here rather than off the order, so one unreadable row
 // cannot decide a headline figure. A price above this ceiling is not a price —
@@ -2191,8 +2444,9 @@ function timeSamples(workLogs,orders,stages,stageBlocks,pnStdIdx){
   const oMap=new Map((orders||[]).map(o=>[o.id,o]));
   const sMap=new Map((stages||[]).map(s=>[s.id,s]));
   // A fix after inspection is more time on a stage the unit already passed, so it
-  // lands on that stage's sample rather than standing as one of its own.
-  const fixes=reworkMinutes(workLogs);
+  // lands on that stage's sample rather than standing as one of its own. So does
+  // the time of everybody who worked on the unit alongside the one who signed it.
+  const fixes=reworkMinutes(workLogs),joint=jointMinutes(workLogs);
   const out=[];
   (workLogs||[]).forEach(w=>{
     if(!w.completed)return;
@@ -2201,7 +2455,8 @@ function timeSamples(workLogs,orders,stages,stageBlocks,pnStdIdx){
     // inspection is measured by the one that passes the unit.
     if(isTimeOnly(w))return;
     const min=Number(w.durationMin||0)+holdCarryMin(w);
-    if(!(min>0))return;                       // sign-offs and zero-length logs carry no timing information
+    const together=w.serialId?(joint.get(logKey(w.serialId,w.stageId))||0):0;
+    if(!(min+together>0))return;              // sign-offs and zero-length logs carry no timing information
     const o=oMap.get(w.orderId),st=sMap.get(w.stageId);
     if(!o||!st)return;
     const units=w.bulk&&Number(w.bulkCount)>1?Number(w.bulkCount):1;
@@ -2211,7 +2466,7 @@ function timeSamples(workLogs,orders,stages,stageBlocks,pnStdIdx){
       pn,orderId:o.id,projectId:o.projectId||"",
       stageId:st.id,stageName:st.name,stageColor:st.color,stageOrder:Number(st.order||0),
       userId:w.userId||"",userName:w.userName||"—",
-      min:min/units+fix,fix,sale:stageMinutesFor(o,st,stageBlocks),
+      min:min/units+fix+together,fix,together,sale:stageMinutesFor(o,st,stageBlocks),
       std:stdStageMin(pnStdIdx?.get(pnKey(pn)),st.id),
       date:(w.endTime||w.startTime||"").slice(0,10)
     });
@@ -4376,15 +4631,19 @@ function SerialsManager({order,stages,onUpdate,workLogs,onSignOff}){
   // The grid asks for one cell per unit per stage — a hundred units on a
   // twenty-stage route is two thousand questions per render, and each of them
   // used to walk the whole log list twice. One pass up front answers all of them.
+  // Everybody on a unit right now is listed, and the shares of people who worked
+  // on it together are kept beside the signature, so its cell can say who and how long.
   const cellLogs=useMemo(()=>{
-    const done=new Map(),active=new Map();
+    const done=new Map(),active=new Map(),shares=new Map();
+    const push=(m,k,w)=>{const l=m.get(k);if(l)l.push(w);else m.set(k,[w])};
     (workLogs||[]).forEach(w=>{
+      if(isJointShare(w)){if(w.stageId)push(shares,logKey(jointOf(w).serialId,w.stageId),w);return}
       if(!w.serialId||!w.stageId)return;
       const k=logKey(w.serialId,w.stageId);
       if(w.completed){if(!done.has(k))done.set(k,w)}
-      else if(!active.has(k))active.set(k,w);
+      else push(active,k,w);
     });
-    return{done,active};
+    return{done,active,shares};
   },[workLogs]);
   // A unit an inspection sent back: its stage is still signed, the unit is waiting
   // for a fix there.
@@ -4392,9 +4651,9 @@ function SerialsManager({order,stages,onUpdate,workLogs,onSignOff}){
   const getStageStatus=(serialId,stageId)=>{
     const k=logKey(serialId,stageId);
     const log=cellLogs.done.get(k);
-    if(log)return{done:true,user:log.userName,time:log.endTime,duration:log.durationMin};
+    if(log)return{done:true,user:log.userName,time:log.endTime,duration:log.durationMin,shares:cellLogs.shares.get(k)||[]};
     const active=cellLogs.active.get(k);
-    if(active)return{active:true,user:active.userName,startTime:active.startTime};
+    if(active)return{active:true,user:active.map(w=>w.userName).join(" + "),startTime:active[0].startTime,many:active.length>1};
     return{pending:true};
   };
 
@@ -4469,11 +4728,16 @@ function SerialsManager({order,stages,onUpdate,workLogs,onSignOff}){
                       const status=getStageStatus(s.id,st.id);
                       // Signed, and back for a fix after inspection: being fixed, or waiting for it.
                       const rw=reworkIdx.get(s.id),fixing=status.done&&cellLogs.active.get(logKey(s.id,st.id));
-                      if(fixing)return<td key={st.id} style={{textAlign:"center"}}><span title="תיקון לאחר ביקורת — בעבודה" style={{animation:"pulse 1.5s infinite",color:"#e11d48",fontSize:13}}>🔧 {fixing.userName}</span></td>;
+                      if(fixing)return<td key={st.id} style={{textAlign:"center"}}><span title="תיקון לאחר ביקורת — בעבודה" style={{animation:"pulse 1.5s infinite",color:"#e11d48",fontSize:13}}>🔧 {fixing.map(w=>w.userName).join(" + ")}</span></td>;
                       if(status.done&&rw&&rw.toStageId===st.id)
                         return<td key={st.id} style={{textAlign:"center"}}><span title={`נחתם ע״י ${status.user}. הוחזר לתיקון${rw.byName?` ע״י ${rw.byName}`:""}${rw.note?`: ${rw.note}`:""}`} style={{color:"#e11d48",fontSize:13,fontWeight:700}}>✅🔧</span></td>;
+                      if(status.done&&status.shares.length){
+                        // Worked on together: each person's minutes, and the stage's time as a whole.
+                        const tot=Number(status.duration||0)+status.shares.reduce((n,w)=>n+Number(w.durationMin||0)+holdCarryMin(w),0);
+                        return<td key={st.id} style={{textAlign:"center"}}><span title={`👥 עבודה משותפת — סה״כ לשלב ${fmtTime(tot)}\n${[`${status.user} (חתם/ה): ${fmtTime(status.duration)}`,...status.shares.map(w=>`${w.userName}: ${fmtTime(w.durationMin)}`)].join("\n")}`} style={{color:"#10b981",fontSize:14,whiteSpace:"nowrap"}}>✅👥</span></td>;
+                      }
                       if(status.done)return<td key={st.id} style={{textAlign:"center"}}><span title={`${status.user} — ${fmtTime(status.duration)}`} style={{color:"#10b981",fontSize:16}}>✅</span></td>;
-                      if(status.active)return<td key={st.id} style={{textAlign:"center"}}><span style={{animation:"pulse 1.5s infinite",color:"#f59e0b",fontSize:13}}>🔄 {status.user}</span></td>;
+                      if(status.active)return<td key={st.id} style={{textAlign:"center"}}><span title={status.many?"עובדים על היחידה יחד":undefined} style={{animation:"pulse 1.5s infinite",color:"#f59e0b",fontSize:13}}>🔄{status.many?"👥":""} {status.user}</span></td>;
                       return<td key={st.id} style={{textAlign:"center"}}>{isAdmin?<button onClick={()=>adminSignOff(s.id,st.id)} style={{background:"none",border:"1px dashed var(--c-border2)",borderRadius:6,padding:"2px 8px",fontSize:11,color:"var(--c-dim)",cursor:"pointer",fontFamily:"inherit"}} title="חתום כמנהל">✍️</button>:<span style={{color:"var(--c-dim)"}}>—</span>}</td>;
                     })}
                     <td style={{textAlign:"center"}}>{reworkIdx.has(s.id)?<span title={reworkIdx.get(s.id).note||""} style={{color:"#e11d48",fontWeight:700,fontSize:12}}>🔧 בתיקון · {stages.find(x=>x.id===reworkIdx.get(s.id).toStageId)?.name||""}</span>:allDone?<span style={{color:"#10b981",fontWeight:700,fontSize:12}}>📦 סופק</span>:anyActive?<span style={{color:"#f59e0b",fontSize:12}}>🔄 בתהליך</span>:<span style={{color:"var(--c-dim)",fontSize:12}}>ממתין</span>}</td>
@@ -4661,13 +4925,15 @@ function OrderDetail({order,projects,stages,stageBlocks,departments=[],onClose,o
     const byStage=new Map();
     // A fix after inspection adds to the unit's time on its stage (see timeSamples).
     const mine=(workLogs||[]).filter(w=>w.orderId===order.id);
-    const fixes=reworkMinutes(mine);
+    // So does the time of everybody who worked on it alongside the one who signed it.
+    const fixes=reworkMinutes(mine),joint=jointMinutes(mine);
     mine.forEach(w=>{
-      if(!w.completed||reworkOf(w))return;
-      const m=Number(w.durationMin||0);if(!(m>0))return;
+      if(!w.completed||reworkOf(w)||isJointShare(w))return;
+      const together=w.serialId?(joint.get(logKey(w.serialId,w.stageId))||0):0;
+      const m=Number(w.durationMin||0);if(!(m+together>0))return;
       const units=w.bulk&&Number(w.bulkCount)>1?Number(w.bulkCount):1;
       const fix=w.serialId?(fixes.get(logKey(w.serialId,w.stageId))||0):0;
-      const a=byStage.get(w.stageId)||{sum:0,n:0};a.sum+=m/units+fix;a.n++;byStage.set(w.stageId,a);
+      const a=byStage.get(w.stageId)||{sum:0,n:0};a.sum+=m/units+fix+together;a.n++;byStage.set(w.stageId,a);
     });
     let t=0;byStage.forEach(a=>{t+=a.sum/a.n});
     return t;
@@ -5344,7 +5610,7 @@ const PlanTag=({small,label="תוכנית העבודה שלי"})=>(
 // and "queue" is everything in the plant waiting on their stages. They used to be
 // one long page, with the assignment buried above a list of every פק"ע. Leads and
 // department managers keep both on one tab ("all"), next to their other tabs.
-function MyWork({orders,stages,workLogs,onStartWork,onEndWork,onPauseWork,onResumeWork,onHoldWork,onPickupHold,onReturnRework,onDeleteLog,customTasks,onAddTask,onStartTask,onEndTask,onPauseTask,onResumeTask,onDeleteTask,onMarkPartialTask,onMarkDoneTask,users,dailyPlans,onMarkPlanDone,view="all",onGoTab}){
+function MyWork({orders,stages,workLogs,onStartWork,onEndWork,onEndJoint,onPauseWork,onResumeWork,onHoldWork,onPickupHold,onReturnRework,onDeleteLog,customTasks,onAddTask,onStartTask,onEndTask,onPauseTask,onResumeTask,onDeleteTask,onMarkPartialTask,onMarkDoneTask,users,dailyPlans,onMarkPlanDone,view="all",onGoTab}){
   const showMine=view!=="queue",showQueue=view!=="mine";
   const {toast}=useToast();
   const {currentUser}=useAuth();
@@ -5535,6 +5801,24 @@ function MyWork({orders,stages,workLogs,onStartWork,onEndWork,onPauseWork,onResu
     listHeld.forEach(r=>{const k=r.logs[0].orderId;if(!m.has(k))m.set(k,[]);m.get(k).push(r)});
     return m;
   },[listHeld]);
+  // ── Units somebody is working on right now — open to join ──────────────
+  // See canJoin. One row per unit and stage, with everybody on it; a unit this
+  // worker is already on (running, paused or on HOLD) is not offered to them again.
+  const jointByOrder=useMemo(()=>{
+    const m=new Map();
+    if(!showQueue)return m;
+    const acc=new Set(accessible.map(o=>o.id));
+    const rows=new Map();
+    workLogs.forEach(w=>{
+      if(!canJoin(w)||!acc.has(w.orderId)||!myAccessSet.has(w.stageId))return;
+      const k=logKey(w.serialId,w.stageId);
+      let r=rows.get(k);if(!r){r={key:k,serialId:w.serialId,serialSn:w.serialSn,orderId:w.orderId,stageId:w.stageId,logs:[]};rows.set(k,r)}
+      r.logs.push(w);
+    });
+    workLogs.forEach(w=>{if(!w.completed&&w.serialId&&w.userId===currentUser.id)rows.delete(logKey(w.serialId,w.stageId))});
+    rows.forEach(r=>{const l=m.get(r.orderId);if(l)l.push(r);else m.set(r.orderId,[r])});
+    return m;
+  },[showQueue,workLogs,accessible,myAccessSet,currentUser]);
   const heldUnits=r=>isQtyRun(r.logs[0])?`${r.logs[0].bulkCount} יח'`:r.logs.map(x=>x.serialSn).filter(Boolean).join(", ");
   const continueHeld=r=>{
     if(myActiveLog&&!myActiveLog.paused){toast("יש לך עבודה פעילה. סיים, עצור או העבר אותה ל-HOLD לפני שממשיכים עבודה אחרת.","warning");return}
@@ -5565,6 +5849,44 @@ function MyWork({orders,stages,workLogs,onStartWork,onEndWork,onPauseWork,onResu
         </div>
         <Btn color="#f97316" onClick={()=>continueHeld(r)} disabled={busy} title={busy?"יש לך עבודה פעילה — סיים או עצור אותה קודם":r.mine?"המשך מאיפה שעצרת":"המשך את העבודה — הזמן מעכשיו נספר לך"}
           style={{padding:"9px 16px",fontSize:13.5}}>▶️ המשך</Btn>
+      </div>
+    );
+  };
+
+  // 🤝 Join a unit somebody is working on right now (see jointClose). Asked first,
+  // and in so many words: this is somebody else's unit, and from here it is worked
+  // on together — each clock its own worker's, the stage's time all of them.
+  const joinWork=(o,r)=>{
+    if(myActiveLog&&!myActiveLog.paused){toast("יש לך עבודה פעילה. סיים או עצור לפני שמצטרפים לעבודה אחרת.","warning");return}
+    const st=stageMap.get(r.stageId);
+    const names=r.logs.map(w=>w.userName).filter(Boolean).join(", ")||"עובד אחר";
+    if(!confirm(`🤝 להצטרף לעבודה על ${r.serialSn||"היחידה"}?\n\n${names} כבר ${r.logs.length>1?"עובדים":"עובד/ת"} על היחידה הזו${st?` בשלב ${st.name}`:""}.\n\nתעבדו עליה ביחד: הטיימר שלך סופר רק את הזמן שלך, ובפק"ע השלב יקבל את הזמן של כולכם יחד. השלב ייחתם פעם אחת — מי שלוחץ ✅ בוחר אם השלב הושלם לכולם, או שרק החלק שלו הסתיים.`))return;
+    const at=nowISO();
+    onStartWork({id:uid(),userId:currentUser.id,userName:currentUser.name,serialId:r.serialId,stageId:r.stageId,orderId:o.id,serialSn:r.serialSn||"",
+      startTime:at,endTime:null,completed:false,durationMin:0,paused:false,pauseStart:null,totalPauseMin:0,pauseLog:[],
+      holdInfo:{joint:{at,with:r.logs.map(w=>({userId:w.userId,userName:w.userName}))}}});
+  };
+  // One unit somebody else is on, as the queue lists it: who, since when, how long
+  // it has had so far — and 🤝 to join, never a plain ▶️.
+  const jointRowView=(o,r)=>{
+    const st=stageMap.get(r.stageId);
+    const names=r.logs.map(w=>w.userName).filter(Boolean).join(", ")||"עובד";
+    const since=r.logs.reduce((a,w)=>(!a||String(w.startTime)<a)?String(w.startTime):a,"");
+    const total=r.logs.reduce((n,w)=>n+logWorkedMin(w)+holdCarryMin(w),0);
+    return(
+      <div key={`j:${r.key}`} style={{display:"flex",justifyContent:"space-between",alignItems:"center",gap:8,flexWrap:"wrap",background:"#0ea5e90d",border:"1px dashed #0ea5e977",borderRadius:8,padding:"7px 12px"}}>
+        <div style={{minWidth:0,flex:"1 1 180px"}}>
+          <div style={{display:"flex",alignItems:"center",gap:7,flexWrap:"wrap"}}>
+            <span style={{fontSize:10.5,background:"#0ea5e91f",color:"#0ea5e9",border:"1px solid #0ea5e955",borderRadius:10,padding:"1px 8px",fontWeight:700,whiteSpace:"nowrap"}}>👥 בעבודה אצל {names}</span>
+            <span style={{fontWeight:600,fontSize:13}}>{r.serialSn||"—"}</span>
+            {st&&<span style={{fontSize:11,color:st.color}}>← {st.name}</span>}
+          </div>
+          <div style={{fontSize:11,color:"var(--c-dim)",marginTop:3}}>
+            {since?`מאז ${fmtClock(since)} · `:""}נעבד עד כה: <b style={{color:"var(--c-text)"}}>{fmtTime(total)}</b> · אפשר להצטרף ולעבוד עליה ביחד
+          </div>
+        </div>
+        <Btn color="#0ea5e9" small onClick={()=>joinWork(o,r)} disabled={busyNow}
+          title={runBlocked||`${names} כבר עובד/ת על היחידה — הצטרפות פירושה עבודה משותפת: כל אחד מקבל את הזמן שלו, והשלב את הזמן של כולם`}>🤝 הצטרף לעבודה</Btn>
       </div>
     );
   };
@@ -5608,6 +5930,8 @@ function MyWork({orders,stages,workLogs,onStartWork,onEndWork,onPauseWork,onResu
       if(n!==started)patch={bulkCount:n};
       setRunDone("");
     }
+    // Somebody else is on this unit with me: is the stage done, or only my part?
+    if(myPartners.length&&onEndJoint){setJointDlg({logId:myActiveLog.id,dur:Math.max(0,dur)});return}
     onEndWork(myActiveLog.id,Math.max(0,dur),patch);
     // A group that was started together ends together — that group only, so an
     // unrelated batch left open on the side is not closed with it.
@@ -5625,6 +5949,16 @@ function MyWork({orders,stages,workLogs,onStartWork,onEndWork,onPauseWork,onResu
   // handed over from someone else's HOLD is not offered: it carries their minutes,
   // and was never this worker's start to take back.
   const cancelGroup=myActiveLog?(myActiveLog.bulkGroupId?myActiveLogs.filter(w=>w.bulkGroupId===myActiveLog.bulkGroupId):[myActiveLog]):[];
+  // Who else is on the unit I am working on — see jointPartners.
+  const myPartners=useMemo(()=>(myActiveLog&&myActiveLog.serialId&&!myActiveLog.bulkGroupId)
+    ?jointPartners(workLogs,myActiveLog.serialId,myActiveLog.stageId,currentUser.id):[],[myActiveLog,workLogs,currentUser]);
+  const [jointDlg,setJointDlg]=useState(null);
+  const finishJoint=mode=>{
+    const d=jointDlg;setJointDlg(null);
+    if(!d||!onEndJoint)return;
+    if(onEndJoint(d.logId,mode,d.dur)===false){toast("העבודה כבר נסגרה — אולי מישהו אחר כבר סימן שהשלב הושלם","warning");return}
+    toast(mode==="all"?"✅ השלב הושלם — נחתם, והזמן של כל מי שעבד נרשם לו":"👋 החלק שלך נרשם — השאר ממשיכים, והשלב ייחתם כשהם יסיימו","success",6000);
+  };
   const canCancelStart=!!(onDeleteLog&&myActiveLog&&cancelGroup.every(w=>!holdCarryMin(w)&&!((w.holdInfo&&w.holdInfo.prev)||[]).length));
   const cancelStart=()=>{
     if(!canCancelStart)return;
@@ -5712,9 +6046,9 @@ function MyWork({orders,stages,workLogs,onStartWork,onEndWork,onPauseWork,onResu
     }).filter(Boolean).sort((a,b)=>(b.rework?2:0)+(b.planned?1:0)-(a.rework?2:0)-(a.planned?1:0));
     // id carried on the queue itself so the virtual list keys rows by פק"ע rather
     // than by position — the list re-sorts as plan units are worked off.
-    return{id:o.id,kind:"serial",order:o,units,held:heldByOrder.get(o.id)||[],planned:units.filter(u=>u.planned).length};
-  }).filter(q=>q&&(q.units.length>0||q.held.length>0)),
-    [showQueue,accessible,stageMap,doneIdx,runIdx,reworkIdx,myAccessSet,myPlans,heldByOrder]);
+    return{id:o.id,kind:"serial",order:o,units,held:heldByOrder.get(o.id)||[],joint:jointByOrder.get(o.id)||[],planned:units.filter(u=>u.planned).length};
+  }).filter(q=>q&&(q.units.length>0||q.held.length>0||q.joint.length>0)),
+    [showQueue,accessible,stageMap,doneIdx,runIdx,reworkIdx,myAccessSet,myPlans,heldByOrder,jointByOrder]);
   // ── פק"ע שאינן מנוהלות סיריאלית ───────────────────────────────────────
   // These never reach the queue above and never could: that queue is built from
   // units, and a פק"ע with no serial numbers has none. It is still work, and it is
@@ -5737,11 +6071,12 @@ function MyWork({orders,stages,workLogs,onStartWork,onEndWork,onPauseWork,onResu
     const pn=new Map(),br=new Map(),st=new Map();
     const bump=(m,k,n)=>m.set(k,(m.get(k)||0)+n);
     orderQueues.forEach(q=>{
-      const n=q.units.length+q.held.length;
+      const n=q.units.length+q.held.length+q.joint.length;
       bump(pn,(q.order.pn||"").trim(),n);
       bump(br,branchCode(q.order.branch),n);
       q.units.forEach(u=>bump(st,u.next.id,1));
       q.held.forEach(r=>bump(st,r.logs[0].stageId,1));
+      q.joint.forEach(r=>bump(st,r.stageId,1));
     });
     qtyOrders.forEach(o=>{
       bump(pn,(o.pn||"").trim(),1);
@@ -5762,7 +6097,8 @@ function MyWork({orders,stages,workLogs,onStartWork,onEndWork,onPauseWork,onResu
       // Kinds of work, for the chips above the list.
       serial:orderQueues.reduce((n,q)=>n+q.units.length,0),
       qty:qtyOrders.length,
-      held:listHeld.length
+      held:listHeld.length,
+      joint:orderQueues.reduce((n,q)=>n+q.joint.length,0)
     };
   },[orderQueues,qtyOrders,listHeld,myAccessSet,stageMap]);
   const advOn=fPn!=="all"||fStage!=="all"||fBranch!=="all";
@@ -5786,17 +6122,18 @@ function MyWork({orders,stages,workLogs,onStartWork,onEndWork,onPauseWork,onResu
   const visibleQueues=useMemo(()=>fType==="qty"?[]:orderQueues
     .filter(q=>orderMatches(q.order))
     .map(q=>{
-      let units=fType==="held"?[]:q.units,held=q.held;
-      if(onlyPlan){units=units.filter(u=>u.planned);held=held.filter(r=>r.logs.some(w=>isPlanned(q.order.id,w.stageId,w.serialId)))}
-      if(fStage!=="all")units=units.filter(u=>u.next.id===fStage);
+      // 👥 shows only what others are working on; 🟧 only what was left on HOLD.
+      let units=(fType==="held"||fType==="joint")?[]:q.units,held=fType==="joint"?[]:q.held,joint=fType==="held"?[]:q.joint;
+      if(onlyPlan){units=units.filter(u=>u.planned);held=held.filter(r=>r.logs.some(w=>isPlanned(q.order.id,w.stageId,w.serialId)));joint=joint.filter(r=>isPlanned(q.order.id,r.stageId,r.serialId))}
+      if(fStage!=="all"){units=units.filter(u=>u.next.id===fStage);joint=joint.filter(r=>r.stageId===fStage)}
       held=held.filter(heldInStage);
-      return(units===q.units&&held===q.held)?q:{...q,units,held,planned:units.filter(u=>u.planned).length};
+      return(units===q.units&&held===q.held&&joint===q.joint)?q:{...q,units,held,joint,planned:units.filter(u=>u.planned).length};
     })
-    .filter(q=>q.units.length>0||q.held.length>0),[orderQueues,onlyPlan,fStage,fType,orderMatches,heldInStage,myPlans]);
+    .filter(q=>q.units.length>0||q.held.length>0||q.joint.length>0),[orderQueues,onlyPlan,fStage,fType,orderMatches,heldInStage,myPlans]);
   // The quantity rows answer to the same filters. A שלב filter keeps only the
   // פק"ע that still have something unsigned on *that* stage, which is the rule
   // the list already follows for the worker's stages as a whole.
-  const visibleQtyOrders=useMemo(()=>fType==="serial"?[]:qtyOrders.filter(o=>{
+  const visibleQtyOrders=useMemo(()=>(fType==="serial"||fType==="joint")?[]:qtyOrders.filter(o=>{
     if(!orderMatches(o))return false;
     if(fType==="held"&&!(heldByOrder.get(o.id)||[]).some(heldInStage))return false;
     if(onlyPlan&&!myPlans.some(p=>p.orderId===o.id))return false;
@@ -5819,12 +6156,14 @@ function MyWork({orders,stages,workLogs,onStartWork,onEndWork,onPauseWork,onResu
         held:(heldByOrder.get(o.id)||[]).filter(heldInStage),
         planned:myPlans.filter(p=>p.orderId===o.id).length});
     });
-    const rank=it=>(it.planned>0?2:0)+(it.held.length>0?1:0);
+    // A פק"ע that is only listed for what others are working on comes last.
+    const rank=it=>(it.planned>0?2:0)+(it.held.length>0?1:0)-(it.kind==="serial"&&!it.units.length&&!it.held.length?1:0);
     // Array sort is stable — inside a rank the פק"ע keep their order.
     return out.sort((a,b)=>rank(b)-rank(a));
   },[accessible,visibleQueues,visibleQtyOrders,heldByOrder,heldInStage,myPlans]);
   const visibleUnitCount=useMemo(()=>visibleQueues.reduce((n,q)=>n+q.units.length,0),[visibleQueues]);
   const visibleHeldCount=useMemo(()=>workItems.reduce((n,it)=>n+it.held.length,0),[workItems]);
+  const visibleJointCount=useMemo(()=>visibleQueues.reduce((n,q)=>n+q.joint.length,0),[visibleQueues]);
   // Admin view: the same two figures were recomputed inline in the markup on every
   // render — including the pending-unit count, which walks every serial of every
   // פק"ע against its whole route.
@@ -5863,7 +6202,12 @@ function MyWork({orders,stages,workLogs,onStartWork,onEndWork,onPauseWork,onResu
           {holdCarryMin(myActiveLog)>0&&<div style={{fontSize:11,color:"#f97316",marginTop:2}}>
             ↪️ המשך עבודה של {(myActiveLog.holdInfo?.prev||[]).map(p=>p.userName).join(", ")||"עובד אחר"} — הטיימר כולל {fmtTime(holdCarryMin(myActiveLog))} שכבר עבדו. בדוחות נספר לך רק הזמן שלך.
           </div>}
+          {myPartners.length>0&&<div style={{fontSize:12,color:"#0ea5e9",background:"#0ea5e910",border:"1px solid #0ea5e944",borderRadius:8,padding:"6px 9px",marginTop:7,lineHeight:1.5,maxWidth:420}}>
+            👥 <b>עבודה משותפת</b> — על היחידה עובדים איתך: {myPartners.map(w=>`${w.userName}${isOnHold(w)?" (HOLD)":w.paused?" (בהפסקה)":""}`).join(", ")}
+            <div style={{color:"var(--c-dim)",fontSize:11}}>הטיימר שלך סופר רק את הזמן שלך. בפק"ע השלב מקבל את הזמן של כולכם יחד, ונחתם פעם אחת.</div>
+          </div>}
           {isStaleWork(myActiveLog.startTime,myActiveLog.totalPauseMin)&&<div style={{fontSize:12,color:"#ef4444",fontWeight:700,marginTop:4}}>⚠️ העבודה פתוחה מעל 12 שעות — אם סיימת, לחץ "סיימתי"</div>}
+          <DayEndNote log={myActiveLog}/>
           {myActiveLog.paused&&<div style={{fontSize:22,fontWeight:800,color:"#8b95a8",marginTop:6}}>⏸️ מושהה</div>}
           {activeBreak&&<div style={{fontSize:12,color:"#8b95a8",marginTop:2}}>הפסקה קבועה שהמנהל הגדיר{activeBreak.until?` — העבודה תחזור לבד ב-${fmtClock(activeBreak.until)}`:""}. צריך לחזור קודם? לחץ ▶️ חזור לעבודה.</div>}
           {isReworkFix(myActiveLog)&&(()=>{const r=reworkOf(myActiveLog);return(
@@ -6105,7 +6449,8 @@ function MyWork({orders,stages,workLogs,onStartWork,onEndWork,onPauseWork,onResu
   const kindChip=(on,c)=>({background:on?c+"22":"var(--c-deep)",border:`1px solid ${on?c:"var(--c-border2)"}`,color:on?c:"var(--c-muted)",
     borderRadius:20,padding:"6px 12px",fontSize:12.5,fontWeight:600,fontFamily:"inherit",cursor:"pointer",whiteSpace:"nowrap"});
   const kinds=[["all","הכל","#3b82f6"],["serial",`🔢 עם מספר סידורי · ${queueOpts.serial}`,"#3b82f6"],
-    ["qty",`✍️ לפי כמות · ${queueOpts.qty}`,"#10b981"],["held",`🟧 הותחלו · ${queueOpts.held}`,"#f97316"]]
+    ["qty",`✍️ לפי כמות · ${queueOpts.qty}`,"#10b981"],["held",`🟧 הותחלו · ${queueOpts.held}`,"#f97316"],
+    ["joint",`👥 בעבודה אצל אחרים · ${queueOpts.joint}`,"#0ea5e9"]]
     .filter(([k])=>k==="all"||queueOpts[k]>0);
   const advCount=[fPn,fStage,fBranch].filter(v=>v!=="all").length;
   const filtersCard=(orderQueues.length>0||qtyOrders.length>0)&&(
@@ -6150,7 +6495,7 @@ function MyWork({orders,stages,workLogs,onStartWork,onEndWork,onPauseWork,onResu
       {filterOn&&(
         <div style={{display:"flex",alignItems:"center",gap:10,flexWrap:"wrap",fontSize:11.5,color:"var(--c-dim)",marginTop:8}}>
           {workItems.length
-            ?<span>מציג {workItems.length} פק"ע{visibleUnitCount>0?` · ${visibleUnitCount} יחידות`:""}{visibleHeldCount>0?` · ${visibleHeldCount} שהותחלו`:""}</span>
+            ?<span>מציג {workItems.length} פק"ע{visibleUnitCount>0?` · ${visibleUnitCount} יחידות`:""}{visibleHeldCount>0?` · ${visibleHeldCount} שהותחלו`:""}{visibleJointCount>0?` · ${visibleJointCount} בעבודה אצל אחרים`:""}</span>
             :<span style={{color:"#f59e0b"}}>אין עבודה שמתאימה לסינון — נסה לנקות אותו</span>}
           <button onClick={clearFilters} style={{...linkBtn,color:"#ef4444"}}>✕ נקה סינון</button>
         </div>
@@ -6168,12 +6513,13 @@ function MyWork({orders,stages,workLogs,onStartWork,onEndWork,onPauseWork,onResu
   );
   // A פק"ע with serial numbers: its units, each with ▶️ — and above them anything
   // somebody started on it and left on HOLD.
-  const serialCard=({order:o,units,held,planned})=>(
+  const serialCard=({order:o,units,held,joint,planned})=>(
     <Card key={o.id} style={{marginBottom:10,border:planned>0?"1px solid #06b6d455":held.length?"1px solid #f9731655":"1px solid var(--c-border)"}}>
       <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:10,flexWrap:"wrap"}}>
         <span style={{fontWeight:700,color:"#60a5fa"}}>{o.woNumber}</span>
         {o.pn&&<span style={{fontSize:12,color:"#a78bfa"}}>P/N: {o.pn}</span>}
         {units.length>0&&<span style={{fontSize:11,color:"var(--c-dim)"}}>({units.length} ממתינות)</span>}
+        {joint.length>0&&<span style={{fontSize:11,color:"#0ea5e9"}}>👥 {joint.length} בעבודה אצל אחרים</span>}
         {planned>0&&<PlanTag label={`תוכנית העבודה שלי · ${planned} יח'`}/>}
         {bulkMode&&bulkSelected.length>0&&<Btn color="var(--c-accent)" small onClick={()=>startBulk(o.id)}>▶️ התחל {bulkSelected.length} יחידות</Btn>}
         {!bulkMode&&units.length>1&&(()=>{
@@ -6211,6 +6557,8 @@ function MyWork({orders,stages,workLogs,onStartWork,onEndWork,onPauseWork,onResu
           );
         })}
         {units.length>15&&<div style={{fontSize:12,color:"var(--c-dim)",textAlign:"center"}}>ועוד {units.length-15}...</div>}
+        {!bulkMode&&joint.slice(0,15).map(r=>jointRowView(o,r))}
+        {!bulkMode&&joint.length>15&&<div style={{fontSize:12,color:"var(--c-dim)",textAlign:"center"}}>ועוד {joint.length-15} בעבודה אצל אחרים...</div>}
       </div>
     </Card>
   );
@@ -6351,6 +6699,26 @@ function MyWork({orders,stages,workLogs,onStartWork,onEndWork,onPauseWork,onResu
       )}
       {rwDlg&&<ReworkReturnModal order={rwDlg.order} stage={rwDlg.stage} units={rwDlg.units} stages={stages}
         onClose={()=>setRwDlg(null)} onConfirm={sendBack}/>}
+      {jointDlg&&(
+        <Modal onClose={()=>setJointDlg(null)}>
+          <h3 style={{margin:"0 0 6px",color:"#0ea5e9"}}>👥 סיום עבודה משותפת</h3>
+          <div style={{fontSize:13,color:"var(--c-muted)",lineHeight:1.6,marginBottom:14}}>
+            על היחידה <b style={{color:"var(--c-text)"}}>{myActiveLog?.serialSn||""}</b>{activeStage?<> בשלב <b style={{color:activeStage.color}}>{activeStage.name}</b></>:""} עובדים איתך עכשיו:{" "}
+            <b style={{color:"#0ea5e9"}}>{myPartners.map(w=>w.userName).join(", ")}</b>. מה הסתיים?
+          </div>
+          <div style={{display:"flex",flexDirection:"column",gap:10}}>
+            <button onClick={()=>finishJoint("all")} style={{textAlign:"right",background:"#10b98114",border:"2px solid #10b981",borderRadius:10,padding:"12px 14px",cursor:"pointer",fontFamily:"inherit",color:"var(--c-text)"}}>
+              <div style={{fontWeight:800,fontSize:15,color:"#10b981"}}>✅ השלב הושלם — לסגור לכולם</div>
+              <div style={{fontSize:12,color:"var(--c-dim)",marginTop:3}}>השלב נחתם עכשיו. הטיימרים של {myPartners.map(w=>w.userName).join(", ")} נעצרים, וכל אחד מקבל את הזמן שעבד.</div>
+            </button>
+            <button onClick={()=>finishJoint("part")} style={{textAlign:"right",background:"#0ea5e912",border:"2px solid #0ea5e9",borderRadius:10,padding:"12px 14px",cursor:"pointer",fontFamily:"inherit",color:"var(--c-text)"}}>
+              <div style={{fontWeight:800,fontSize:15,color:"#0ea5e9"}}>👋 סיימתי רק את החלק שלי</div>
+              <div style={{fontSize:12,color:"var(--c-dim)",marginTop:3}}>הזמן שלך נרשם לך. {myPartners.map(w=>w.userName).join(", ")} {myPartners.length>1?"ממשיכים":"ממשיך/ה"} לעבוד, והשלב ייחתם כשמי שנשאר אחרון ילחץ ✅.</div>
+            </button>
+          </div>
+          <div style={{display:"flex",justifyContent:"flex-end",marginTop:14}}><Btn onClick={()=>setJointDlg(null)}>ביטול</Btn></div>
+        </Modal>
+      )}
     </div>
   );
 }
@@ -6429,6 +6797,13 @@ function ReworkTag({log,stages}){
     ?`הוחזר לתיקון ב${nm(r.toStageId)||"שלב קודם"}${r.note?` — ${r.note}`:""}`
     :`תיקון אחרי ${nm(r.fromStageId)||"ביקורת"}${r.byName?` (${r.byName})`:""}${r.note?` — ${r.note}`:""}. לא נחתם שוב — הזמן נוסף לזמן השלב`;
   return<span title={title} style={{fontSize:10,color:"#e11d48",marginInlineStart:5,whiteSpace:"nowrap"}}>{r.req?`↩️ הוחזר ל${nm(r.toStageId)||"תיקון"}`:"🔧 תיקון לאחר ביקורת"}</span>;
+}
+// The badge one person's share of a unit worked on together wears in a list.
+function JointTag({log}){
+  if(!isJointShare(log))return null;
+  const j=jointOf(log);
+  return<span title={`חלק מעבודה משותפת על ${log.serialSn||"היחידה"} — הזמן של העובד הזה. השלב נחתם פעם אחת${j.closedByName?` · נסגר ע״י ${j.closedByName}`:""}`}
+    style={{fontSize:10,color:"#0ea5e9",marginInlineStart:5,whiteSpace:"nowrap"}}>👥 עבודה משותפת</span>;
 }
 // ── ☕ הפסקות קבועות — where a manager sets them ──────────────────────────
 // For the whole department, or for chosen people. A department manager sets them
@@ -6648,10 +7023,140 @@ function HoldBoard({workLogs,orders,stages,workers,onTransfer}){
   );
 }
 
+// ── 🔍 עבודות לבדיקה — what ran past the end of the day ──────────────────
+// See dayEndMissed. datetime-local speaks local wall-clock time, minute precision.
+const toLocalInput=ms=>{if(!isFinite(ms))return"";const d=new Date(ms),p=n=>String(n).padStart(2,"0");return`${d.getFullYear()}-${p(d.getMonth()+1)}-${p(d.getDate())}T${p(d.getHours())}:${p(d.getMinutes())}`};
+const fromLocalInput=v=>{const t=v?new Date(v).getTime():NaN;return isFinite(t)?t:NaN};
+const fmtDayClock=ms=>isFinite(ms)?new Date(ms).toLocaleString("he-IL",{day:"2-digit",month:"2-digit",hour:"2-digit",minute:"2-digit"}):"—";
+// On the worker's own timer card: the day is over and the job is still open.
+function DayEndNote({log}){
+  const [now,setNow]=useState(()=>Date.now());
+  useEffect(()=>{const t=setInterval(()=>setNow(Date.now()),60000);return()=>clearInterval(t)},[]);
+  if(dayEndMissed(log,now)==null)return null;
+  return(
+    <div style={{fontSize:12,color:"#6366f1",background:"#6366f112",border:"1px solid #6366f155",borderRadius:8,padding:"6px 9px",marginTop:7,lineHeight:1.5,maxWidth:420}}>
+      🌙 <b>עברה השעה {DAY_END_HHMM} והעבודה עדיין פתוחה.</b> סיימת להיום? לחץ 🟧 HOLD — כך הזמן נשמר נכון, ומחר ממשיכים מאותה נקודה. אחרת היא עוברת לבדיקת המנהל.
+    </div>
+  );
+}
+// What a job is doing now, in a word or two.
+const jobStateLabel=w=>w.completed?`✅ נסגרה ב-${fmtDayClock(atMs(w.endTime))}`
+  :isOnHold(w)?`🟧 ב-HOLD מאז ${fmtDayClock(atMs(w.holdInfo&&w.holdInfo.heldAt))}`
+  :w.paused?`⏸️ בהפסקה מאז ${fmtDayClock(atMs(w.pauseStart))}`:"⏱️ הטיימר עדיין רץ";
+const jobRecordedMin=w=>w.completed?Number(w.durationMin||0)+holdCarryMin(w):logWorkedMin(w)+holdCarryMin(w);
+function DayEndBoard({workLogs,orders,stages,workers,onFix,dayEnd}){
+  const {toast}=useToast();
+  // Keyed by who, not by the array: the team list is rebuilt on every render.
+  const idKey=(workers||[]).map(u=>u.id).join(",");
+  // `dayEnd` changes at 18:00 — the only moment this list moves without a change to the logs.
+  const rows=useMemo(()=>dayEndRows(workLogs,idKey?idKey.split(","):[],Date.now()),[workLogs,idKey,dayEnd]);
+  const oMap=useMemo(()=>new Map((orders||[]).map(o=>[o.id,o])),[orders]);
+  const sMap=useMemo(()=>new Map((stages||[]).map(s=>[s.id,s])),[stages]);
+  const [open,setOpen]=useState(null);
+  if(!rows.length)return null;
+  const unitsOf=r=>isQtyRun(r.logs[0])||isQtyLog(r.logs[0])?`${r.logs[0].bulkCount} יח' ${QTY_UNIT_TAG}`:r.logs.map(logUnitLabel).filter(x=>x&&x!=="—").join(", ")||"—";
+  const cur=open&&rows.find(r=>r.key===open);
+  return(
+    <Card style={{marginBottom:14,border:"2px solid #6366f155"}}>
+      <div style={{fontWeight:700,fontSize:15,color:"#6366f1",marginBottom:4}}>🔍 עבודות לבדיקה ({rows.length})</div>
+      <div style={{fontSize:11.5,color:"var(--c-dim)",marginBottom:10,lineHeight:1.6}}>
+        עבודה שהטיימר שלה רץ אחרי {DAY_END_HHMM} בלי שהועברה ל-HOLD — כנראה נשכחה פתוחה, והלילה נספר כזמן עבודה. בדוק מתי העבודה באמת נעשתה, תקן את השעות, והחזר אותה לעובד במצב הנכון.
+      </div>
+      <div style={{display:"flex",flexDirection:"column",gap:8}}>
+        {rows.map(r=>{
+          const w=r.logs[0],o=oMap.get(w.orderId),st=sMap.get(w.stageId);
+          return(
+            <div key={r.key} style={{background:"var(--c-deep)",border:"1px solid var(--c-border)",borderRadius:9,padding:"9px 11px",display:"flex",gap:10,flexWrap:"wrap",alignItems:"center",justifyContent:"space-between"}}>
+              <div style={{minWidth:0,flex:"1 1 220px"}}>
+                <div style={{fontWeight:700,fontSize:13.5}}>
+                  <span style={{color:"#6366f1"}}>{w.userName}</span>
+                  <span style={{color:"var(--c-dim)",fontWeight:400}}> · </span>
+                  <span style={{color:"#60a5fa"}}>{o?.woNumber||'פק"ע'}</span>
+                  {st&&<span style={{color:st.color,marginInlineStart:6}}>{st.name}</span>}
+                </div>
+                <div style={{fontSize:12,color:"var(--c-muted)",marginTop:2}}>{unitsOf(r)}{r.logs.length>1&&` (×${r.logs.length})`}<JointTag log={w}/><ReworkTag log={w} stages={stages}/></div>
+                <div style={{fontSize:11,color:"var(--c-dim)",marginTop:2}}>
+                  🌙 רצה אחרי {DAY_END_HHMM} ב-{new Date(r.at).toLocaleDateString("he-IL",{day:"2-digit",month:"2-digit"})}
+                  {" · "}התחלה: {fmtDayClock(atMs(w.startTime))}
+                  {" · "}{jobStateLabel(w)}
+                  {" · "}זמן רשום: <b style={{color:"var(--c-text)"}}>{fmtTime(jobRecordedMin(w))}</b>
+                </div>
+              </div>
+              {onFix&&<Btn small color="#6366f1" onClick={()=>setOpen(r.key)}>✏️ בדיקה ותיקון</Btn>}
+            </div>
+          );
+        })}
+      </div>
+      {cur&&<DayEndFixModal row={cur} order={oMap.get(cur.logs[0].orderId)} stage={sMap.get(cur.logs[0].stageId)} units={unitsOf(cur)}
+        onClose={()=>setOpen(null)}
+        onSave={fix=>{
+          const ok=onFix(cur.logs.map(x=>x.id),fix);
+          setOpen(null);
+          if(ok)toast(fix.action==="run"?"אושר — העבודה ממשיכה לרוץ":fix.action==="hold"?"תוקן — העבודה חזרה לעובד ב-HOLD מהשעה שבה נעצרה":"תוקן — העבודה נרשמה כהושלמה בשעות הנכונות","success",6000);
+          else toast("העבודה השתנתה בינתיים — פתח אותה שוב","warning");
+        }}/>}
+    </Card>
+  );
+}
+// The manager's form: when the work really started and stopped, how much of it
+// was a break, and what the job is now — see dayEndFix.
+function DayEndFixModal({row,order,stage,units,onClose,onSave}){
+  const w=row.logs[0];
+  const g=useMemo(()=>dayEndGuess(w,row.at),[w,row.at]);
+  const [start,setStart]=useState(()=>toLocalInput(g.S));
+  const [end,setEnd]=useState(()=>toLocalInput(g.E));
+  const [pause,setPause]=useState(()=>String(g.pauseMin));
+  const [action,setAction]=useState(w.completed?"done":"hold");
+  const S=fromLocalInput(start),E=fromLocalInput(end),P=Math.round(Number(pause)||0);
+  const net=Math.round((E-S)/60000)-P;
+  const now=Date.now();
+  const err=!isFinite(S)?"חסרה שעת התחלה":S>now?"ההתחלה לא יכולה להיות בעתיד"
+    :action==="run"?""
+    :!isFinite(E)?"חסרה שעת סיום":!(E>S)?"הסיום חייב להיות אחרי ההתחלה":E>now?"הסיום לא יכול להיות בעתיד"
+    :P<0?"הפסקות לא יכולות להיות שליליות":net<0?"ההפסקות ארוכות מכל הזמן שבין ההתחלה לסיום":"";
+  const opts=w.completed
+    ?[["done","✅ השאר כהושלמה — עם השעות המתוקנות","השלב נשאר חתום; הזמן בפועל מתעדכן לפי השעות שכאן."]]
+    :[["hold","🟧 HOLD — העבודה נעצרה ולא הסתיימה","העבודה חוזרת לעובד ב-HOLD משעת הסיום שכאן. הזמן עד אז נשמר, והוא ממשיך מאותה נקודה."],
+      ["done","✅ הושלמה — השלב הסתיים בשעת הסיום","השלב נחתם על שם העובד, עם הזמן שבין ההתחלה לסיום פחות ההפסקות."],
+      ["run","▶️ העובד באמת עדיין עובד (שעות נוספות)","העבודה נשארת פתוחה ורצה. אפשר לתקן רק את שעת ההתחלה."]];
+  return(
+    <Modal onClose={onClose}>
+      <h3 style={{margin:"0 0 4px",color:"#6366f1"}}>✏️ בדיקה ותיקון זמנים</h3>
+      <div style={{fontSize:12.5,color:"var(--c-muted)",marginBottom:12,lineHeight:1.7}}>
+        <b style={{color:"var(--c-text)"}}>{w.userName}</b> · פק"ע <b style={{color:"#60a5fa"}}>{order?.woNumber||"—"}</b>{stage&&<> · <b style={{color:stage.color}}>{stage.name}</b></>} · {units}{row.logs.length>1?` (×${row.logs.length} — התיקון חל על כולן)`:""}
+        <div style={{fontSize:11.5,color:"var(--c-dim)"}}>
+          כפי שנרשם: התחלה {fmtDayClock(atMs(w.startTime))} · {jobStateLabel(w)} · זמן רשום {fmtTime(jobRecordedMin(w))}{breakCountOf(w)>0?` · ${breakCountOf(w)} הפסקות`:""}.
+          {" "}הטיימר רץ אחרי {DAY_END_HHMM} ב-{new Date(row.at).toLocaleDateString("he-IL")} בלי HOLD.
+        </div>
+      </div>
+      <div style={{fontSize:12,fontWeight:700,marginBottom:6}}>מה המצב האמיתי של העבודה?</div>
+      <div style={{display:"flex",flexDirection:"column",gap:6,marginBottom:12}}>
+        {opts.map(([k,l,d])=>(
+          <label key={k} style={{display:"flex",gap:8,alignItems:"flex-start",cursor:"pointer",padding:"7px 10px",borderRadius:8,border:`1px solid ${action===k?"#6366f1":"var(--c-border)"}`,background:action===k?"#6366f114":"transparent"}}>
+            <input type="radio" name="de-act" checked={action===k} onChange={()=>setAction(k)} style={{marginTop:3}}/>
+            <span><span style={{fontWeight:700,fontSize:13}}>{l}</span><div style={{fontSize:11.5,color:"var(--c-dim)"}}>{d}</div></span>
+          </label>
+        ))}
+      </div>
+      <div style={{display:"flex",gap:10,flexWrap:"wrap",marginBottom:8}}>
+        <Field label="התחלת העבודה" type="datetime-local" value={start} onChange={setStart} style={{flex:"1 1 180px"}}/>
+        {action!=="run"&&<Field label={action==="hold"?"העבודה נעצרה ב-":"העבודה הסתיימה ב-"} type="datetime-local" value={end} onChange={setEnd} style={{flex:"1 1 180px"}}/>}
+        {action!=="run"&&<Field label="הפסקות בזמן הזה (דק')" type="number" value={pause} onChange={setPause} style={{flex:"0 1 120px"}}/>}
+      </div>
+      {action!=="run"&&!err&&<div style={{fontSize:12.5,color:"var(--c-muted)",marginBottom:10}}>זמן עבודה נטו: <b style={{color:"#10b981"}}>{fmtTime(net)}</b>{holdCarryMin(w)>0?` (+${fmtTime(holdCarryMin(w))} של עובדים קודמים)`:""}</div>}
+      {err&&<div style={{fontSize:12,color:"#ef4444",marginBottom:10}}>⚠️ {err}</div>}
+      <div style={{display:"flex",gap:8,justifyContent:"flex-end",flexWrap:"wrap"}}>
+        <Btn onClick={onClose}>ביטול</Btn>
+        <Btn color="#6366f1" disabled={!!err} onClick={()=>onSave({action,startTime:new Date(S).toISOString(),endTime:action==="run"?null:new Date(E).toISOString(),pauseMin:P})}>💾 שמור והחזר לעובד</Btn>
+      </div>
+    </Modal>
+  );
+}
+
 // ══════════════════════════════════════════════════════════════════════════
 // ═══ WORKERS DASHBOARD ══════════════════════════════════════════════════
 // ══════════════════════════════════════════════════════════════════════════
-function WorkersDashboard({users,workLogs,orders,stages,customTasks,onAddTask,onDeleteLog,onUpdateTask,onDeleteTask,onMarkPartialTask,onMarkDoneTask,dailyPlans,onAddPlan,onAddPlans,onDeletePlan,onTogglePlanDone,onTransferHold,departments,onSaveBreaks}){
+function WorkersDashboard({users,workLogs,orders,stages,customTasks,onAddTask,onDeleteLog,onUpdateTask,onDeleteTask,onMarkPartialTask,onMarkDoneTask,dailyPlans,onAddPlan,onAddPlans,onDeletePlan,onTogglePlanDone,onTransferHold,departments,onSaveBreaks,onDayEndFix,dayEnd}){
   const {toast}=useToast();
   const [search,setSearch]=useState("");
   const [period,setPeriod]=useState("all");
@@ -6757,6 +7262,8 @@ function WorkersDashboard({users,workLogs,orders,stages,customTasks,onAddTask,on
       {/* Daily work plan */}
       <DailyPlanBoard dailyPlans={dailyPlans} workers={workers} orders={orders} stages={stages} workLogs={workLogs} onAddPlan={onAddPlan} onAddPlans={onAddPlans} onDeletePlan={onDeletePlan} onTogglePlanDone={onTogglePlanDone}/>
 
+      <DayEndBoard workLogs={workLogs} orders={orders} stages={stages} workers={workers} onFix={onDayEndFix} dayEnd={dayEnd}/>
+
       <HoldBoard workLogs={workLogs} orders={orders} stages={stages} workers={workers} onTransfer={onTransferHold}/>
 
       {onSaveBreaks&&<BreakSchedulesBoard departments={departments} users={users} onSave={onSaveBreaks}/>}
@@ -6816,7 +7323,7 @@ function WorkersDashboard({users,workLogs,orders,stages,customTasks,onAddTask,on
                 <tr key={w.id}>
                   <td style={{fontWeight:600}}>{w.userName}</td>
                   <td style={{color:"#7eb8ff",fontSize:12}}>{w._count>1?<span>{w._count} יחידות<div style={{fontSize:10,color:"var(--c-dim)",maxWidth:200,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{w._sns}</div></span>:w._sns}</td>
-                  <td><span style={{color:stage?.color||"var(--c-muted)"}}>{stage?.name||"—"}</span>{seg&&<span title={`חלק מיחידה שהועברה מ-HOLD ל-${w.holdInfo?.toUserName||"עובד אחר"}`} style={{fontSize:10,color:"#f97316",marginInlineStart:5}}>🟧 HOLD</span>}{rw&&<ReworkTag log={w} stages={stages}/>}</td>
+                  <td><span style={{color:stage?.color||"var(--c-muted)"}}>{stage?.name||"—"}</span>{seg&&<span title={`חלק מיחידה שהועברה מ-HOLD ל-${w.holdInfo?.toUserName||"עובד אחר"}`} style={{fontSize:10,color:"#f97316",marginInlineStart:5}}>🟧 HOLD</span>}{rw&&<ReworkTag log={w} stages={stages}/>}<JointTag log={w}/></td>
                   <td style={{fontWeight:w._count>1?700:400}}>{fmtTime(w.durationMin)}</td>
                   <td style={{color:w._count>1?"#06b6d4":"var(--c-dim)"}}>{w._count>1?fmtTime(perUnit):"—"}</td>
                   <td style={{color:stagePrice?"#a78bfa":"var(--c-dim)"}}>{stagePrice?`₪${stagePrice}${w._count>1?` × ${w._count} = ₪${stagePrice*w._count}`:""}`:"—"}</td>
@@ -7099,7 +7606,7 @@ function DailyPlanBoard({dailyPlans,workers,orders,stages,workLogs,onAddPlan,onA
 // ══════════════════════════════════════════════════════════════════════════
 // ═══ TEAM DASHBOARD (ראש צוות / מנהל מחלקה) ══════════════════════════════
 // ══════════════════════════════════════════════════════════════════════════
-function TeamDashboard({users,workLogs,orders,stages,customTasks,departments,onAddTask,onDeleteTask,onMarkPartialTask,onMarkDoneTask,dailyPlans,onAddPlan,onAddPlans,onDeletePlan,onTogglePlanDone,onTransferHold,onSaveBreaks}){
+function TeamDashboard({users,workLogs,orders,stages,customTasks,departments,onAddTask,onDeleteTask,onMarkPartialTask,onMarkDoneTask,dailyPlans,onAddPlan,onAddPlans,onDeletePlan,onTogglePlanDone,onTransferHold,onSaveBreaks,onDayEndFix,dayEnd}){
   const {currentUser}=useAuth();
   const isDeptMgr=currentUser.role==="dept_manager";
   const myDept=(departments||[]).find(d=>d.id===currentUser.departmentId||d.managerId===currentUser.id);
@@ -7140,6 +7647,7 @@ function TeamDashboard({users,workLogs,orders,stages,customTasks,departments,onA
         <KpiBox i="📌" v={openTeamTasks} label="משימות פתוחות" c="#ec4899"/>
         {heldCount>0&&<KpiBox i="🟧" v={heldCount} label="ב-HOLD" c="#f97316"/>}
       </div>
+      <DayEndBoard workLogs={workLogs} orders={orders} stages={stages} workers={team} onFix={onDayEndFix} dayEnd={dayEnd}/>
       <HoldBoard workLogs={workLogs} orders={orders} stages={stages} workers={team} onTransfer={onTransferHold}/>
       {/* A department manager sets breaks from 👥 עובדים; here, a team lead for their team. */}
       {!isDeptMgr&&onSaveBreaks&&<BreakSchedulesBoard departments={departments} users={users} onSave={onSaveBreaks}/>}
@@ -7218,7 +7726,7 @@ function TeamDashboard({users,workLogs,orders,stages,customTasks,departments,onA
                   <tr key={w.id}>
                     <td style={{fontWeight:600}}>{w.userName}</td>
                     <td style={{color:"#7eb8ff",fontSize:12}}>{logUnitLabel(w)}</td>
-                    <td><span style={{color:stage?.color||"var(--c-muted)"}}>{stage?.name||"—"}</span><ReworkTag log={w} stages={stages}/></td>
+                    <td><span style={{color:stage?.color||"var(--c-muted)"}}>{stage?.name||"—"}</span><ReworkTag log={w} stages={stages}/><JointTag log={w}/></td>
                     <td>{fmtTime(w.durationMin)}</td>
                     <td style={{fontSize:11,color:"var(--c-dim)"}}>{w.endTime?new Date(w.endTime).toLocaleString("he-IL",{day:"2-digit",month:"2-digit",hour:"2-digit",minute:"2-digit"}):""}</td>
                   </tr>
@@ -9353,6 +9861,9 @@ function buildTeamReport(opt){
   const ids=new Set(users.map(u=>u.id));
   const inR=iso=>!!iso&&iso>=from&&iso<=to;
   const shareOf=holdShares(workLogs);
+  // Units worked on together — named so, not as a HOLD split.
+  const together=jointMinutes(workLogs);
+  const wasJoint=w=>isJointShare(w)||(!!w.serialId&&together.has(logKey(w.serialId,w.stageId)));
 
   const rows=[];
   (workLogs||[]).forEach(w=>{
@@ -9385,7 +9896,7 @@ function buildTeamReport(opt){
       stdGap:stdCmp?actual-stdTot:null,adh:stdCmp?stdTot/actual*100:null,
       // A return from inspection or a fix is time on a unit already counted — no
       // unit, no signature, and not held against the stage's sold time.
-      signOff:!(actual>0)&&!reworkOf(w),kind:reworkKind(w)||(split?"HOLD (חלק מיחידה)":w.bulk?"קבוצתי":(actual>0?"עבודה":"חתימה"))
+      signOff:!(actual>0)&&!reworkOf(w),kind:reworkKind(w)||(wasJoint(w)?"עבודה משותפת":split?"HOLD (חלק מיחידה)":w.bulk?"קבוצתי":(actual>0?"עבודה":"חתימה"))
     });
   });
   rows.sort((a,b)=>a.day.localeCompare(b.day)||String(a.start||"").localeCompare(String(b.start||"")));
@@ -10234,6 +10745,8 @@ function doExport(ctx){
   // A unit HOLD split between workers counts once, shared by their minutes.
   const shareOf=holdShares(workLogs);
   const unitsOf=w=>(w.bulk&&Number(w.bulkCount)>1?Number(w.bulkCount):1)*shareOf(w);
+  const together=jointMinutes(workLogs);
+  const wasJoint=w=>isJointShare(w)||(!!w.serialId&&together.has(logKey(w.serialId,w.stageId)));
   const byOrder=new Map(),bySerial=new Map(),byUser=new Map();
   done.forEach(w=>{
     if(!byOrder.has(w.orderId))byOrder.set(w.orderId,[]);byOrder.get(w.orderId).push(w);
@@ -10396,7 +10909,7 @@ function doExport(ctx){
     const std=act>0?stdStageMin(stdIdx.get(pnKey(o?.pn)),w.stageId)*n:0;
     return[day,day?HEB_DAYS[new Date(day+"T00:00:00").getDay()]:"",w.userName||"",ROLES[u?.role]?.label||"",dMap.get(u?.departmentId)||"",
       o?.woNumber||"",o?.pn||"",isQtyLog(w)?`לפי כמות ×${n}`:(w.serialSn||""),st?.name||"",pMap.get(o?.projectId)||"",
-      reworkKind(w)||(isHoldSegment(w)||holdCarryMin(w)>0?"HOLD (חלק מיחידה)":isQtyLog(w)?(act>0?"עבודה לפי כמות":"חתימה לפי כמות"):w.bulk?"קבוצתי":act>0?"עבודה":"חתימה"),
+      reworkKind(w)||(wasJoint(w)?"עבודה משותפת":isHoldSegment(w)||holdCarryMin(w)>0?"HOLD (חלק מיחידה)":isQtyLog(w)?(act>0?"עבודה לפי כמות":"חתימה לפי כמות"):w.bulk?"קבוצתי":act>0?"עבודה":"חתימה"),
       w.startTime?w.startTime.slice(0,16).replace("T"," "):"",w.endTime?w.endTime.slice(0,16).replace("T"," "):"",
       xlRound(act),xlRound(breakMinOf(w)),n,xlRound(n>0?act/n:act),
       std>0?xlRound(std):"",std>0?xlRound(act-std):"",effOf(act,std),
@@ -12492,9 +13005,21 @@ function ExcelTab({orders,projects,stages,stageBlocks,workLogs,users,customTasks
 // ══════════════════════════════════════════════════════════════════════════
 // ═══ ALERTS PANEL ════════════════════════════════════════════════════════
 // ══════════════════════════════════════════════════════════════════════════
-function AlertsPanel({orders,stages,workLogs,users,onClose,dismissedAlerts,onDismissAll}){
+// What each change in the activity list says (see activityFeed).
+const ACTIVITY_TXT={start:["▶️","התחיל/ה"],join:["🤝","הצטרף/ה לעבודה משותפת"],pause:["⏸️","יצא/ה להפסקה"],resume:["▶️","חזר/ה מהפסקה"],
+  hold:["🟧","העביר/ה ל-HOLD"],unhold:["▶️","המשיך/ה מ-HOLD"],done:["✅","סיים/ה"],part:["👋","סיים/ה את החלק שלו (עבודה משותפת)"],
+  task:["📌","התחיל/ה משימה"],taskdone:["✅","סיים/ה משימה"]};
+const ACTIVITY_HOURS=12;
+function AlertsPanel({orders,stages,workLogs,users,onClose,dismissedAlerts,onDismissAll,dayEndRows=[],onOpenDayEnd,customTasks=[]}){
+  const {currentUser}=useAuth();
   const alerts=useMemo(()=>{
     const a=[];
+    // 🌙 Left running past the end of the day — waiting for the manager's look.
+    const sMap0=new Map((stages||[]).map(s=>[s.id,s]));
+    (dayEndRows||[]).forEach(r=>{const w=r.logs[0];
+      a.push({id:`dayend_${r.key}@${r.at}`,sev:1,icon:"🌙",text:`${w.userName} לא העביר/ה ל-HOLD — עבודה פתוחה אחרי ${DAY_END_HHMM}`,
+        sub:`${r.logs.length>1?`${r.logs.length} יחידות`:logUnitLabel(w)}${sMap0.get(w.stageId)?` · ${sMap0.get(w.stageId).name}`:""} · ${new Date(r.at).toLocaleDateString("he-IL",{day:"2-digit",month:"2-digit"})} · ממתינה לבדיקה`,
+        color:"#6366f1",go:onOpenDayEnd,goLabel:"🔍 לבדיקה ותיקון ←"})});
     orders.forEach(o=>(o.defects||[]).filter(d=>d.status!=="closed"&&(d.severity==="critical"||d.severity==="high")).forEach(d=>{
       a.push({id:`def_${o.id}_${d.id}`,sev:d.severity==="critical"?0:1,icon:d.severity==="critical"?"🔴":"🟠",text:`תקלה ${d.severity==="critical"?"קריטית":"גבוהה"}: ${d.title}`,sub:`פק"ע ${o.woNumber}${d.discoveredDate?` | ${fmt(d.discoveredDate)}`:""}`,color:d.severity==="critical"?"#dc2626":"#f97316"})}));
     // Late is measured against תאריך סיום ייצור (ת. סיום יצור from Priority). A
@@ -12514,8 +13039,15 @@ function AlertsPanel({orders,stages,workLogs,users,onClose,dismissedAlerts,onDis
     });
     orders.forEach(o=>{if(!(o.serials||[]).length)return;const last=lastDone.get(o.id);if(last){const d=daysBetween(last.endTime?.slice(0,10),todays());if(d>7)a.push({id:`idle_${o.id}`,sev:3,icon:"💤",text:`אין התקדמות ב-${o.woNumber} כבר ${d} ימים`,sub:`אחרון: ${fmt(last.endTime?.slice(0,10))}`,color:"#8b95a8"})}});
     return a.sort((x,y)=>x.sev-y.sev);
-  },[orders,stages,workLogs]);
+  },[orders,stages,workLogs,dayEndRows,onOpenDayEnd]);
   const visible=alerts.filter(a=>!(dismissedAlerts||[]).includes(a.id));
+  // What the people this screen oversees did lately — the same changes the
+  // manager's notifications ring for, kept here to be read later.
+  const feed=useMemo(()=>{
+    const ids=(users||[]).map(u=>u.id);
+    return activityFeed(workLogs,customTasks,ids,Date.now()-ACTIVITY_HOURS*3600*1000,currentUser?.id).slice(0,80);
+  },[workLogs,customTasks,users,currentUser]);
+  const sMapF=useMemo(()=>new Map((stages||[]).map(s=>[s.id,s])),[stages]);
   return(
     <div onClick={onClose} style={{position:"fixed",inset:0,background:"#000c",zIndex:200,display:"flex",justifyContent:"flex-start"}}>
       <div onClick={e=>e.stopPropagation()} style={{background:"var(--c-card)",width:"min(420px,90vw)",height:"100%",overflowY:"auto",borderLeft:"1px solid var(--c-border)",padding:20}}>
@@ -12531,7 +13063,29 @@ function AlertsPanel({orders,stages,workLogs,users,onClose,dismissedAlerts,onDis
             {visible.map((a,i)=>(<div key={a.id} style={{background:"var(--c-deep)",borderRadius:10,padding:"12px 14px",borderRight:`4px solid ${a.color}`}}>
               <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:4}}><span style={{fontSize:16}}>{a.icon}</span><span style={{fontWeight:600,fontSize:13,color:a.color,flex:1}}>{a.text}</span></div>
               {a.sub&&<div style={{fontSize:11,color:"var(--c-dim)",paddingRight:24}}>{a.sub}</div>}
+              {a.go&&<button onClick={a.go} style={{background:"none",border:"none",color:a.color,fontSize:12,fontWeight:700,cursor:"pointer",fontFamily:"inherit",padding:"4px 24px 0 0"}}>{a.goLabel}</button>}
             </div>))}
+          </div>
+        )}
+        {feed.length>0&&(
+          <div style={{marginTop:18}}>
+            <div style={{fontWeight:700,fontSize:14,marginBottom:8}}>📣 פעילות העובדים · {ACTIVITY_HOURS} השעות האחרונות</div>
+            <div style={{display:"flex",flexDirection:"column",gap:4}}>
+              {feed.map(e=>{
+                const [ic,verb]=ACTIVITY_TXT[e.kind]||["•",""],r=e.rec;
+                const st=!e.task&&sMapF.get(r.stageId);
+                const what=e.task?`"${r.name||""}"`:`${e.count>1?`${e.count} יחידות`:logUnitLabel(r)}${st?` · ${st.name}`:""}`;
+                const extra=e.kind==="done"&&!e.task&&isReworkReq(r)?" — הוחזר לתיקון":e.kind==="join"&&jointOf(r)?` ל${(jointOf(r).with||[]).map(x=>x.userName).filter(Boolean).join(", ")}`
+                  :e.kind==="part"&&jointOf(r).closedByName?` — ${jointOf(r).closedByName} סימן/ה שהשלב הושלם`:"";
+                return(
+                  <div key={e.key} style={{display:"flex",gap:8,alignItems:"baseline",fontSize:12,padding:"5px 8px",background:"var(--c-deep)",borderRadius:7}}>
+                    <span style={{color:"var(--c-dim)",fontVariantNumeric:"tabular-nums",flexShrink:0}}>{new Date(e.at).toLocaleTimeString("he-IL",{hour:"2-digit",minute:"2-digit"})}</span>
+                    <span style={{flexShrink:0}}>{ic}</span>
+                    <span style={{minWidth:0}}><b>{r.userName}</b> {verb}{extra} <span style={{color:"var(--c-muted)"}}>— {what}</span></span>
+                  </div>
+                );
+              })}
+            </div>
           </div>
         )}
       </div>
@@ -14922,6 +15476,11 @@ function App(){
     const dup=(wRef.current||[]).find(w=>!w.completed&&w.userId===log.userId&&w.stageId===log.stageId&&
       (log.serialId?w.serialId===log.serialId:(!w.serialId&&w.orderId===log.orderId)));
     if(dup&&!log.completed){toast("העבודה הזו כבר פתוחה אצלך","warning");return}
+    // Joining (see jointClose) is joining somebody who is on the unit. If they have
+    // signed it, stopped it or left by the time the tap lands, there is nobody to
+    // join — the unit is back in the list as whatever it is now.
+    if(jointOf(log)&&!log.completed&&!jointPartners(wRef.current||[],log.serialId,log.stageId,log.userId).some(canJoin)){
+      toast("מי שעבד על היחידה כבר סיים או עצר — היחידה חזרה לתור במצב העדכני שלה","warning",6000);return}
     setWorkLogs(prev=>{
       if(prev.some(w=>w.id===log.id))return prev;
       const next=[...prev,log];persist(null,null,null,next);
@@ -14976,6 +15535,38 @@ function App(){
       // work, which is what the old fallback did when it could match the S/N at all.
       changes:[{coll:"workLogs",before:[before],after:[logId]}]});
   };
+  // ✅ on a unit worked on together (see jointClose). "all": the stage is done —
+  // signed with this log, and everybody else's closes as their share at the same
+  // moment. "part": this log alone closes, as a share. Answers false when the log
+  // is no longer open to close.
+  const handleEndJoint=(logId,mode,duration)=>{
+    const open=(wRef.current||[]).find(w=>w.id===logId);
+    if(!open||open.completed)return false;
+    const at=nowISO(),now=Date.parse(at);
+    const fix=w=>withBreaks(w,now);
+    const plan=jointClose(wRef.current||[],logId,mode,currentUser,at,fix);
+    // Everybody else has left already: an ordinary signature.
+    if(!plan.partners.length){handleEndWork(logId,duration);return true}
+    setWorkLogs(prev=>{
+      const cur=prev.find(w=>w.id===logId);
+      if(!cur||cur.completed)return prev;
+      let next=jointClose(prev,logId,mode,currentUser,at,fix).next;
+      if(mode==="all"){
+        const fixed=fix(cur);
+        const dur=fixed===cur?duration:logWorkedMin(fixed,now);
+        next=next.map(w=>w.id===logId?reworkFinish({...fixed,completed:true,endTime:at,durationMin:dur}):w);
+        if(cur.orderId)setTimeout(()=>checkAutoDelivery(cur.orderId,next),100);
+      }
+      persist(null,null,null,next);return next;
+    });
+    const st=stages.find(s=>s.id===open.stageId)?.name||"";
+    // Neither label may contain any of WORK_UNDO_ACTIONS — the journal screen
+    // matches those by substring.
+    UNDO.record({user:currentUser,action:mode==="all"?"סיום שלב בעבודה משותפת":"יציאה מעבודה משותפת",target:logUnitLabel(open),
+      details:`${st}${st?" · ":""}${[open.userName,...plan.partners.map(w=>w.userName)].filter(Boolean).join(", ")}`,
+      changes:[{coll:"workLogs",before:mode==="all"?[open,...plan.before]:plan.before,after:mode==="all"?[logId,...plan.before.map(w=>w.id)]:[logId]}]});
+    return true;
+  };
   const handlePauseWork=(logId)=>{
     setWorkLogs(prev=>{const next=prev.map(w=>w.id===logId?{...w,paused:true,pauseStart:nowISO(),pauseLog:[...(w.pauseLog||[]),{start:nowISO()}]}:w);persist(null,null,null,next);return next});
     addAuditEntry({userId:currentUser.id,username:currentUser.username,name:currentUser.name,action:"הפסקה",target:"",details:""});
@@ -14997,10 +15588,14 @@ function App(){
     if(!before.length)return;
     setWorkLogs(prev=>{
       const next=prev.map(w=>{
-        if(!ids.has(w.id)||w.completed)return w;
-        const pausing=!w.paused;
-        return{...w,paused:true,pauseStart:pausing?at:(w.pauseStart||at),
-          pauseLog:pausing?[...(w.pauseLog||[]),{start:at,hold:true}]:(w.pauseLog||[]),
+        if(!ids.has(w.id)||w.completed||isOnHold(w))return w;
+        // Already on a break: the break ends here and the HOLD starts — so the break
+        // stays a break in the figures, and the record says when the HOLD began
+        // (the end-of-day check reads it — see dayEndMissed).
+        const brk=w.paused&&w.pauseStart?Math.max(0,Math.round((Date.parse(at)-Date.parse(w.pauseStart))/60000)):0;
+        const pl=(w.pauseLog||[]).map((p,k,a)=>(w.paused&&k===a.length-1&&p&&!p.end)?{...p,end:at}:p);
+        return{...w,paused:true,pauseStart:at,totalPauseMin:Number(w.totalPauseMin||0)+brk,
+          pauseLog:[...pl,{start:at,hold:true}],
           holdInfo:{...(w.holdInfo||{}),held:true,heldAt:at,heldBy:currentUser.id,heldByName:currentUser.name}};
       });
       persist(null,null,null,next);return next;
@@ -15063,6 +15658,27 @@ function App(){
     UNDO.record({user:currentUser,action:"החזרה לתיקון אחרי ביקורת",target:units.map(u=>u.serialSn).filter(Boolean).join(", "),
       details:`${nm(opt.fromStageId)} ← ${nm(opt.toStageId)}${opt.note?` · ${opt.note}`:""}`,
       changes:[{coll:"workLogs",before:plan.before,after:[...plan.before.map(w=>w.id),...plan.made.map(w=>w.id)]}]});
+    return true;
+  };
+  // 🔍 A manager's correction of a job that ran past the end of the day (see
+  // dayEndFix): the real hours, and the state it is given back in. Answers whether
+  // anything changed — the job may have moved on another device meanwhile.
+  const handleDayEndFix=(logIds,fix)=>{
+    const at=nowISO();
+    const plan=dayEndFix(wRef.current||[],logIds,fix,currentUser,at);
+    if(!plan.before.length)return false;
+    setWorkLogs(prev=>{
+      const next=dayEndFix(prev,logIds,fix,currentUser,at).next;
+      persist(null,null,null,next);
+      const o=plan.before[0].orderId;
+      if(fix.action==="done"&&o)setTimeout(()=>checkAutoDelivery(o,next),100);
+      return next;
+    });
+    const w=plan.before[0];
+    // Not one of WORK_UNDO_ACTIONS — the journal screen matches those by substring.
+    UNDO.record({user:currentUser,action:"תיקון זמנים בסוף יום",target:plan.before.map(logUnitLabel).join(", "),
+      details:`${w.userName||""} · ${DAY_END_ACTIONS[fix.action]||""}`,
+      changes:[{coll:"workLogs",before:plan.before,after:plan.before.map(x=>x.id)}]});
     return true;
   };
   // ── הפסקות קבועות — the clock that runs them ─────────────────────────────
@@ -15206,36 +15822,92 @@ function App(){
       return next;
     });
   };
-  // ── Completion notifications → the worker's direct manager ─────────────
+  // ── 18:00 — see dayEndMissed ─────────────────────────────────────────────
+  // The last end of day that has passed. It changes once a day, and that is the
+  // only moment the lists of work that ran past it move without a change to the
+  // logs themselves, so it is what they are recomputed on.
+  const [dayEnd,setDayEnd]=useState(()=>lastDayEnd(Date.now()));
+  useEffect(()=>{
+    const t=setInterval(()=>{const c=lastDayEnd(Date.now());setDayEnd(p=>p===c?p:c)},60000);
+    return()=>clearInterval(t);
+  },[]);
+  // ── Activity notifications → the worker's direct manager ────────────────
   // Every client syncs work_logs/custom_tasks; the client whose logged-in user is the
   // worker's direct manager (managerId, or the department manager as fallback) shows
-  // the notification. The worker's own device stays silent.
+  // the notification — for every change of state, not only the finish (see
+  // jobChange). The worker's own device stays silent, except about what somebody
+  // else did to the worker's own job: a partner who signed the stage they were on
+  // together, or a manager who corrected its times.
   const notifSeenRef=useRef(null);
   useEffect(()=>{
-    const doneLogs=new Set(workLogs.filter(w=>w.completed).map(w=>w.id));
-    const doneTasks=new Set(customTasks.filter(t=>t.completed).map(t=>t.id));
+    const logs=new Map(),tasks=new Map(),reviews=new Map();
+    workLogs.forEach(w=>{logs.set(w.id,jobState(w));const rv=w.holdInfo&&w.holdInfo.review;if(rv&&rv.at)reviews.set(w.id,rv.at)});
+    customTasks.forEach(t=>tasks.set(t.id,jobState(t)));
     const prev=notifSeenRef.current;
-    notifSeenRef.current={logs:doneLogs,tasks:doneTasks};
-    if(!prev||loading||!currentUser||!pushEnabled)return;
+    notifSeenRef.current={logs,tasks,reviews};
+    if(!prev||loading||!currentUser)return;
+    const me=currentUser.id;
+    // Only fresh changes — prevents a burst of stale notifications after login/refresh
+    const isRecent=iso=>!!iso&&Date.now()-new Date(iso).getTime()<10*60*1000;
+    const reviewedNow=w=>{const rv=w.holdInfo&&w.holdInfo.review;return!!(rv&&rv.at&&prev.reviews.get(w.id)!==rv.at&&isRecent(rv.at))&&rv};
+    workLogs.forEach(w=>{
+      if(w.userId!==me)return;
+      const j=jointOf(w),rv=reviewedNow(w);
+      if(isJointShare(w)&&prev.logs.get(w.id)&&prev.logs.get(w.id)!=="done"&&j.closedById&&j.closedById!==me&&isRecent(w.endTime))
+        toast(`✅ ${j.closedByName||"עובד אחר"} סימן/ה שהשלב הושלם על ${w.serialSn||"היחידה"} — הזמן שלך (${fmtTime(w.durationMin)}) נרשם לך`,"success",8000);
+      if(rv&&rv.byId!==me)
+        toast(`✏️ ${rv.byName||"המנהל"} עדכן/ה את העבודה על ${logUnitLabel(w)}: ${DAY_END_ACTIONS[rv.action]||"הזמנים תוקנו"}`,"info",9000);
+    });
+    if(!pushEnabled)return;
     const users=getUsers();
-    // Only fresh completions — prevents a burst of stale notifications after login/refresh
-    const isRecent=iso=>iso&&Date.now()-new Date(iso).getTime()<10*60*1000;
     const directManagerId=uid=>{
       const u=users.find(x=>x.id===uid);if(!u)return null;
       return u.managerId||(departments.find(d=>d.id===u.departmentId)?.managerId)||null;
     };
+    const mine=uid=>!!uid&&uid!==me&&directManagerId(uid)===me;
+    // One notification per group started together, not one per unit of it.
+    const evs=new Map();
     workLogs.forEach(w=>{
-      if(!w.completed||prev.logs.has(w.id)||w.userId===currentUser.id)return;
-      if(directManagerId(w.userId)!==currentUser.id||!isRecent(w.endTime))return;
-      const stage=stages.find(s=>s.id===w.stageId);
-      if(isReworkReq(w)){const to=stages.find(s=>s.id===reworkOf(w).toStageId);
-        PushNotify.send("↩️ הוחזר לתיקון",`${w.userName}: ${w.serialSn||"יחידה"} נכשלה ב${stage?.name||"ביקורת"} — חוזרת ל${to?.name||"שלב קודם"}${reworkOf(w).note?` (${reworkOf(w).note})`:""}`,`done_${w.id}`);return}
-      PushNotify.send(isReworkFix(w)?"🔧 תיקון הושלם":"✅ שלב הושלם",`${w.userName} סיים ${isReworkFix(w)?"תיקון ב":""}${stage?.name||""}${w.serialSn?` — ${w.serialSn}`:""}`,`done_${w.id}`);
+      if(!mine(w.userId)||isHoldSegment(w))return;
+      const ch=jobChange(prev.logs.get(w.id)||"",w);
+      if(!ch||!isRecent(ch.at))return;
+      // What this manager did themselves is not news to them.
+      const rv=reviewedNow(w);if(rv&&rv.byId===me)return;
+      if(ch.kind==="hold"&&w.holdInfo?.heldBy===me)return;
+      if(ch.kind==="part"&&jointOf(w).closedById===me)return;
+      const k=`${w.bulkGroupId||w.id}:${ch.kind}`;
+      const e=evs.get(k);if(e)e.n++;else evs.set(k,{w,kind:ch.kind,n:1,key:k});
     });
+    if(evs.size){
+      const sMap=new Map(stages.map(s2=>[s2.id,s2]));
+      const woOf=new Map();
+      evs.forEach(({w})=>{if(w.orderId&&!woOf.has(w.orderId))woOf.set(w.orderId,orders.find(o=>o.id===w.orderId)?.woNumber||"")});
+      evs.forEach(({w,kind,n,key})=>{
+        const st=sMap.get(w.stageId)?.name||"",wo=woOf.get(w.orderId);
+        const what=`${n>1?`${n} יחידות`:logUnitLabel(w)}${st?` · ${st}`:""}${wo?` · פק"ע ${wo}`:""}`;
+        const tag=`act_${key}`;
+        if(kind==="start")PushNotify.send("▶️ התחלת עבודה",`${w.userName}: ${what}`,tag);
+        else if(kind==="join")PushNotify.send("🤝 עבודה משותפת",`${w.userName} הצטרף/ה ל${(jointOf(w).with||[]).map(x=>x.userName).filter(Boolean).join(", ")||"עובד אחר"}: ${what}`,tag);
+        else if(kind==="pause")PushNotify.send("⏸️ הפסקה",`${w.userName} יצא/ה להפסקה — ${what}`,tag);
+        else if(kind==="resume")PushNotify.send("▶️ חזרה לעבודה",`${w.userName} חזר/ה מהפסקה — ${what}`,tag);
+        else if(kind==="hold")PushNotify.send("🟧 HOLD",`${w.userName} העביר/ה ל-HOLD — ${what} (נעבד ${fmtTime(logWorkedMin(w)+holdCarryMin(w))})`,tag);
+        else if(kind==="unhold")PushNotify.send("▶️ המשך מ-HOLD",`${w.userName} ממשיך/ה את העבודה — ${what}`,tag);
+        else if(kind==="part")PushNotify.send("👋 עבודה משותפת",jointOf(w).closedByName
+          ?`${jointOf(w).closedByName} סימן/ה שהשלב הושלם — ל${w.userName} נרשמו ${fmtTime(w.durationMin)}: ${what}`
+          :`${w.userName} סיים/ה את החלק שלו (${fmtTime(w.durationMin)}) — ${what}`,tag);
+        else if(isReworkReq(w)){const to=sMap.get(reworkOf(w).toStageId);
+          PushNotify.send("↩️ הוחזר לתיקון",`${w.userName}: ${w.serialSn||"יחידה"} נכשלה ב${st||"ביקורת"} — חוזרת ל${to?.name||"שלב קודם"}${reworkOf(w).note?` (${reworkOf(w).note})`:""}`,`done_${w.id}`)}
+        else PushNotify.send(isReworkFix(w)?"🔧 תיקון הושלם":"✅ שלב הושלם",`${w.userName} סיים ${isReworkFix(w)?"תיקון ב":""}${st}${n>1?` — ${n} יחידות`:w.serialSn?` — ${w.serialSn}`:""}${wo?` · פק"ע ${wo}`:""}`,`done_${w.id}`);
+      });
+    }
     customTasks.forEach(t=>{
-      if(!t.completed||prev.tasks.has(t.id)||t.userId===currentUser.id)return;
-      if(directManagerId(t.userId)!==currentUser.id||!isRecent(t.endTime))return;
-      PushNotify.send("✅ משימה הושלמה",`${t.userName} סיים את "${t.name}"`,`taskdone_${t.id}`);
+      if(!mine(t.userId))return;
+      const ch=jobChange(prev.tasks.get(t.id)||"",t);
+      if(!ch||!isRecent(ch.at))return;
+      if(ch.kind==="start")PushNotify.send("📌 התחלת משימה",`${t.userName}: "${t.name}"`,`task_${t.id}_start`);
+      else if(ch.kind==="pause")PushNotify.send("⏸️ הפסקה",`${t.userName} יצא/ה להפסקה — משימה "${t.name}"`,`task_${t.id}_pause`);
+      else if(ch.kind==="resume")PushNotify.send("▶️ חזרה לעבודה",`${t.userName} חזר/ה למשימה "${t.name}"`,`task_${t.id}_resume`);
+      else if(ch.kind==="done")PushNotify.send("✅ משימה הושלמה",`${t.userName} סיים את "${t.name}"`,`taskdone_${t.id}`);
     });
   },[workLogs,customTasks]);
 
@@ -15248,6 +15920,33 @@ function App(){
   const isLead=isLeadRole(currentUser?.role);
   // Every employee who is not an admin or a lead sees only their own work.
   const isWorker=!isAdmin&&!isLead;
+  // 🔍 Work that ran past 18:00 without HOLD, among the people this manager
+  // oversees — the badge on 🔔, the list there, and the manager's notification.
+  // The board itself sits on 👥 עובדים (a team lead: הצוות שלי).
+  const dayEndList=useMemo(()=>(!currentUser||isWorker)?[]:
+    dayEndRows(filteredWorkLogs,visibleUsers.filter(u=>u.id!==currentUser.id).map(u=>u.id),Date.now()),
+    [filteredWorkLogs,visibleUsers,currentUser,isWorker,dayEnd]);
+  const dayEndTab=currentUser?.role==="team_lead"?"team":"workers";
+  const dayEndToldRef=useRef(null);
+  useEffect(()=>{
+    if(!currentUser||!pushEnabled||!dayEndList.length)return;
+    // Told once per job and day, on this device, across reloads.
+    if(!dayEndToldRef.current)dayEndToldRef.current=new Set(LS.get(DAY_END_LS_KEY)||[]);
+    const told=dayEndToldRef.current,users=getUsers();
+    const managerOf=uid=>{const u=users.find(x=>x.id===uid);return u?(u.managerId||(departments.find(d=>d.id===u.departmentId)?.managerId)||null):null};
+    let added=false;
+    dayEndList.forEach(r=>{
+      const w=r.logs[0],k=`${r.key}@${r.at}`;
+      if(told.has(k)||managerOf(w.userId)!==currentUser.id)return;
+      told.add(k);added=true;
+      // A week of backlog the first time this runs is listed, not rung.
+      if(Date.now()-r.at>24*3600*1000)return;
+      const st=stages.find(x=>x.id===w.stageId)?.name||"";
+      PushNotify.send(`🌙 עבודה פתוחה אחרי ${DAY_END_HHMM}`,
+        `${w.userName} לא העביר/ה ל-HOLD — ${r.logs.length>1?`${r.logs.length} יחידות`:logUnitLabel(w)}${st?` · ${st}`:""}. ממתינה לבדיקה ב-🔍 עבודות לבדיקה`,`dayend_${r.key}`);
+    });
+    if(added)LS.set(DAY_END_LS_KEY,[...told].slice(-400));
+  },[dayEndList,pushEnabled]);
   // Open assignments in the work plan my manager set for me today — badged on the
   // "העבודה שלי" tab so an assigned plan is visible from anywhere in the app.
   // The badge counts what is actually waiting today: today's plans plus the ones
@@ -15345,7 +16044,7 @@ function App(){
   },[isAdmin,isLead]);
 
   // Alert count for badge
-  const alertCount=useMemo(()=>{let c=0;const dm=dismissedAlerts;filteredOrders.forEach(o=>(o.defects||[]).filter(d=>d.status!=="closed"&&(d.severity==="critical"||d.severity==="high")).forEach(d=>{if(!dm.includes(`def_${o.id}_${d.id}`))c++}));filteredOrders.filter(o=>o.targetDate&&new Date(o.targetDate)<new Date()&&!["done","cancelled"].includes(orderPhase(o))).forEach(o=>{if(!dm.includes(`late_${o.id}`))c++});filteredWorkLogs.filter(w=>!w.completed&&!isOnHold(w)).forEach(w=>{if(Math.round((Date.now()-new Date(w.startTime).getTime())/60000)>120&&!dm.includes(`stuck_${w.id}`))c++});return c},[filteredOrders,filteredWorkLogs,dismissedAlerts]);
+  const alertCount=useMemo(()=>{let c=0;const dm=dismissedAlerts;filteredOrders.forEach(o=>(o.defects||[]).filter(d=>d.status!=="closed"&&(d.severity==="critical"||d.severity==="high")).forEach(d=>{if(!dm.includes(`def_${o.id}_${d.id}`))c++}));filteredOrders.filter(o=>o.targetDate&&new Date(o.targetDate)<new Date()&&!["done","cancelled"].includes(orderPhase(o))).forEach(o=>{if(!dm.includes(`late_${o.id}`))c++});filteredWorkLogs.filter(w=>!w.completed&&!isOnHold(w)).forEach(w=>{if(Math.round((Date.now()-new Date(w.startTime).getTime())/60000)>120&&!dm.includes(`stuck_${w.id}`))c++});dayEndList.forEach(r=>{if(!dm.includes(`dayend_${r.key}@${r.at}`))c++});return c},[filteredOrders,filteredWorkLogs,dismissedAlerts,dayEndList]);
 
   const [showDemoPanel,setShowDemoPanel]=useState(false);
   const [showPilotReset,setShowPilotReset]=useState(false);
@@ -15667,12 +16366,12 @@ function App(){
         // navigation, the install banner, or both.
         paddingBottom:isWorker?`calc(${showInstall?160:86}px + env(safe-area-inset-bottom,0px))`:showInstall?"100px":"calc(16px + env(safe-area-inset-bottom,0px))"}}>
         {tab==="dashboard"&&<Dashboard orders={filteredOrders} projects={filteredProjects} stages={stages} users={visibleUsers} workLogs={filteredWorkLogs} departments={visibleDepartments} customTasks={customTasks}/>}
-        {tab==="team"&&isLead&&<TeamDashboard users={getUsers()} workLogs={filteredWorkLogs} orders={filteredOrders} stages={stages} customTasks={customTasks} departments={departments} onAddTask={handleAddTask} onDeleteTask={handleDeleteTask} onMarkPartialTask={handleMarkPartialTask} onMarkDoneTask={handleMarkDoneTask} dailyPlans={dailyPlans} onAddPlan={handleAddPlan} onAddPlans={handleAddPlans} onDeletePlan={handleDeletePlan} onTogglePlanDone={handleTogglePlanDone} onTransferHold={handleTransferHold} onSaveBreaks={handleSaveBreaks}/>}
+        {tab==="team"&&isLead&&<TeamDashboard users={getUsers()} workLogs={filteredWorkLogs} orders={filteredOrders} stages={stages} customTasks={customTasks} departments={departments} onAddTask={handleAddTask} onDeleteTask={handleDeleteTask} onMarkPartialTask={handleMarkPartialTask} onMarkDoneTask={handleMarkDoneTask} dailyPlans={dailyPlans} onAddPlan={handleAddPlan} onAddPlans={handleAddPlans} onDeletePlan={handleDeletePlan} onTogglePlanDone={handleTogglePlanDone} onTransferHold={handleTransferHold} onSaveBreaks={handleSaveBreaks} onDayEndFix={handleDayEndFix} dayEnd={dayEnd}/>}
         {tab==="orders"&&<Orders orders={filteredOrders} projects={filteredProjects} stages={stages} stageBlocks={stageBlocks} departments={departments} updO={updO} workLogs={filteredWorkLogs} onWorkLog={handleStartWork} onDeleteLog={handleDeleteLog} workdayHours={workdayHours} setWorkdayHours={setWorkdayHoursPersist} pnStandards={pnStandards}/>}
         {tab==="shortages"&&<Shortages orders={filteredOrders} updO={updO} projects={filteredProjects}/>}
         {(tab==="mywork"||(tab==="queue"&&isWorker))&&<MyWork key={tab} view={!isWorker?"all":tab==="queue"?"queue":"mine"} onGoTab={isWorker?goTab:null}
-          orders={filteredOrders} stages={stages} workLogs={filteredWorkLogs} onStartWork={handleStartWork} onEndWork={handleEndWork} onDeleteLog={handleDeleteLog} onPauseWork={handlePauseWork} onResumeWork={handleResumeWork} onHoldWork={handleHoldWork} onPickupHold={handlePickupHold} onReturnRework={handleReturnRework} customTasks={customTasks} onAddTask={handleAddTask} onStartTask={handleStartTask} onEndTask={handleEndTask} onPauseTask={handlePauseTask} onResumeTask={handleResumeTask} onDeleteTask={handleDeleteTask} onMarkPartialTask={handleMarkPartialTask} onMarkDoneTask={handleMarkDoneTask} users={getUsers()} dailyPlans={dailyPlans} onMarkPlanDone={handleMarkPlanDone}/>}
-        {tab==="workers"&&(isAdmin||isDeptMgr)&&<WorkersDashboard users={visibleUsers} workLogs={filteredWorkLogs} orders={filteredOrders} stages={stages} customTasks={customTasks} onAddTask={handleAddTask} onDeleteLog={handleDeleteLog} onDeleteTask={handleDeleteTask} onMarkPartialTask={handleMarkPartialTask} onMarkDoneTask={handleMarkDoneTask} dailyPlans={dailyPlans} onAddPlan={handleAddPlan} onAddPlans={handleAddPlans} onDeletePlan={handleDeletePlan} onTogglePlanDone={handleTogglePlanDone} onTransferHold={handleTransferHold} departments={departments} onSaveBreaks={handleSaveBreaks}/>}
+          orders={filteredOrders} stages={stages} workLogs={filteredWorkLogs} onStartWork={handleStartWork} onEndWork={handleEndWork} onEndJoint={handleEndJoint} onDeleteLog={handleDeleteLog} onPauseWork={handlePauseWork} onResumeWork={handleResumeWork} onHoldWork={handleHoldWork} onPickupHold={handlePickupHold} onReturnRework={handleReturnRework} customTasks={customTasks} onAddTask={handleAddTask} onStartTask={handleStartTask} onEndTask={handleEndTask} onPauseTask={handlePauseTask} onResumeTask={handleResumeTask} onDeleteTask={handleDeleteTask} onMarkPartialTask={handleMarkPartialTask} onMarkDoneTask={handleMarkDoneTask} users={getUsers()} dailyPlans={dailyPlans} onMarkPlanDone={handleMarkPlanDone}/>}
+        {tab==="workers"&&(isAdmin||isDeptMgr)&&<WorkersDashboard users={visibleUsers} workLogs={filteredWorkLogs} orders={filteredOrders} stages={stages} customTasks={customTasks} onAddTask={handleAddTask} onDeleteLog={handleDeleteLog} onDeleteTask={handleDeleteTask} onMarkPartialTask={handleMarkPartialTask} onMarkDoneTask={handleMarkDoneTask} dailyPlans={dailyPlans} onAddPlan={handleAddPlan} onAddPlans={handleAddPlans} onDeletePlan={handleDeletePlan} onTogglePlanDone={handleTogglePlanDone} onTransferHold={handleTransferHold} departments={departments} onSaveBreaks={handleSaveBreaks} onDayEndFix={handleDayEndFix} dayEnd={dayEnd}/>}
         {tab==="stdtimes"&&(isAdmin||isDeptMgr||isLead)&&<StandardTimes orders={filteredOrders} stages={stages} stageBlocks={stageBlocks} workLogs={filteredWorkLogs} users={visibleUsers} projects={filteredProjects} pnStandards={pnStandards} onSavePnStd={savePnStd} onDeletePnStd={deletePnStd}/>}
         {tab==="yield"&&<YieldDashboard orders={filteredOrders} projects={filteredProjects} stages={stages} workLogs={filteredWorkLogs}/>}
         {tab==="stages"&&isAdmin&&<StagesManagement stages={stages} setStages={setStages} stageBlocks={stageBlocks} setStageBlocks={setStageBlocks} persist={persist}/>}
@@ -15685,7 +16384,8 @@ function App(){
       {showInstall&&<InstallBanner onInstall={handleInstall} onDismiss={()=>setShowInstall(false)} lm={lm} lift={isWorker}/>}
       {showPilotReset&&isAdmin&&<PilotResetModal users={allUsers} workLogs={workLogs} customTasks={customTasks} dailyPlans={dailyPlans} departments={departments} lightMode={lightMode} onClose={()=>setShowPilotReset(false)} onRun={runPilotReset}/>}
       {showAdmin&&canManageUsers(currentUser)&&<AdminPanel projects={projects} stages={stages} orders={orders} onClose={()=>setShowAdmin(false)} lightMode={lightMode} departments={departments} updD={updD} onPilotReset={isAdmin?()=>setShowPilotReset(true):null}/>}
-      {showAlerts&&<AlertsPanel orders={filteredOrders} stages={stages} workLogs={filteredWorkLogs} users={visibleUsers} onClose={()=>setShowAlerts(false)} dismissedAlerts={dismissedAlerts} onDismissAll={ids=>setDismissedAlerts(prev=>[...new Set([...prev,...ids])])}/>}
+      {showAlerts&&<AlertsPanel orders={filteredOrders} stages={stages} workLogs={filteredWorkLogs} users={visibleUsers} onClose={()=>setShowAlerts(false)} dismissedAlerts={dismissedAlerts} onDismissAll={ids=>setDismissedAlerts(prev=>[...new Set([...prev,...ids])])}
+        dayEndRows={dayEndList} onOpenDayEnd={TABS.some(t=>t.id===dayEndTab)?()=>{setShowAlerts(false);goTab(dayEndTab)}:null} customTasks={isWorker?[]:visibleTasks}/>}
       {showLiveBoard&&(isAdmin||isDeptMgr)&&<LiveFactoryBoard orders={filteredOrders} workLogs={filteredWorkLogs} stages={stages} customTasks={customTasks} users={visibleUsers} departments={visibleDepartments} onClose={()=>setShowLiveBoard(false)} lightMode={lightMode}/>}
       {showReport&&(isAdmin||isDeptMgr)&&<MonthlyReportModal orders={filteredOrders} workLogs={filteredWorkLogs} stages={stages} projects={filteredProjects} users={visibleUsers} onClose={()=>setShowReport(false)}/>}
       {showHistory&&(isAdmin||isDeptMgr)&&<HistoryPanel orders={filteredOrders} updO={updO} onClose={()=>setShowHistory(false)} workLogs={filteredWorkLogs} onDeleteLog={handleDeleteLog} onUndoWorkLog={handleUndoWorkLog} customTasks={customTasks} onDeleteTask={handleDeleteTask}/>}
