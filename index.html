@@ -2312,7 +2312,8 @@ function dayEndFix(logs,ids,fix,by,at){
 // check; a change of state is not — it says what the job is from a moment on, not
 // that the hours before it are right.
 const JOB_MGR_ACTIONS={"edit":"הזמנים תוקנו","set-run":"הוחזרה לעבודה — הטיימר רץ","set-pause":"הועברה להפסקה",
-  "set-hold":"הועברה ל-HOLD","set-done":"סומנה כהושלמה"};
+  "set-hold":"הועברה ל-HOLD","set-done":"סומנה כהושלמה",
+  "reopen-hold":"נפתחה מחדש — חזרה אליך ב-HOLD","reopen-run":"נפתחה מחדש — הטיימר רץ"};
 // What an open job can be moved to, from the state it is in (see jobState).
 const JOB_MOVES={run:["pause","hold","done"],pause:["run","hold","done"],auto:["run","hold","done"],hold:["run","done"]};
 // A finished log with no clock on it — a signature, a quantity reported with its
@@ -2579,6 +2580,72 @@ function jobSetState(logs,ids,to,t,by,at,from,count){
   };
   const moving=new Set(before.map(w=>w.id));
   return{next:list.map(w=>moving.has(w.id)?move(w):w),before,at:Ti};
+}
+// A finished job opened again — the worker pressed ✅ by mistake, or the stage was
+// not really done. Only an ordinary job of its own: a share of somebody else's
+// (see isTimeOnly) and a signature with no clock keep their record, and so does a
+// unit that has moved on since — another log on its stage, or anything done to it
+// after this one closed. Their hours can still be corrected (see jobEdit).
+// Answers why not — "share" | "notimer" | "taken" | "moved" — or "".
+function jobReopenBlock(logs,group){
+  const mine=new Set((group||[]).map(w=>w.id));
+  const unitOf=x=>x.serialId||(x.holdInfo&&((x.holdInfo.rework&&x.holdInfo.rework.serialId)||(x.holdInfo.joint&&x.holdInfo.joint.serialId)||x.holdInfo.serialId))||null;
+  for(const w of group||[]){
+    if(isTimeOnly(w))return"share";
+    if(isNoTimer(w))return"notimer";
+    if(!w.serialId)continue;
+    const E=atMs(w.endTime);
+    for(const x of logs||[]){
+      if(!x||mine.has(x.id)||unitOf(x)!==w.serialId)continue;
+      if(x.stageId===w.stageId&&!isTimeOnly(x))return"taken";
+      if(atMs(x.startTime)>=E)return"moved";
+    }
+  }
+  return"";
+}
+// The earliest moment a finished job can be opened again from: back on HOLD from
+// the last thing on its record before the end; back to work, from the end itself.
+const jobReopenEarliest=(w,to)=>to==="run"?atMs(w.endTime):jobLastAt({...w,paused:false});
+// Opened again (see jobReopenBlock) from moment `t` (ISO):
+//   "hold"  it was not finished — on HOLD from `t`: before the recorded end if work
+//           really stopped earlier, after it if work went on
+//   "run"   the worker is still on it — on the clock from `t`, no earlier than the
+//           end; the time in between, if any, is kept as HOLD, not as work
+// The stage is no longer signed. Pure; answers {next, before, at, error} — error
+// "gone" | "time" | "early" | "busy", or why it cannot be opened (jobReopenBlock).
+function jobReopen(logs,ids,to,t,by,at){
+  const want=new Set(ids||[]),list=logs||[];
+  const before=list.filter(w=>want.has(w.id)&&w.completed&&w.startTime);
+  const no=error=>({next:list,before:[],error});
+  if(!before.length||(to!=="hold"&&to!=="run"))return no("gone");
+  const why=jobReopenBlock(list,before);if(why)return no(why);
+  const nowMs=atMs(at);let T=atMs(t);
+  if(!isFinite(T)||T>nowMs)return no("time");
+  const last=Math.max(...before.map(w=>jobReopenEarliest(w,to)));
+  if(T<last){if(last-T<60000&&last<=nowMs)T=last;else return no("early")}
+  if(to==="run"){
+    const who=new Set(before.map(w=>w.userId));
+    if(list.some(w=>!want.has(w.id)&&who.has(w.userId)&&!w.completed&&w.startTime&&!w.paused&&w.active!==false))return no("busy");
+  }
+  const iso=ms=>new Date(ms).toISOString(),Ti=iso(T),b0=by||{};
+  const moving=new Set(before.map(w=>w.id));
+  const next=list.map(w=>{
+    if(!moving.has(w.id))return w;
+    const hi=w.holdInfo||{},rv=hi.review,S=atMs(w.startTime),E=atMs(w.endTime);
+    // The record as times, a break it was finished in closed at the end (see jobEditBase).
+    const f=jobEditBase(w,nowMs);
+    let pl=f.pauses;
+    if(to==="hold"&&T<E)pl=clipPauses(pl,S,T);
+    if(to==="run"&&T>E)pl=[...pl,{start:iso(E),end:Ti,hold:true}];
+    const review={at,upTo:(rv&&(rv.upTo||rv.at))||w.startTime,byId:b0.id||"",byName:b0.name||"",action:`reopen-${to}`,
+      was:{startTime:w.startTime,endTime:w.endTime||null,totalPauseMin:Number(w.totalPauseMin||0),durationMin:Number(w.durationMin||0),state:"done"}};
+    const base={...w,completed:false,endTime:null,durationMin:0,totalPauseMin:pauseMinOf(pl)+f.extraMin,pauseLog:pl,
+      holdInfo:{...hi,held:false,holdMin:pauseMinOf(pl,true),review}};
+    if(to==="run")return{...base,paused:false,pauseStart:null};
+    return{...base,paused:true,pauseStart:Ti,pauseLog:[...pl,{start:Ti,hold:true}],
+      holdInfo:{...base.holdInfo,held:true,heldAt:Ti,heldBy:b0.id||"",heldByName:b0.name||""}};
+  });
+  return{next,before,at:Ti};
 }
 // ── מחיר ליחידה ───────────────────────────────────────────────────────────
 // Money is read through here rather than off the order, so one unreadable row
@@ -7444,12 +7511,23 @@ function DayEndFixModal({row,order,stage,units,onClose,onSave}){
 // ── 🗂️ פעילויות העובדים — any job, open or done, opened in full ───────────
 // One row per job (a group started together is one row), in three lists: on the
 // clock or on a break, on HOLD, finished. A row opens the job day by day — see
-// jobDays — with its hours to correct (jobEdit) and, while it is open, its state
-// to change for a worker who forgot to (jobSetState).
+// jobDays — with its hours to correct (jobEdit), its state to change for a worker
+// who forgot to (jobSetState) and, once finished, to be opened again (jobReopen).
 const JOB_TABS=[["live","🔄 בעבודה"],["hold","🟧 ב-HOLD"],["done","✅ הסתיימו"]];
 const JOB_PAGE=25;
+// How far back the finished list reaches, by when the job ended.
+const JOB_DONE_SPANS=[["all","הכל"],["today","היום"],["week","7 ימים"],["month","30 ימים"]];
+const jobDoneFrom=span=>{const d=new Date();d.setHours(0,0,0,0);
+  return span==="today"?d.getTime():span==="week"?d.getTime()-6*864e5:span==="month"?d.getTime()-29*864e5:-Infinity};
 const JOB_SET_ERR={gone:"העבודה כבר לא פתוחה — אולי היא נסגרה בינתיים",changed:"העבודה השתנתה בינתיים — בדוק את המצב העדכני ונסה שוב",
-  time:"השעה לא יכולה להיות בעתיד",early:"השעה מוקדמת מהפעולה האחרונה שנרשמה בעבודה",busy:"לעובד יש עבודה אחרת שרצה עכשיו — צריך לעצור אותה קודם"};
+  time:"השעה לא יכולה להיות בעתיד",early:"השעה מוקדמת מהפעולה האחרונה שנרשמה בעבודה",busy:"לעובד יש עבודה אחרת שרצה עכשיו — צריך לעצור אותה קודם",
+  share:"זה החלק של העובד בעבודה שהועברה מ-HOLD, בעבודה משותפת או בתיקון — את השעות אפשר לתקן, אבל לא לפתוח אותה מחדש",
+  notimer:"זו חתימה בלי טיימר — אין עבודה לפתוח מחדש. את הדקות אפשר לתקן",
+  taken:"השלב של היחידה הזו כבר נחתם או בעבודה ברישום אחר — את השעות אפשר לתקן, אבל לא לפתוח אותה מחדש",
+  moved:"היחידה כבר המשיכה הלאה מאז שהשלב נסגר — את השעות אפשר לתקן, אבל לא לפתוח אותה מחדש"};
+const JOB_REOPEN_UI={
+  hold:{c:"#f97316",l:()=>"🟧 החזר ל-HOLD",hint:"העבודה לא באמת הסתיימה: היא חוזרת לעובד ב-HOLD מהשעה שתבחר (בלי לשנות — משעת הסיום שנרשמה). הזמן עד אז נשמר, השלב כבר לא חתום, והעובד ממשיך מאותה נקודה."},
+  run:{c:"#10b981",l:()=>"▶️ החזר לעבודה",hint:"העובד לחץ ✅ בטעות וממשיך לעבוד: הטיימר חוזר לרוץ מהשעה שתבחר, לא לפני שעת הסיום. אם עבר זמן בין הסיום לחזרה — הוא נרשם כ-HOLD ולא כעבודה."}};
 const JOB_MOVE_UI={
   run:{c:"#10b981",l:st=>st==="hold"?"▶️ המשך עבודה":"▶️ חזרה לעבודה",hint:"הטיימר ממשיך לרוץ מהשעה שתבחר — כאילו העובד לחץ ▶️ אז."},
   pause:{c:"#f59e0b",l:()=>"⏸️ הפסקה",hint:"העבודה עוברת להפסקה מהשעה שתבחר. הזמן מאז לא נספר כעבודה."},
@@ -7460,13 +7538,14 @@ const fmtWeekday=ms=>new Date(ms).toLocaleDateString("he-IL",{weekday:"long",day
 const sameLocalDay=(a,b)=>new Date(a).toDateString()===new Date(b).toDateString();
 const stopLabel=x=>x.hold?"🟧 HOLD":x.auto?`☕ ${(x.p&&x.p.name)||"הפסקה קבועה"}`:"⏸️ הפסקה";
 const jobUnitsOf=logs=>{const w=logs[0];return(isQtyRun(w)||isQtyLog(w))?`${w.bulkCount} יח' ${QTY_UNIT_TAG}`:logs.map(logUnitLabel).filter(x=>x&&x!=="—").join(", ")||"—"};
-function ActivityBoard({workLogs,orders,stages,workers,onEdit,onSetState}){
+function ActivityBoard({workLogs,orders,stages,workers,onEdit,onSetState,onReopen}){
   const {currentUser}=useAuth();
   // Keyed by who, not by the array: the team list is rebuilt on every render. A
   // manager corrects their people's hours, not their own.
   const idKey=(workers||[]).filter(u=>u.id!==currentUser?.id).map(u=>u.id).join(",");
   const [tab,setTab]=useState("live");
   const [q,setQ]=useState("");
+  const [span,setSpan]=useState("all");
   const [limit,setLimit]=useState(JOB_PAGE);
   const [openIds,setOpenIds]=useState(null);
   // The running clocks on the first list move on their own.
@@ -7491,28 +7570,28 @@ function ActivityBoard({workLogs,orders,stages,workers,onEdit,onSetState}){
     return out;
   },[workLogs,idKey]);
   const shown=useMemo(()=>{
-    const t=q.trim().toLowerCase(),list=lists[tab]||[];
+    const t=q.trim().toLowerCase(),from=tab==="done"?jobDoneFrom(span):-Infinity;
+    let list=lists[tab]||[];
+    if(from>-Infinity)list=list.filter(r=>atMs(r.logs[0].endTime)>=from);
     if(!t)return list;
     return list.filter(r=>{const w=r.logs[0];
       return[w.userName,oMap.get(w.orderId)?.woNumber,sMap.get(w.stageId)?.name,...r.logs.map(x=>x.serialSn)].some(v=>v&&String(v).toLowerCase().includes(t))});
-  },[lists,tab,q,oMap,sMap]);
-  // The job open in the window, read off the newest records — it stays open while
-  // it changes, and moves from list to list with it.
-  const cur=useMemo(()=>{if(!openIds)return[];const want=new Set(openIds);return(workLogs||[]).filter(w=>want.has(w.id))},[workLogs,openIds]);
+  },[lists,tab,q,span,oMap,sMap]);
   if(!idKey)return null;
   return(
     <Card style={{marginBottom:14,border:"2px solid #0ea5e955"}}>
       <div style={{fontWeight:700,fontSize:15,color:"#0ea5e9",marginBottom:4}}>🗂️ פעילויות העובדים</div>
       <div style={{fontSize:11.5,color:"var(--c-dim)",marginBottom:10,lineHeight:1.6}}>
-        הקש על פעילות כדי לראות אותה לפי ימים — מתי העובד התחיל, מתי סיים ומתי היה בהפסקה. משם אפשר לתקן את השעות, ולשנות את הסטטוס בשביל עובד ששכח — למשל להעביר ל-HOLD עבודה של עובד שיצא בלי להעביר.
+        הקש על פעילות כדי לראות אותה לפי ימים — מתי העובד התחיל, מתי סיים ומתי היה בהפסקה. משם אפשר לתקן את השעות, ולשנות את הסטטוס בשביל עובד ששכח — למשל להעביר ל-HOLD עבודה של עובד שיצא בלי להעביר. גם פעילות שהסתיימה אפשר לתקן, או לפתוח מחדש אם היא לא באמת הסתיימה.
       </div>
       <div style={{display:"flex",gap:8,flexWrap:"wrap",alignItems:"center",marginBottom:10}}>
         <SegBtn options={JOB_TABS.map(([k,l])=>[k,`${l} (${(lists[k]||[]).length})`])} value={tab} onChange={v=>{setTab(v);setLimit(JOB_PAGE)}}/>
         <input value={q} onChange={e=>{setQ(e.target.value);setLimit(JOB_PAGE)}} placeholder='חיפוש: עובד, פק"ע, S/N, שלב' style={{flex:"1 1 180px",minWidth:0,width:"auto"}}/>
+        {tab==="done"&&<SegBtn options={JOB_DONE_SPANS} value={span} onChange={v=>{setSpan(v);setLimit(JOB_PAGE)}}/>}
       </div>
       {shown.length===0?(
         <div style={{background:"var(--c-deep)",borderRadius:9,padding:14,fontSize:12.5,color:"var(--c-dim)",textAlign:"center"}}>
-          {q.trim()?"לא נמצאו פעילויות שמתאימות לחיפוש":tab==="live"?"אף אחד לא עובד עכשיו":tab==="hold"?"אין עבודות ב-HOLD":"עדיין אין פעילויות שהסתיימו"}
+          {q.trim()?"לא נמצאו פעילויות שמתאימות לחיפוש":tab==="live"?"אף אחד לא עובד עכשיו":tab==="hold"?"אין עבודות ב-HOLD":span!=="all"?"אין פעילויות שהסתיימו בתקופה הזו":"עדיין אין פעילויות שהסתיימו"}
         </div>
       ):(
         <div style={{display:"flex",flexDirection:"column",gap:7}}>
@@ -7544,13 +7623,21 @@ function ActivityBoard({workLogs,orders,stages,workers,onEdit,onSetState}){
           {shown.length>limit&&<Btn small color="#475569" onClick={()=>setLimit(n=>n+JOB_PAGE)} style={{alignSelf:"center"}}>הצג עוד ({shown.length-limit})</Btn>}
         </div>
       )}
-      {cur.length>0&&<JobDetailModal logs={cur} allLogs={workLogs} order={oMap.get(cur[0].orderId)} stage={sMap.get(cur[0].stageId)} stages={stages}
-        onClose={()=>setOpenIds(null)} onEdit={onEdit} onSetState={onSetState}/>}
+      {openIds&&<JobDetailHost ids={openIds} workLogs={workLogs} orders={orders} stages={stages}
+        onClose={()=>setOpenIds(null)} onEdit={onEdit} onSetState={onSetState} onReopen={onReopen}/>}
     </Card>
   );
 }
+// A job opened by its log ids, read off the newest records — it stays open while
+// it changes (and, on the board above, moves from list to list with it).
+function JobDetailHost({ids,workLogs,orders,stages,...rest}){
+  const logs=useMemo(()=>{const want=new Set(ids||[]);return(workLogs||[]).filter(w=>want.has(w.id))},[workLogs,ids]);
+  if(!logs.length)return null;
+  const w=logs[0];
+  return<JobDetailModal logs={logs} allLogs={workLogs} order={(orders||[]).find(o=>o.id===w.orderId)} stage={(stages||[]).find(s=>s.id===w.stageId)} stages={stages} {...rest}/>;
+}
 // One job, day by day — and what the manager can do with it.
-function JobDetailModal({logs,allLogs,order,stage,stages,onClose,onEdit,onSetState}){
+function JobDetailModal({logs,allLogs,order,stage,stages,onClose,onEdit,onSetState,onReopen}){
   const {toast}=useToast();
   const w=logs[0],hi=w.holdInfo||{};
   const [now,setNow]=useState(()=>Date.now());
@@ -7559,10 +7646,14 @@ function JobDetailModal({logs,allLogs,order,stage,stages,onClose,onEdit,onSetSta
   const noTimer=isNoTimer(w);
   const extra=useMemo(()=>noTimer?0:jobEditBase(w,now).extraMin,[w,now,noTimer]);
   const state=jobState(w);
-  const moves=JOB_MOVES[state]||[];
+  // A finished job is opened again; an open one is moved on.
+  const reopen=!!w.completed;
+  const block=useMemo(()=>reopen&&onReopen?jobReopenBlock(allLogs,logs):"",[reopen,onReopen,allLogs,logs]);
+  const moves=reopen?(onReopen&&!block?["hold","run"]:[]):(onSetState?JOB_MOVES[state]||[]:[]);
+  const MOVE_UI=reopen?JOB_REOPEN_UI:JOB_MOVE_UI;
   const [edit,setEdit]=useState(null);   // {form, init, sigs} while the hours are being corrected
   const [move,setMove]=useState(null);   // the state chosen, while its time is picked
-  const [when,setWhen]=useState("");     // "" — now
+  const [when,setWhen]=useState("");     // "" — now (a finished job: when it ended)
   const [cnt,setCnt]=useState("");       // a quantity run's ✅: how many were finished ("" — all)
   const qtyRun=isQtyRun(w),qtyMax=Number(w.bulkCount)||0,qtyN=cnt===""?qtyMax:Math.floor(Number(cnt));
   const qtyBad=qtyRun&&move==="done"&&!(qtyN>0&&qtyN<=qtyMax);
@@ -7577,8 +7668,15 @@ function JobDetailModal({logs,allLogs,order,stage,stages,onClose,onEdit,onSetSta
     setEdit({form:f,init:JSON.stringify(f),sigs:Object.fromEntries(logs.map(x=>[x.id,jobSig(x)]))});
   };
   const doMove=()=>{
-    const T=when?fromLocalInput(when):Date.now();
+    const T=when?fromLocalInput(when):reopen?atMs(w.endTime):Date.now();
     if(!isFinite(T)){toast("בחר שעה","warning");return}
+    if(reopen){
+      const err=onReopen&&onReopen(logs.map(x=>x.id),move,new Date(T).toISOString());
+      if(err){toast(JOB_SET_ERR[err]||"לא ניתן לפתוח את העבודה מחדש","warning",8000);return}
+      toast(move==="run"?`🔄 העבודה של ${w.userName} נפתחה מחדש — הטיימר רץ מ-${fmtDayClock(T)}`
+        :`🔄 העבודה של ${w.userName} נפתחה מחדש — ב-HOLD מ-${fmtDayClock(T)}. השלב כבר לא חתום`,"success",7000);
+      setMove(null);setWhen("");return;
+    }
     if(qtyBad){toast(`כמה יחידות הסתיימו? בין 1 ל-${qtyMax}`,"warning");return}
     const err=onSetState&&onSetState(logs.map(x=>x.id),move,new Date(T).toISOString(),state,qtyRun&&move==="done"?qtyN:undefined);
     if(err){toast(JOB_SET_ERR[err]||"לא ניתן לעדכן את הסטטוס","warning",7000);return}
@@ -7613,8 +7711,8 @@ function JobDetailModal({logs,allLogs,order,stage,stages,onClose,onEdit,onSetSta
     }
     return"⏱️ עדיין עובד — הטיימר רץ";
   };
-  const T0=when?fromLocalInput(when):now;
-  const earliest=move?jobEarliest(w,move):0;
+  const T0=when?fromLocalInput(when):reopen?atMs(w.endTime):now;
+  const earliest=move?(reopen?jobReopenEarliest(w,move):jobEarliest(w,move)):0;
   return(
     <Modal onClose={close} wide>
       <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",gap:10,marginBottom:10}}>
@@ -7685,30 +7783,38 @@ function JobDetailModal({logs,allLogs,order,stage,stages,onClose,onEdit,onSetSta
           </div>
         )}
 
-        {onSetState&&moves.length>0&&<>
+        {reopen&&onReopen&&<>
+          <div style={{fontWeight:700,fontSize:13.5,margin:"16px 0 4px"}}>🔄 פתיחה מחדש</div>
+          <div style={{fontSize:11.5,color:block?"#f59e0b":"var(--c-dim)",marginBottom:8,lineHeight:1.6}}>
+            {block?`⚠️ ${JOB_SET_ERR[block]}.`:"העבודה לא באמת הסתיימה, או שהעובד לחץ ✅ בטעות? אפשר להחזיר אותה אליו. העובד יראה שהעבודה עודכנה."}
+          </div>
+        </>}
+        {!reopen&&moves.length>0&&<>
           <div style={{fontWeight:700,fontSize:13.5,margin:"16px 0 4px"}}>🔀 שינוי סטטוס</div>
           <div style={{fontSize:11.5,color:"var(--c-dim)",marginBottom:8,lineHeight:1.6}}>העובד שכח לעדכן? אפשר לעשות את זה במקומו — מהשעה שבה זה באמת קרה. העובד יראה שהעבודה עודכנה.</div>
+        </>}
+        {moves.length>0&&<>
           <div style={{display:"flex",gap:6,flexWrap:"wrap"}}>
-            {moves.map(k=>{const u=JOB_MOVE_UI[k];return(
+            {moves.map(k=>{const u=MOVE_UI[k];return(
               <Btn key={k} small color={u.c} onClick={()=>{setMove(m=>m===k?null:k);setWhen("")}}
                 style={move===k?{boxShadow:`0 0 0 2px var(--c-card), 0 0 0 4px ${u.c}`}:{}}>{u.l(state)}</Btn>
             )})}
           </div>
-          {move&&<div style={{marginTop:10,background:"var(--c-deep)",border:`1px solid ${JOB_MOVE_UI[move].c}66`,borderRadius:9,padding:"10px 12px"}}>
-            <div style={{fontSize:12,color:"var(--c-muted)",marginBottom:8,lineHeight:1.6}}>{JOB_MOVE_UI[move].hint}</div>
+          {move&&<div style={{marginTop:10,background:"var(--c-deep)",border:`1px solid ${MOVE_UI[move].c}66`,borderRadius:9,padding:"10px 12px"}}>
+            <div style={{fontSize:12,color:"var(--c-muted)",marginBottom:8,lineHeight:1.6}}>{MOVE_UI[move].hint}</div>
             {move==="done"&&partners.length>0&&<div style={{fontSize:12,color:"#0ea5e9",marginBottom:8,lineHeight:1.6}}>
               👥 גם {partners.map(p=>p.userName).filter(Boolean).join(", ")} עדיין על היחידה — יירשם רק החלק של {w.userName}, והשלב ייחתם כשהאחרון יסיים.
             </div>}
             <div style={{display:"flex",gap:10,flexWrap:"wrap",alignItems:"flex-end"}}>
-              <Field label="מאיזו שעה" type="datetime-local" value={when||toLocalInput(now)} onChange={setWhen} style={{flex:"1 1 200px"}}/>
+              <Field label="מאיזו שעה" type="datetime-local" value={when||toLocalInput(reopen?atMs(w.endTime):now)} onChange={setWhen} style={{flex:"1 1 200px"}}/>
               {qtyRun&&move==="done"&&<Field label={`כמה יחידות הסתיימו (מתוך ${qtyMax})`} type="number" value={cnt===""?String(qtyMax):cnt} onChange={setCnt} style={{flex:"0 1 170px"}}/>}
               <div style={{display:"flex",gap:6}}>
                 <Btn small onClick={()=>{setMove(null);setWhen("")}}>ביטול</Btn>
-                <Btn small color={JOB_MOVE_UI[move].c} disabled={!isFinite(T0)||T0<earliest-59999||qtyBad} onClick={doMove}>💾 עדכן</Btn>
+                <Btn small color={MOVE_UI[move].c} disabled={!isFinite(T0)||T0<earliest-59999||T0>now+59999||qtyBad} onClick={doMove}>💾 עדכן</Btn>
               </div>
             </div>
             <div style={{fontSize:11,color:isFinite(T0)&&T0<earliest-59999?"#ef4444":"var(--c-dim)",marginTop:6}}>
-              לא לפני {fmtDayClock(earliest)} — הדבר האחרון שנרשם בעבודה{when?"":" · בלי לשנות — מעכשיו"}
+              לא לפני {fmtDayClock(earliest)} — {reopen&&move==="run"?"שעת הסיום שנרשמה":"הדבר האחרון שנרשם בעבודה"}{when?"":reopen?" · בלי לשנות — משעת הסיום":" · בלי לשנות — מעכשיו"}
             </div>
           </div>}
         </>}
@@ -7781,10 +7887,13 @@ function JobHoursEditor({w,edit,setEdit,now,onCancel,onSave}){
 // ══════════════════════════════════════════════════════════════════════════
 // ═══ WORKERS DASHBOARD ══════════════════════════════════════════════════
 // ══════════════════════════════════════════════════════════════════════════
-function WorkersDashboard({users,workLogs,orders,stages,customTasks,onAddTask,onDeleteLog,onUpdateTask,onDeleteTask,onMarkPartialTask,onMarkDoneTask,dailyPlans,onAddPlan,onAddPlans,onDeletePlan,onTogglePlanDone,onTransferHold,departments,onSaveBreaks,onDayEndFix,dayEnd,onJobEdit,onJobSetState}){
+function WorkersDashboard({users,workLogs,orders,stages,customTasks,onAddTask,onDeleteLog,onUpdateTask,onDeleteTask,onMarkPartialTask,onMarkDoneTask,dailyPlans,onAddPlan,onAddPlans,onDeletePlan,onTogglePlanDone,onTransferHold,departments,onSaveBreaks,onDayEndFix,dayEnd,onJobEdit,onJobSetState,onJobReopen}){
   const {toast}=useToast();
+  const {currentUser}=useAuth();
   const [search,setSearch]=useState("");
   const [period,setPeriod]=useState("all");
+  // A finished job opened from 📋 פעילות אחרונה — the same window as on 🗂️.
+  const [openJob,setOpenJob]=useState(null);
   // Memoised so the indexes below (which key off `filtered`) are not rebuilt by
   // every unrelated re-render of this screen.
   const workers=useMemo(()=>users.filter(u=>u.role!=="admin"&&u.active!==false),[users]);
@@ -7891,7 +8000,7 @@ function WorkersDashboard({users,workLogs,orders,stages,customTasks,onAddTask,on
 
       <HoldBoard workLogs={workLogs} orders={orders} stages={stages} workers={workers} onTransfer={onTransferHold}/>
 
-      <ActivityBoard workLogs={workLogs} orders={orders} stages={stages} workers={workers} onEdit={onJobEdit} onSetState={onJobSetState}/>
+      <ActivityBoard workLogs={workLogs} orders={orders} stages={stages} workers={workers} onEdit={onJobEdit} onSetState={onJobSetState} onReopen={onJobReopen}/>
 
       {onSaveBreaks&&<BreakSchedulesBoard departments={departments} users={users} onSave={onSaveBreaks}/>}
 
@@ -7921,7 +8030,8 @@ function WorkersDashboard({users,workLogs,orders,stages,customTasks,onAddTask,on
 
       {/* Recent activity table — filtered by search */}
       <Card>
-        <div style={{fontWeight:700,fontSize:14,marginBottom:10}}>📋 פעילות אחרונה{search?` — ${search}`:""}</div>
+        <div style={{fontWeight:700,fontSize:14,marginBottom:4}}>📋 פעילות אחרונה{search?` — ${search}`:""}</div>
+        <div style={{fontSize:11.5,color:"var(--c-dim)",marginBottom:10}}>הקש על שורה לפירוט לפי ימים, לתיקון שעות או לפתיחה מחדש.</div>
         <div style={{overflowX:"auto"}}><table><thead><tr><th>עובד</th><th>S/N</th><th>שלב</th><th>זמן כולל</th><th>ליחידה</th><th>תמחור</th><th>הפסקות</th><th>סיום</th><th></th></tr></thead><tbody>
           {(()=>{
             const logs=workLogs.filter(w=>w.completed&&filterByPeriod(w.endTime)&&(!search||w.userName.includes(search))).sort((a,b)=>(b.endTime||"").localeCompare(a.endTime||""));
@@ -7933,9 +8043,9 @@ function WorkersDashboard({users,workLogs,orders,stages,customTasks,onAddTask,on
                 seen.add(w.bulkGroupId);
                 const group=logs.filter(l=>l.bulkGroupId===w.bulkGroupId);
                 const sns=group.map(l=>l.serialSn).join(", ");
-                rows.push({...w,_sns:sns,_count:group.length,_grouped:true});
+                rows.push({...w,_sns:sns,_count:group.length,_grouped:true,_ids:group.map(l=>l.id)});
               }else{
-                rows.push({...w,_sns:logUnitLabel(w),_count:1,_grouped:false});
+                rows.push({...w,_sns:logUnitLabel(w),_count:1,_grouped:false,_ids:[w.id]});
               }
             });
             return rows.slice(0,50).map(w=>{
@@ -7947,7 +8057,7 @@ function WorkersDashboard({users,workLogs,orders,stages,customTasks,onAddTask,on
               const stagePrice=isTimeOnly(w)?0:Number(stage?.price||0);
               const perUnit=w._count>1?Math.round(w.durationMin/w._count):w.durationMin;
               return(
-                <tr key={w.id}>
+                <tr key={w.id} onClick={()=>setOpenJob(w._ids)} title="פירוט, תיקון שעות ופתיחה מחדש" style={{cursor:"pointer"}}>
                   <td style={{fontWeight:600}}>{w.userName}</td>
                   <td style={{color:"#7eb8ff",fontSize:12}}>{w._count>1?<span>{w._count} יחידות<div style={{fontSize:10,color:"var(--c-dim)",maxWidth:200,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{w._sns}</div></span>:w._sns}</td>
                   <td><span style={{color:stage?.color||"var(--c-muted)"}}>{stage?.name||"—"}</span>{seg&&<span title={`חלק מיחידה שהועברה מ-HOLD ל-${w.holdInfo?.toUserName||"עובד אחר"}`} style={{fontSize:10,color:"#f97316",marginInlineStart:5}}>🟧 HOLD</span>}{rw&&<ReworkTag log={w} stages={stages}/>}<JointTag log={w}/></td>
@@ -7956,11 +8066,15 @@ function WorkersDashboard({users,workLogs,orders,stages,customTasks,onAddTask,on
                   <td style={{color:stagePrice?"#a78bfa":"var(--c-dim)"}}>{stagePrice?`₪${stagePrice}${w._count>1?` × ${w._count} = ₪${stagePrice*w._count}`:""}`:"—"}</td>
                   <td style={{color:"#f97316"}}>{breakCountOf(w)>0?`${breakCountOf(w)} (${fmtTime(breakMinOf(w))})`:"—"}</td>
                   <td style={{fontSize:11,color:"var(--c-dim)"}}>{w.endTime?new Date(w.endTime).toLocaleString("he-IL",{day:"2-digit",month:"2-digit",hour:"2-digit",minute:"2-digit"}):""}</td>
-                  <td><IBtn onClick={()=>{if(!confirm("למחוק רשומה?"))return;if(w._grouped&&w.bulkGroupId){onDeleteLog(workLogs.filter(l=>l.bulkGroupId===w.bulkGroupId).map(l=>l.id))}else{onDeleteLog([w.id])}}}>🗑️</IBtn></td>
+                  <td><IBtn onClick={e=>{e.stopPropagation();if(!confirm("למחוק רשומה?"))return;if(w._grouped&&w.bulkGroupId){onDeleteLog(workLogs.filter(l=>l.bulkGroupId===w.bulkGroupId).map(l=>l.id))}else{onDeleteLog([w.id])}}}>🗑️</IBtn></td>
                 </tr>);
             });
           })()}
         </tbody></table></div>
+        {/* A manager corrects their people's hours, not their own: their own opens to read. */}
+        {openJob&&(()=>{const mine=(workLogs||[]).some(l=>openJob.includes(l.id)&&l.userId===currentUser?.id);return(
+          <JobDetailHost ids={openJob} workLogs={workLogs} orders={orders} stages={stages} onClose={()=>setOpenJob(null)}
+            {...(mine?{}:{onEdit:onJobEdit,onSetState:onJobSetState,onReopen:onJobReopen})}/>)})()}
       </Card>
 
       {/* Completed custom tasks */}
@@ -8233,8 +8347,10 @@ function DailyPlanBoard({dailyPlans,workers,orders,stages,workLogs,onAddPlan,onA
 // ══════════════════════════════════════════════════════════════════════════
 // ═══ TEAM DASHBOARD (ראש צוות / מנהל מחלקה) ══════════════════════════════
 // ══════════════════════════════════════════════════════════════════════════
-function TeamDashboard({users,workLogs,orders,stages,customTasks,departments,onAddTask,onDeleteTask,onMarkPartialTask,onMarkDoneTask,dailyPlans,onAddPlan,onAddPlans,onDeletePlan,onTogglePlanDone,onTransferHold,onSaveBreaks,onDayEndFix,dayEnd,onJobEdit,onJobSetState}){
+function TeamDashboard({users,workLogs,orders,stages,customTasks,departments,onAddTask,onDeleteTask,onMarkPartialTask,onMarkDoneTask,dailyPlans,onAddPlan,onAddPlans,onDeletePlan,onTogglePlanDone,onTransferHold,onSaveBreaks,onDayEndFix,dayEnd,onJobEdit,onJobSetState,onJobReopen}){
   const {currentUser}=useAuth();
+  // A finished job opened from 📋 פעילות אחרונה — the same window as on 🗂️.
+  const [openJob,setOpenJob]=useState(null);
   const isDeptMgr=currentUser.role==="dept_manager";
   const myDept=(departments||[]).find(d=>d.id===currentUser.departmentId||d.managerId===currentUser.id);
   // Dept managers see their whole department; team leads see their direct reports
@@ -8276,7 +8392,7 @@ function TeamDashboard({users,workLogs,orders,stages,customTasks,departments,onA
       </div>
       <DayEndBoard workLogs={workLogs} orders={orders} stages={stages} workers={team} onFix={onDayEndFix} dayEnd={dayEnd}/>
       <HoldBoard workLogs={workLogs} orders={orders} stages={stages} workers={team} onTransfer={onTransferHold}/>
-      <ActivityBoard workLogs={workLogs} orders={orders} stages={stages} workers={team} onEdit={onJobEdit} onSetState={onJobSetState}/>
+      <ActivityBoard workLogs={workLogs} orders={orders} stages={stages} workers={team} onEdit={onJobEdit} onSetState={onJobSetState} onReopen={onJobReopen}/>
       {/* A department manager sets breaks from 👥 עובדים; here, a team lead for their team. */}
       {!isDeptMgr&&onSaveBreaks&&<BreakSchedulesBoard departments={departments} users={users} onSave={onSaveBreaks}/>}
 
@@ -8344,14 +8460,16 @@ function TeamDashboard({users,workLogs,orders,stages,customTasks,departments,onA
       {/* Recent team activity */}
       {team.length>0&&(
         <Card>
-          <div style={{fontWeight:700,fontSize:14,marginBottom:10}}>📋 פעילות אחרונה של הצוות</div>
+          <div style={{fontWeight:700,fontSize:14,marginBottom:4}}>📋 פעילות אחרונה של הצוות</div>
+          <div style={{fontSize:11.5,color:"var(--c-dim)",marginBottom:10}}>הקש על שורה לפירוט לפי ימים, לתיקון שעות או לפתיחה מחדש.</div>
           {(()=>{
             const recent=workLogs.filter(w=>w.completed&&teamIds.has(w.userId)).sort((a,b)=>(b.endTime||"").localeCompare(a.endTime||"")).slice(0,20);
             if(!recent.length)return<EmptyState icon="📋" title="אין פעילות עדיין" subtitle="פעולות שהצוות ישלים יופיעו כאן"/>;
             return(
               <div style={{overflowX:"auto"}}><table><thead><tr><th>עובד</th><th>S/N</th><th>שלב</th><th>זמן</th><th>סיום</th></tr></thead><tbody>
                 {recent.map(w=>{const stage=stages.find(s=>s.id===w.stageId);return(
-                  <tr key={w.id}>
+                  <tr key={w.id} title="פירוט, תיקון שעות ופתיחה מחדש" style={{cursor:"pointer"}}
+                    onClick={()=>setOpenJob(w.bulkGroupId?workLogs.filter(l=>l.completed&&l.bulkGroupId===w.bulkGroupId).map(l=>l.id):[w.id])}>
                     <td style={{fontWeight:600}}>{w.userName}</td>
                     <td style={{color:"#7eb8ff",fontSize:12}}>{logUnitLabel(w)}</td>
                     <td><span style={{color:stage?.color||"var(--c-muted)"}}>{stage?.name||"—"}</span><ReworkTag log={w} stages={stages}/><JointTag log={w}/></td>
@@ -8362,6 +8480,8 @@ function TeamDashboard({users,workLogs,orders,stages,customTasks,departments,onA
               </tbody></table></div>
             );
           })()}
+          {openJob&&<JobDetailHost ids={openJob} workLogs={workLogs} orders={orders} stages={stages} onClose={()=>setOpenJob(null)}
+            onEdit={onJobEdit} onSetState={onJobSetState} onReopen={onJobReopen}/>}
         </Card>
       )}
     </div>
@@ -16085,6 +16205,26 @@ function App(){
     }
   };
 
+  // The other way round, for a stage opened again (see jobReopen): a unit that
+  // counted as delivered only because every stage was done stops counting. One
+  // marked delivered some other way (the ERP import) is left as it is.
+  const undoAutoDelivery=(orderId,prevLogs,nextLogs)=>{
+    const order=oRef.current.find(o=>o.id===orderId);
+    const had=(order&&order.deliveredSerials)||[];
+    const oSt=(order&&order.stageIds)||[];
+    if(!had.length||!oSt.length)return;
+    const was=buildDoneIndex(prevLogs),now=buildDoneIndex(nextLogs);
+    const all=(idx,sid)=>oSt.every(st=>idx.has(logKey(sid,st)));
+    const keep=had.filter(sid=>!(all(was,sid)&&!all(now,sid)));
+    if(keep.length===had.length)return;
+    setOrders(prev=>{
+      const updated=prev.map(o=>o.id!==orderId?o:{...o,deliveredSerials:keep,deliveredQty:keep.length,
+        deliveryStatus:keep.length&&keep.length===(o.serials||[]).length?"delivered":keep.length>0?"partial":"pending"});
+      persist(updated,null,null,null);
+      return updated;
+    });
+  };
+
   // Which units wait for a fix after inspection — read off the newest log list
   // when a start needs it, and kept until that list changes.
   const reworkIdxCache=useRef({logs:null,idx:null});
@@ -16345,6 +16485,27 @@ function App(){
     // Not one of WORK_UNDO_ACTIONS — the journal screen matches those by substring.
     UNDO.record({user:currentUser,action:"שינוי סטטוס בידי מנהל",target:plan.before.map(logUnitLabel).join(", "),
       details:`${w.userName||""} · ${JOB_MGR_ACTIONS[`set-${to}`]||""} מ-${fmtClock(plan.at)}`,
+      changes:[{coll:"workLogs",before:plan.before,after:plan.before.map(x=>x.id)}]});
+    return "";
+  };
+  // 🔄 A manager opens a finished job again (see jobReopen). Answers "" when it
+  // opened, or why not (see JOB_SET_ERR).
+  const handleJobReopen=(logIds,to,t)=>{
+    const at=nowISO();
+    const plan=jobReopen(wRef.current||[],logIds,to,t,currentUser,at);
+    if(plan.error)return plan.error;
+    setWorkLogs(prev=>{
+      const r=jobReopen(prev,logIds,to,t,currentUser,at);
+      if(r.error)return prev;
+      persist(null,null,null,r.next);
+      const o=plan.before[0].orderId;
+      if(o)setTimeout(()=>undoAutoDelivery(o,prev,r.next),100);
+      return r.next;
+    });
+    const w=plan.before[0];
+    // Not one of WORK_UNDO_ACTIONS — the journal screen matches those by substring.
+    UNDO.record({user:currentUser,action:"פתיחה מחדש בידי מנהל",target:plan.before.map(logUnitLabel).join(", "),
+      details:`${w.userName||""} · ${JOB_MGR_ACTIONS[`reopen-${to}`]||""} מ-${fmtClock(plan.at)}`,
       changes:[{coll:"workLogs",before:plan.before,after:plan.before.map(x=>x.id)}]});
     return "";
   };
@@ -17033,12 +17194,12 @@ function App(){
         // navigation, the install banner, or both.
         paddingBottom:isWorker?`calc(${showInstall?160:86}px + env(safe-area-inset-bottom,0px))`:showInstall?"100px":"calc(16px + env(safe-area-inset-bottom,0px))"}}>
         {tab==="dashboard"&&<Dashboard orders={filteredOrders} projects={filteredProjects} stages={stages} users={visibleUsers} workLogs={filteredWorkLogs} departments={visibleDepartments} customTasks={customTasks}/>}
-        {tab==="team"&&isLead&&<TeamDashboard users={getUsers()} workLogs={filteredWorkLogs} orders={filteredOrders} stages={stages} customTasks={customTasks} departments={departments} onAddTask={handleAddTask} onDeleteTask={handleDeleteTask} onMarkPartialTask={handleMarkPartialTask} onMarkDoneTask={handleMarkDoneTask} dailyPlans={dailyPlans} onAddPlan={handleAddPlan} onAddPlans={handleAddPlans} onDeletePlan={handleDeletePlan} onTogglePlanDone={handleTogglePlanDone} onTransferHold={handleTransferHold} onSaveBreaks={handleSaveBreaks} onDayEndFix={handleDayEndFix} dayEnd={dayEnd} onJobEdit={handleJobEdit} onJobSetState={handleJobSetState}/>}
+        {tab==="team"&&isLead&&<TeamDashboard users={getUsers()} workLogs={filteredWorkLogs} orders={filteredOrders} stages={stages} customTasks={customTasks} departments={departments} onAddTask={handleAddTask} onDeleteTask={handleDeleteTask} onMarkPartialTask={handleMarkPartialTask} onMarkDoneTask={handleMarkDoneTask} dailyPlans={dailyPlans} onAddPlan={handleAddPlan} onAddPlans={handleAddPlans} onDeletePlan={handleDeletePlan} onTogglePlanDone={handleTogglePlanDone} onTransferHold={handleTransferHold} onSaveBreaks={handleSaveBreaks} onDayEndFix={handleDayEndFix} dayEnd={dayEnd} onJobEdit={handleJobEdit} onJobSetState={handleJobSetState} onJobReopen={handleJobReopen}/>}
         {tab==="orders"&&<Orders orders={filteredOrders} projects={filteredProjects} stages={stages} stageBlocks={stageBlocks} departments={departments} updO={updO} workLogs={filteredWorkLogs} onWorkLog={handleStartWork} onDeleteLog={handleDeleteLog} workdayHours={workdayHours} setWorkdayHours={setWorkdayHoursPersist} pnStandards={pnStandards}/>}
         {tab==="shortages"&&<Shortages orders={filteredOrders} updO={updO} projects={filteredProjects}/>}
         {(tab==="mywork"||(tab==="queue"&&isWorker))&&<MyWork key={tab} view={!isWorker?"all":tab==="queue"?"queue":"mine"} onGoTab={isWorker?goTab:null}
           orders={filteredOrders} stages={stages} workLogs={filteredWorkLogs} onStartWork={handleStartWork} onEndWork={handleEndWork} onEndJoint={handleEndJoint} onDeleteLog={handleDeleteLog} onPauseWork={handlePauseWork} onResumeWork={handleResumeWork} onHoldWork={handleHoldWork} onPickupHold={handlePickupHold} onReturnRework={handleReturnRework} customTasks={customTasks} onAddTask={handleAddTask} onStartTask={handleStartTask} onEndTask={handleEndTask} onPauseTask={handlePauseTask} onResumeTask={handleResumeTask} onDeleteTask={handleDeleteTask} onMarkPartialTask={handleMarkPartialTask} onMarkDoneTask={handleMarkDoneTask} users={getUsers()} dailyPlans={dailyPlans} onMarkPlanDone={handleMarkPlanDone}/>}
-        {tab==="workers"&&(isAdmin||isDeptMgr)&&<WorkersDashboard users={visibleUsers} workLogs={filteredWorkLogs} orders={filteredOrders} stages={stages} customTasks={customTasks} onAddTask={handleAddTask} onDeleteLog={handleDeleteLog} onDeleteTask={handleDeleteTask} onMarkPartialTask={handleMarkPartialTask} onMarkDoneTask={handleMarkDoneTask} dailyPlans={dailyPlans} onAddPlan={handleAddPlan} onAddPlans={handleAddPlans} onDeletePlan={handleDeletePlan} onTogglePlanDone={handleTogglePlanDone} onTransferHold={handleTransferHold} departments={departments} onSaveBreaks={handleSaveBreaks} onDayEndFix={handleDayEndFix} dayEnd={dayEnd} onJobEdit={handleJobEdit} onJobSetState={handleJobSetState}/>}
+        {tab==="workers"&&(isAdmin||isDeptMgr)&&<WorkersDashboard users={visibleUsers} workLogs={filteredWorkLogs} orders={filteredOrders} stages={stages} customTasks={customTasks} onAddTask={handleAddTask} onDeleteLog={handleDeleteLog} onDeleteTask={handleDeleteTask} onMarkPartialTask={handleMarkPartialTask} onMarkDoneTask={handleMarkDoneTask} dailyPlans={dailyPlans} onAddPlan={handleAddPlan} onAddPlans={handleAddPlans} onDeletePlan={handleDeletePlan} onTogglePlanDone={handleTogglePlanDone} onTransferHold={handleTransferHold} departments={departments} onSaveBreaks={handleSaveBreaks} onDayEndFix={handleDayEndFix} dayEnd={dayEnd} onJobEdit={handleJobEdit} onJobSetState={handleJobSetState} onJobReopen={handleJobReopen}/>}
         {tab==="stdtimes"&&(isAdmin||isDeptMgr||isLead)&&<StandardTimes orders={filteredOrders} stages={stages} stageBlocks={stageBlocks} workLogs={filteredWorkLogs} users={visibleUsers} projects={filteredProjects} pnStandards={pnStandards} onSavePnStd={savePnStd} onDeletePnStd={deletePnStd}/>}
         {tab==="yield"&&<YieldDashboard orders={filteredOrders} projects={filteredProjects} stages={stages} workLogs={filteredWorkLogs}/>}
         {tab==="stages"&&isAdmin&&<StagesManagement stages={stages} setStages={setStages} stageBlocks={stageBlocks} setStageBlocks={setStageBlocks} persist={persist}/>}

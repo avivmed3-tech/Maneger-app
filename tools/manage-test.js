@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 /**
  * A manager opens a job of their people — running, on HOLD or finished — sees it
- * day by day, corrects its hours, and moves it on for a worker who forgot to.
+ * day by day, corrects its hours, moves it on for a worker who forgot to, and
+ * opens a finished one again.
  *
  * What has to hold: the days, starts, stops and breaks read off the record as
  * they happened; an edit that changes nothing changes no figure, and one that
@@ -9,7 +10,8 @@
  * break taken off stays off; a change of state lands at the moment the manager
  * names, never before what is already on the record, and leaves the job exactly as
  * if its worker had pressed the button then; a unit somebody else is still on is
- * finished as a share, not signed twice.
+ * finished as a share, not signed twice; a finished job opened again keeps the
+ * minutes it had, and only one whose unit has not moved on can be.
  *
  * The code under test is lifted straight out of index.html.
  *
@@ -37,7 +39,8 @@ vm.runInContext([
   slice("const reworkOf=","// ── הפסקות קבועות","the rework and joint-work helpers"),
   slice("const BREAK_DAYS=","// ── מחיר ליחידה","the break, end-of-day and manager helpers"),
   "module.exports={jobStops,jobDays,jobEditBase,jobEditCheck,jobEditNet,jobEdit,jobSetState,jobSig,jobEarliest,isNoTimer,",
-  "  applyBreaks,breakWindows,dayEndMissed,logWorkedMin,breakMinOf,breakCountOf,isOnHold,jobState,isJointShare,holdHandOff,holdCarryMin};"
+  "  applyBreaks,breakWindows,dayEndMissed,logWorkedMin,breakMinOf,breakCountOf,isOnHold,jobState,isJointShare,holdHandOff,holdCarryMin,",
+  "  jobReopen,jobReopenBlock,jobReopenEarliest};"
 ].join("\n"),ctx);
 const M=ctx.module.exports;
 
@@ -216,6 +219,47 @@ const es=M.jobEdit(ho.next,[seg.id],fs2,boss,I(NOW));
 const seg2=es.next.find(w=>w.id===seg.id),moved2=es.next.find(w=>w.id==="w1");
 ok(seg2.durationMin===180&&M.holdCarryMin(moved2)===180,"corrected to 08:00–11:00: the segment and the carry both say 3 hours");
 ok(moved2.holdInfo.prev[0].min===180&&es.carried.length===1&&es.carried[0]===moved,"…the list of who worked follows, and the log it touched is handed back for the journal");
+
+console.log("\n── 10. a finished job opened again ────────────────────────");
+// Signed at 15:00, a 30-minute break in it — 6:30 of work.
+const signed=job({completed:true,endTime:I(L(15)),durationMin:390,pauseLog:[{start:I(L(12)),end:I(L(12,30))}],totalPauseMin:30});
+const ro=M.jobReopen([signed],["w1"],"hold",I(L(15)),boss,I(L(18)));
+const R=ro.next[0];
+ok(!ro.error&&!R.completed&&M.isOnHold(R)&&R.pauseStart===I(L(15))&&R.endTime===null,"not really done: back on HOLD from 15:00, no longer signed");
+ok(M.logWorkedMin(R,L(18))===390&&R.holdInfo.heldByName==="מנהלת","its clock still says 6:30, HOLD by the manager");
+ok(R.holdInfo.review.action==="reopen-hold"&&R.holdInfo.review.was.durationMin===390&&ro.before[0]===signed,"the review and the journal keep what it was");
+const early=M.jobReopen([signed],["w1"],"hold",I(L(14)),boss,I(L(18))).next[0];
+ok(M.logWorkedMin(early,L(18))===330&&M.isOnHold(early),"work really stopped at 14:00: 5:30");
+ok(M.jobReopen([signed],["w1"],"hold",I(L(12,10)),boss,I(L(18))).error==="early","not before the last thing on its record (back from the break at 12:30)");
+const later=M.jobReopen([signed],["w1"],"hold",I(L(16)),boss,I(L(18))).next[0];
+ok(M.logWorkedMin(later,L(18))===450,"work went on to 16:00: 7:30");
+const rr=M.jobReopen([signed],["w1"],"run",I(L(15)),boss,I(L(18)));
+ok(!rr.next[0].completed&&!rr.next[0].paused&&M.logWorkedMin(rr.next[0],L(18))===390+180,"✅ by mistake, still working: the clock runs on from 15:00");
+const gap=M.jobReopen([signed],["w1"],"run",I(L(16)),boss,I(L(18))).next[0];
+ok(M.logWorkedMin(gap,L(18))===390+120&&M.breakMinOf(gap)===30&&gap.holdInfo.holdMin===60,"back at 16:00: the hour between is HOLD, not work and not a break");
+ok(M.jobReopen([signed],["w1"],"run",I(L(14)),boss,I(L(18))).error==="early","back to work before it was signed — no");
+ok(M.jobReopen([signed,{...other,startTime:I(L(16))}],["w1"],"run",I(L(17)),boss,I(L(18))).error==="busy","back to work while another job of theirs runs — no");
+// A break it was finished in closes at the end, and stays a break.
+const inBrk=job({completed:true,endTime:I(L(12)),paused:true,pauseStart:I(L(11,30)),durationMin:210,pauseLog:[{start:I(L(11,30))}]});
+const ib2=M.jobReopen([inBrk],["w1"],"hold",I(L(12)),boss,I(L(18))).next[0];
+ok(M.logWorkedMin(ib2,L(18))===210&&M.breakMinOf(ib2)===30,"finished during a break: 3:30 of work, the break still a break");
+const ib3=M.jobReopen([inBrk],["w1"],"hold",I(L(11,45)),boss,I(L(18))).next[0];
+ok(ib3.pauseLog[0].end===I(L(11,45))&&M.logWorkedMin(ib3,L(18))===210,"…HOLD from 11:45, in that break: the break is cut there");
+
+console.log("\n── 11. what cannot be opened again ────────────────────────");
+const nextStage=job({id:"n1",stageId:"B",startTime:I(L(15,30)),userId:"u2"});
+ok(M.jobReopenBlock([signed,nextStage],[signed])==="moved","the unit went on to the next stage — only its hours can be corrected");
+ok(M.jobReopen([signed,nextStage],["w1"],"hold",I(L(15)),boss,I(L(18))).error==="moved","…and it is refused");
+const twice=job({id:"t2",completed:true,startTime:I(L(9)),endTime:I(L(10)),durationMin:60,userId:"u2"});
+ok(M.jobReopenBlock([signed,twice],[signed])==="taken","another log on the same unit and stage");
+const back2=job({id:"rq",serialId:null,completed:true,startTime:I(L(16)),endTime:I(L(16)),stageId:"QC",holdInfo:{rework:{req:true,id:"rq",serialId:"S1",toStageId:"A",fromStageId:"QC",at:I(L(16))}}});
+ok(M.jobReopenBlock([signed,back2],[signed])==="moved","sent back from inspection since — it moved on");
+ok(M.jobReopenBlock([seg2],[seg2])==="share","a share of a unit handed on from HOLD");
+ok(M.jobReopenBlock([sig],[sig])==="notimer","a signature with no clock");
+ok(M.jobReopenBlock([signed,{...nextStage,startTime:I(L(14))}],[signed])==="","work on the unit that began before it was signed does not stand in the way");
+const gq1=job({id:"q1",serialId:null,serialSn:null,completed:true,endTime:I(L(12)),durationMin:240,bulk:true,bulkCount:5});
+const gq=M.jobReopen([gq1],["q1"],"hold",I(L(12)),boss,I(L(13))).next[0];
+ok(!gq.completed&&gq.bulkCount===5&&M.isOnHold(gq),"a quantity report opens as the run it was, on HOLD");
 
 console.log(fail?`\n✗ ${fail} failed`:"\n✓ all manager checks passed");
 process.exit(fail?1:0);
