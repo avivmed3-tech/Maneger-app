@@ -3260,10 +3260,44 @@ const IBtn=({children,onClick,title,style={}})=>(
     onMouseLeave={e=>e.currentTarget.style.opacity=".7"}
   >{children}</button>
 );
+// Native time pickers follow the device's language, so an English phone shows
+// 3:00 PM. These are always 24h, and speak the same "HH:MM" / "YYYY-MM-DDTHH:MM"
+// as type=time / datetime-local. Type "15:00" or "1500"; on leaving the field
+// "900" and "15" are read too. Something that isn't a time is dropped on blur.
+const toHHMM=(s,done)=>{
+  const t=String(s||"").trim();
+  const m=t.match(/^(\d{1,2}):(\d{2})$/)||t.match(/^(\d{2})(\d{2})$/)||(done&&(t.match(/^(\d)(\d{2})$/)||t.match(/^(\d{1,2})()$/)));
+  if(!m)return"";
+  const h=+m[1],mi=+(m[2]||0),p=n=>String(n).padStart(2,"0");
+  return h<24&&mi<60?`${p(h)}:${p(mi)}`:"";
+};
+function Time24({value,onChange,disabled,style}){
+  const [draft,setDraft]=useState(null);
+  return <input type="text" inputMode="numeric" dir="ltr" placeholder="00:00" maxLength={5} disabled={disabled}
+    value={draft??value??""}
+    onChange={e=>{const v=e.target.value.replace(/[^\d:]/g,"");setDraft(v);const t=toHHMM(v);if(t&&t!==value)onChange(t)}}
+    onBlur={()=>{if(draft==null)return;const t=toHHMM(draft,true);if(t&&t!==value)onChange(t);setDraft(null)}}
+    style={{textAlign:"center",fontVariantNumeric:"tabular-nums",...style}}/>;
+}
+function DateTime24({value,onChange,disabled}){
+  // Half of a new value (a date, no time yet) waits here until both are in.
+  const [part,setPart]=useState({});
+  const [d0="",t0=""]=value?value.split("T"):[];
+  const date=d0||part.date||"",time=t0||part.time||"";
+  const put=(date,time)=>{if(date&&time)onChange(`${date}T${time}`);else setPart({date,time})};
+  return(
+    <div style={{display:"flex",gap:6}}>
+      <input type="date" value={date} onChange={e=>put(e.target.value,time)} disabled={disabled} style={{flex:"1 1 auto",minWidth:0}}/>
+      <Time24 value={time} onChange={v=>put(date,v)} disabled={disabled} style={{flex:"0 0 76px",width:76,padding:"9px 6px"}}/>
+    </div>
+  );
+}
 const Field=({label,value,onChange,type="text",style={},placeholder,disabled})=>(
   <div style={{display:"flex",flexDirection:"column",gap:4,minWidth:120,...style}}>
     <label style={{fontSize:11,color:"var(--c-dim)",fontWeight:600}}>{label}</label>
-    <input type={type} value={value} onChange={e=>onChange(e.target.value)} placeholder={placeholder} disabled={disabled}/>
+    {type==="datetime-local"?<DateTime24 value={value} onChange={onChange} disabled={disabled}/>
+      :type==="time"?<Time24 value={value} onChange={onChange} disabled={disabled}/>
+      :<input type={type} value={value} onChange={e=>onChange(e.target.value)} placeholder={placeholder} disabled={disabled}/>}
   </div>
 );
 const Card=({children,style={}})=>(
