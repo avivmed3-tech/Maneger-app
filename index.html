@@ -12035,10 +12035,21 @@ function xlPickSheet(wb,names){
 // here writes back to the ERP.
 const PRI_H={wo:'מספר פק"ע',pn:'מק"ט',desc:'תיאור מוצר',branch:'סניף',project:'פרויקט',qty:'כמות',
   price:"מחיר אלת'א בש'ח",release:'תאריך שחרור',endDate:'ת. סיום יצור',
-  // Priority spelled this header שלה before it was corrected to שלב; both are read.
-  seq:'שלב בפק"ע',seqAlt:'שלה בפק"ע',op:'פעולה',
+  seq:'שלב בפק"ע',op:'פעולה',
   opDesc:'תאור פעולה',wc:'מרכז עבודה',reported:'כמות מדווחת',remain:'יתרה לבצוע',
   stdPn:"ז.תקן ליח' בדק' למקט",stdWo:"ז.תקן ליח' בדק' בפקע",status:'סטטוס פק"ע'};
+// The same report has come out of Priority under more than one set of headers,
+// and every one of them is read. The newer export (DataSheet, 26 columns) names
+// the פק"ע column plain פק'ע, the quantity כ. הפק'ע, the step number plain שלב,
+// the release date ת. שחרור, and spells תאור מוצר and פרוייקט the ERP's way.
+// Missing any one of them is not a loud failure — the file is still recognised,
+// and then every row is skipped as "no פק"ע number" or the field quietly
+// arrives empty — so a spelling seen in a real export goes here, next to the
+// one it stands for. Older spellings stay: last month's file must still load.
+const PRI_ALT={wo:["פק'ע"],qty:["כ. הפק'ע"],desc:["תאור מוצר"],project:["פרוייקט"],release:["ת. שחרור"],
+  // Priority spelled this header שלה before it was corrected to שלב.
+  seq:['שלה בפק"ע',"שלב"]};
+const priGet=(r,k)=>xlGet(r,PRI_H[k],...(PRI_ALT[k]||[]));
 // A free-text reason beside the status — not every Priority report carries one,
 // and the header it carries it under differs between reports, so every spelling
 // seen so far is tried. Whatever it holds is shown on a stuck פק"ע next to the
@@ -12148,7 +12159,12 @@ const PRI_STATUS_INFO={
   "חוסר נגדי":{st:"blocked",phase:"stuck",desc:'רכיב של הפק"ע נלקח לטובת פק"ע אחרת (חוסר נגדי), והיא ממתינה להשלמה.'},
   "הוקפאה":{st:"blocked",phase:"stuck",desc:'הפק"ע הוקפאה בהחלטת ניהול — שינוי עדיפויות, המתנה ללקוח או לתקציב.'},
   "הוחזר לתיקון":{st:"blocked",phase:"stuck",desc:'הפק"ע חזרה לתיקון אחרי שנפסלה בביקורת או בבדיקה.'},
-  "בטיפול לקוח":{st:"blocked",phase:"stuck",desc:'הפק"ע ממתינה להחלטה, לאישור או לחומר מהלקוח.'}
+  "בטיפול לקוח":{st:"blocked",phase:"stuck",desc:'הפק"ע ממתינה להחלטה, לאישור או לחומר מהלקוח.'},
+  // First seen in the DataSheet export. Without an entry the wording rule sent
+  // MRB to "בתהליך" — a פק"ע held for a disposition decision, read as running.
+  "ממתין לכיול":{st:"partial",phase:"line",desc:'הפק"ע ממתינה לכיול לפני שהיא ממשיכה — זמן המתנה בתוך התהליך, לא זמן עבודה.'},
+  "בסגירה קבמ":{st:"partial",phase:"line",desc:'העבודה בקב"מ (קבלן משנה / קו ייעודי) נסגרת, והפק"ע חוזרת להמשך התהליך.'},
+  "MRB":{st:"blocked",phase:"stuck",desc:'הפק"ע עצורה בוועדת MRB (Material Review Board) — נמצאה אי-התאמה, וממתינים להחלטה אם להשתמש כמו שהוא, לתקן או לגרוט.'}
 };
 // Priority statuses get renamed and added to over time, so an unfamiliar one is
 // still placed sensibly instead of silently landing on "open" — and the guess
@@ -12245,15 +12261,15 @@ function priScan(rows,serialRows){
   const wos=new Map(),ops=new Map();
   let skipped=0;
   rows.forEach((r,i)=>{
-    const wo=String(xlGet(r,PRI_H.wo)||"").trim();
+    const wo=String(priGet(r,"wo")||"").trim();
     if(!wo){skipped++;return}
     let o=wos.get(wo);
     if(!o){
-      o={wo,pn:String(xlGet(r,PRI_H.pn)||"").trim(),desc:String(xlGet(r,PRI_H.desc)||"").trim(),
-        project:priTxt(xlGet(r,PRI_H.project)),branch:branchCode(xlGet(r,PRI_H.branch)),
-        qty:priNum(xlGet(r,PRI_H.qty)),price:priNum(xlGet(r,PRI_H.price)),
-        release:xlDate(xlGet(r,PRI_H.release)),endDate:xlDate(xlGet(r,PRI_H.endDate)),
-        statusRaw:String(xlGet(r,PRI_H.status)||"").trim(),
+      o={wo,pn:String(priGet(r,"pn")||"").trim(),desc:String(priGet(r,"desc")||"").trim(),
+        project:priTxt(priGet(r,"project")),branch:branchCode(priGet(r,"branch")),
+        qty:priNum(priGet(r,"qty")),price:priNum(priGet(r,"price")),
+        release:xlDate(priGet(r,"release")),endDate:xlDate(priGet(r,"endDate")),
+        statusRaw:String(priGet(r,"status")||"").trim(),
         note:String(xlGet(r,...PRI_NOTE_H)||"").trim(),row:i+2,ops:[],sns:[]};
       wos.set(wo,o);
     }
@@ -12261,15 +12277,15 @@ function priScan(rows,serialRows){
     // every operation row and only some of them carry it — so the first row that
     // has one wins rather than only the first row of the group.
     if(!o.note){const n=String(xlGet(r,...PRI_NOTE_H)||"").trim();if(n)o.note=n}
-    const name=String(xlGet(r,PRI_H.opDesc)||"").trim();
-    const code=String(xlGet(r,PRI_H.op)||"").trim();
-    const wc=String(xlGet(r,PRI_H.wc)||"").trim();
-    const seq=priNum(xlGet(r,PRI_H.seq,PRI_H.seqAlt));
+    const name=String(priGet(r,"opDesc")||"").trim();
+    const code=String(priGet(r,"op")||"").trim();
+    const wc=String(priGet(r,"wc")||"").trim();
+    const seq=priNum(priGet(r,"seq"));
     // The מק"ט-level standard is the one the app stores; the פק"ע-level column
     // only fills in where Priority has no standard for the part itself.
-    const std=priNum(xlGet(r,PRI_H.stdPn))||priNum(xlGet(r,PRI_H.stdWo));
+    const std=priNum(priGet(r,"stdPn"))||priNum(priGet(r,"stdWo"));
     o.ops.push({key:xlNorm(name),name,seq,std,code,wc,
-      reported:priNum(xlGet(r,PRI_H.reported)),remain:priNum(xlGet(r,PRI_H.remain))});
+      reported:priNum(priGet(r,"reported")),remain:priNum(priGet(r,"remain"))});
     if(!name)return;
     let op=ops.get(xlNorm(name));
     if(!op){op={key:xlNorm(name),name,count:0,seqs:[],codes:new Set(),centers:new Set()};ops.set(op.key,op)}
@@ -12831,7 +12847,7 @@ function doImport(file,ctx,cb){
       if(!wo){skipped++;return}
       if(oMap[wo]){issues.push({level:"warn",msg:`שורה ${i+2}: פק"ע ${wo} מופיעה יותר מפעם אחת — נלקחה השורה הראשונה`});return}
       if(isCocStatus(xlGet(r,"סטטוס",PRI_H.status,"status"))){cocSkipped++;return}
-      const pName=String(xlGet(r,"פרויקט","project")||"").trim();
+      const pName=String(xlGet(r,"פרויקט","פרוייקט","project")||"").trim();
       const pid=pName?projByName.get(xlNorm(pName))||"":"";
       if(pName&&!pid)issues.push({level:"warn",msg:`פק"ע ${wo}: הפרויקט ״${pName}״ לא קיים במערכת — הפק"ע תיובא ללא פרויקט`});
       const stRaw=String(xlGet(r,"שלבים","stages")||"").trim();
@@ -12844,13 +12860,13 @@ function doImport(file,ctx,cb){
         if(ids.length)stageIds=allStageIds.filter(id=>ids.includes(id));
         else issues.push({level:"warn",msg:`פק"ע ${wo}: לא זוהה אף שלב — שויכו כל השלבים`});
       }
-      const qty=xlNum(xlGet(r,"כמות","כמות מוזמנת","qty"));
+      const qty=xlNum(xlGet(r,"כמות","כמות מוזמנת","כ. הפק'ע","qty"));
       if(!qty)issues.push({level:"warn",msg:`פק"ע ${wo}: לא צוינה כמות`});
       oMap[wo]={id:uid(),woNumber:wo,branch:branchCode(xlGet(r,"סניף","מספר סניף","branch")),
         pn:String(xlGet(r,'P/N (מק"ט)',"P/N","PN",'מק"ט',"מקט")||"").trim(),
-        description:String(xlGet(r,"תיאור","תיאור מוצר","שם מוצר","description")||"").trim(),qty,
+        description:String(xlGet(r,"תיאור","תיאור מוצר","תאור מוצר","שם מוצר","description")||"").trim(),qty,
         unitPrice:xlNum(xlGet(r,"מחיר ליחידה","מחיר",PRI_H.price,"מחיר יחידה","unit price")),projectId:pid,
-        receivedDate:xlDate(xlGet(r,"תאריך קבלה","תאריך שחרור","received")),
+        receivedDate:xlDate(xlGet(r,"תאריך קבלה","תאריך שחרור","ת. שחרור","received")),
         targetDate:xlDate(xlGet(r,"יעד אספקה","יעד","ת. סיום יצור","תאריך סיום","target")),
         // Unknown wording (a Priority status pasted into the template, say) is
         // still placed by meaning rather than defaulting everything to "open".
@@ -13500,7 +13516,7 @@ function ExcelTab({orders,projects,stages,stageBlocks,workLogs,users,customTasks
             <div style={{fontWeight:700,color:"#60a5fa",marginBottom:4}}>🔗 זוהה דוח פק"ע מ-Priority</div>
             <div style={{fontSize:12,color:"var(--c-muted)",lineHeight:1.6}}>
               {pri.scan.rows} שורות פעולה קופלו ל-{pri.scan.wos.length} פקודות עבודה.
-              כל פק"ע מקבלת רק את השלבים שלה, לפי הסדר של עמודת ״שלב בפק"ע״ (10, 20, 30 …) — יש פק"ע עם שלב אחד ויש עם עשרים.
+              כל פק"ע מקבלת רק את השלבים שלה, לפי הסדר של עמודת ״שלב״ (10, 20, 30 …) — יש פק"ע עם שלב אחד ויש עם עשרים.
               זמני התקן שבקובץ נשמרים כזמן תקן למק"ט{pri.scan.serials.rows>0?`, ו-${pri.scan.serials.rows.toLocaleString()} הסידוריים מהגיליון השני נכנסים לפק"ע שלהם`:""}.
             </div>
           </div>
